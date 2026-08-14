@@ -67,6 +67,16 @@ dsh-agy import <file>  # import agy auth.json or credential blob (--blob)
 dsh-agy logout         # remove account
 ```
 
+## CLI reference
+
+| Command | Options | Description |
+|---|---|---|
+| `dsh-agy login` | `--headless` — print the auth URL and wait for a pasted redirect URL<br>`--blob` — print a paste-credential blob instead of storing the account<br>`--port <n>` — loopback callback port (default `51121`)<br>`--project <id>` — bind the login to a specific project<br>`--timeout <ms>` — callback timeout (default `300000`) | Interactive Google OAuth |
+| `dsh-agy status` | — | List accounts + per-model quota summary |
+| `dsh-agy import <file>` | `--blob` — the pasted value is a credential blob<br>`--email <email>` — set the account email (skips userinfo verification)<br>`--overwrite` — replace an existing account with the same email | Import agy auth.json or credential blob |
+| `dsh-agy verify` | `--index <n>` — verify one account by index (default: all) | Refresh + health check |
+| `dsh-agy logout` | `--index <n>` — account index (default: active)<br>`--email <email>` — account email | Remove an account |
+
 ### Path C: Local Development & Link
 
 ```sh
