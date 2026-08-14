@@ -145,6 +145,27 @@ export async function parseImportSource(source: unknown, kind: 'json' | 'blob'):
   return enrichWithAntigravityBackend(parseAndValidateAgyToken(source))
 }
 
+/** Batch-import many sources (CLI multi-file / web multi-line paste). Each item
+ * is independent: a failure is collected, the rest still import. */
+export async function importManySources(
+  items: Array<{ source: unknown; kind: 'json' | 'blob' }>,
+  store: AccountStore,
+  options: { email?: string; overwriteExisting?: boolean } = {},
+): Promise<{ imported: number; replaced: number; errors: string[] }> {
+  const result = { imported: 0, replaced: 0, errors: [] as string[] }
+  for (const item of items) {
+    try {
+      const enriched = await parseImportSource(item.source, item.kind)
+      const { created } = await upsertImportedAccount(store, enriched, options)
+      if (created) result.imported++
+      else result.replaced++
+    } catch (error) {
+      result.errors.push(error instanceof Error ? error.message : String(error))
+    }
+  }
+  return result
+}
+
 /** Upsert the account into the store, deduping by email. */
 export async function upsertImportedAccount(
   store: AccountStore,

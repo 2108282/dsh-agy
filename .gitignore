@@ -10,3 +10,6 @@ tests/fixtures/recorded/
 
 # npm lockfile is not used — pnpm-lock.yaml is the source of truth
 package-lock.json
+
+# editor/agent tooling
+.serena/

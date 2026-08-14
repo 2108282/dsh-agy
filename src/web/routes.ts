@@ -14,7 +14,7 @@ import type { AgySessionManager } from '../session.ts'
 import { authorizeAntigravity } from '../oauth/authorize.ts'
 import { exchangeAntigravity } from '../oauth/exchange.ts'
 import { decodeCredentialBlob } from '../oauth/blob.ts'
-import { parseImportSource, upsertImportedAccount } from '../cli/import.ts'
+import { importManySources, upsertImportedAccount } from '../cli/import.ts'
 import { generateFingerprint, recordFingerprintVersion } from '../runtime/fingerprint.ts'
 import { resolveAntigravityVersionBounded } from '../runtime/version.ts'
 import { renderDashboardHtml, renderCallbackHtml } from './page.ts'
@@ -177,9 +177,32 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     try {
       const body = await readJson(req)
       const kind = body.kind === 'blob' ? 'blob' : 'json'
-      const enriched = await parseImportSource(body.source, kind)
-      const { account } = await upsertImportedAccount(store, enriched, { overwriteExisting: true })
-      sendJson(res, 200, { email: account.email ?? null, projectId: enriched.projectId })
+      // Batch mode: `sources` is an array of strings (multi-line paste / bulk files);
+      // single mode: `source` (backwards compatible).
+      const sources: unknown[] = Array.isArray(body.sources)
+        ? body.sources
+        : body.source !== undefined ? [body.source] : []
+      if (sources.length === 0) throw new Error('nothing to import')
+      const result = await importManySources(
+        sources.map((source) => ({ source, kind })),
+        store,
+        { overwriteExisting: true },
+      )
+      sendJson(res, 200, result)
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  const handleExportAll = async (_req: IncomingMessage, res: ServerResponse) => {
+    try {
+      const storage = await store.load()
+      const blobs: Array<{ index: number; blob: string }> = []
+      for (let index = 0; index < storage.accounts.length; index++) {
+        const result = await sessions.exportBlob(index)
+        if (result.blob) blobs.push({ index, blob: result.blob })
+      }
+      sendJson(res, 200, { blobs })
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
     }
@@ -316,6 +339,7 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     } },
     { kind: 'exact', path: '/agy/api/auth-url', handler: async (_req, res) => { await handleAuthUrl(res) } },
     { kind: 'exact', path: '/agy/api/import', handler: handleImport },
+    { kind: 'exact', path: '/agy/api/export-all', handler: handleExportAll },
     { kind: 'exact', path: '/agy/api/verify', handler: handleVerify },
     { kind: 'exact', path: '/agy/api/delete', handler: handleDelete },
     { kind: 'exact', path: '/agy/api/activate', handler: handleActivate },

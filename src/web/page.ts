@@ -547,15 +547,19 @@ export function renderDashboardHtml(): string {
         <span id="txt-import-title">Import Credentials</span>
       </div>
       <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:8px;" id="txt-import-desc">
-        Paste an agy auth.json token document, or a credential blob (from dsh-agy login --blob):
+        Paste an agy auth.json token document, or a credential blob (from dsh-agy login --blob). Paste multiple blobs, one per line, for a batch import:
       </p>
-      <textarea id="input-import" class="import-textarea" placeholder='{"token":{"access_token":"...","refresh_token":"..."}} or dsh-agy-cred-v1....'></textarea>
+      <textarea id="input-import" class="import-textarea" placeholder='{"token":{"access_token":"...","refresh_token":"..."}} or dsh-agy-cred-v1.... (one blob per line for batch)'></textarea>
       <div style="display:flex;gap:8px;">
         <button id="btn-import-json" class="btn btn-secondary">
           <span id="txt-import-json">Import JSON</span>
         </button>
         <button id="btn-import-blob" class="btn btn-secondary">
           <span id="txt-import-blob">Import Blob</span>
+        </button>
+        <span style="flex:1"></span>
+        <button id="btn-export-all" class="btn btn-secondary">
+          <span id="txt-export-all">Export All</span>
         </button>
       </div>
     </section>
@@ -660,6 +664,7 @@ export function renderDashboardHtml(): string {
       $('txt-import-desc').textContent = t('importDesc');
       $('txt-import-json').textContent = t('importJson');
       $('txt-import-blob').textContent = t('importBlobBtn');
+      $('txt-export-all').textContent = t('exportAll');
       $('input-import').placeholder = t('importPlaceholder');
     }
 
@@ -951,25 +956,34 @@ export function renderDashboardHtml(): string {
       } catch (e) { toast(String(e), 'error'); }
     };
 
-    $('btn-import-json').onclick = async () => {
-      const source = $('input-import').value.trim();
-      if (!source) return;
+    const importLines = () => $('input-import').value.split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const doImport = async (kind) => {
+      const sources = importLines();
+      if (sources.length === 0) return;
       try {
-        const r = await api('/import', { method: 'POST', body: JSON.stringify({ kind: 'json', source }) });
-        toast(t('importSuccess') + (r.email || '(no email)'), 'success');
+        const r = await api('/import', { method: 'POST', body: JSON.stringify({ kind, sources }) });
+        if (r.errors && r.errors.length > 0) toast(r.errors[0], 'error');
+        toast(t('importBatchResult').replace('{imported}', r.imported).replace('{replaced}', r.replaced), 'success');
         $('input-import').value = '';
         render();
       } catch (e) { toast(String(e), 'error'); }
     };
 
-    $('btn-import-blob').onclick = async () => {
-      const source = $('input-import').value.trim();
-      if (!source) return;
+    $('btn-import-json').onclick = () => doImport('json');
+    $('btn-import-blob').onclick = () => doImport('blob');
+
+    const btnExportAll = $('btn-export-all');
+    if (btnExportAll) btnExportAll.onclick = async () => {
       try {
-        const r = await api('/import', { method: 'POST', body: JSON.stringify({ kind: 'blob', source }) });
-        toast(t('importSuccess') + (r.email || '(no email)'), 'success');
-        $('input-import').value = '';
-        render();
+        const r = await api('/export-all', { method: 'POST' });
+        if (!r.blobs || r.blobs.length === 0) { toast('No accounts to export', 'info'); return; }
+        const text = r.blobs.map((b) => b.blob).join('\n');
+        copyToClipboard(text, t('copyAllMsg'));
+        $('diagnostics-panel').open = true;
+        $('diagnostics-output').textContent = text;
       } catch (e) { toast(String(e), 'error'); }
     };
 

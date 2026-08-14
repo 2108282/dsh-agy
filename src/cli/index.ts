@@ -5,7 +5,8 @@
  */
 
 import { Command } from 'commander'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 import { authorizeAntigravity } from '../oauth/authorize.ts'
@@ -17,7 +18,7 @@ import type { SecretCodec } from '../store/keyring.ts'
 import { JsonAccountStore } from '../store/accounts.ts'
 import { AgySessionManager } from '../session.ts'
 import { startCallbackServer, openBrowser } from './callback-server.ts'
-import { parseImportSource, upsertImportedAccount } from './import.ts'
+import { importManySources, upsertImportedAccount } from './import.ts'
 
 /** Package version, read from the shipped package.json — never hard-coded twice. */
 const { version: PACKAGE_VERSION } = JSON.parse(
@@ -191,22 +192,56 @@ async function statusCommand() {
   }
 }
 
-async function importCommand(options: { blob: boolean; file?: string; email?: string; overwrite: boolean }) {
+async function importCommand(options: { blob: boolean; files?: string[]; email?: string; overwrite: boolean }) {
   const store = createStore()
-  let source: unknown
-  if (options.file) {
-    source = JSON.parse(readFileSync(options.file, 'utf8')) as unknown
+  let items: Array<{ source: unknown; kind: 'json' | 'blob' }>
+  if (options.files && options.files.length > 0) {
+    items = options.files.map((file) => {
+      const raw = readFileSync(file, 'utf8')
+      return { source: options.blob ? raw : (JSON.parse(raw) as unknown), kind: options.blob ? 'blob' : 'json' }
+    })
   } else {
     const pasted = await ask('Paste the agy token JSON (or blob with --blob): ')
-    source = pasted
+    items = [{ source: pasted, kind: options.blob ? 'blob' : 'json' }]
   }
-  const kind = options.blob ? 'blob' : 'json'
-  const enriched = await parseImportSource(source, kind)
-  const { account, created } = await upsertImportedAccount(store, enriched, {
+  const result = await importManySources(items, store, {
     email: options.email,
     overwriteExisting: options.overwrite,
   })
-  console.log(`${created ? 'Imported' : 'Replaced'} account: ${account.email ?? '(no email)'}${enriched.projectId ? ` (project: ${enriched.projectId})` : ''}`)
+  console.log(`Imported ${result.imported}, replaced ${result.replaced}${result.errors.length > 0 ? `, ${result.errors.length} failed` : ''}`)
+  for (const error of result.errors) console.log(`  ! ${error}`)
+}
+
+async function exportCommand(options: { index?: string; out?: string }) {
+  const store = createReadOnlyStoreOrExit()
+  const sessions = new AgySessionManager({ store })
+  const storage = await store.load()
+  const indices = options.index !== undefined
+    ? [Number(options.index)]
+    : storage.accounts.map((_, i) => i)
+
+  let exported = 0
+  for (const index of indices) {
+    const account = storage.accounts[index]
+    if (!account) {
+      console.log(`[${index}] not found`)
+      continue
+    }
+    const result = await sessions.exportBlob(index)
+    if (!result.blob) {
+      console.log(`[${index}] ${account.email ?? ''} — FAILED: ${result.error}`)
+      continue
+    }
+    if (options.out) {
+      const file = join(options.out, `dsh-agy-${index}.blob`)
+      writeFileSync(file, result.blob + '\n')
+      console.log(`[${index}] ${account.email ?? ''} — wrote ${file}`)
+    } else {
+      console.log(result.blob)
+    }
+    exported++
+  }
+  if (!options.out) console.log(`\n${exported} blob(s) exported — one line each, paste into a remote import`)
 }
 
 async function verifyCommand(options: { index?: string }) {
@@ -277,13 +312,22 @@ export function createProgram(): Command {
 
   program
     .command('import')
-    .description('Import an agy token file or paste credentials')
-    .argument('[file]', 'path to an agy auth.json token file')
+    .description('Import agy token files or paste credentials')
+    .argument('[files...]', 'paths to agy auth.json token files (multiple allowed)')
     .option('--blob', 'the pasted value is a credential blob', false)
     .option('--email <email>', 'account email (skips userinfo verification)')
     .option('--overwrite', 'replace an existing account with the same email', false)
-    .action(async (file: string | undefined, options: { blob: boolean; email?: string; overwrite: boolean }) => {
-      await importCommand({ ...options, file })
+    .action(async (files: string[] | undefined, options: { blob: boolean; email?: string; overwrite: boolean }) => {
+      await importCommand({ ...options, files })
+    })
+
+  program
+    .command('export')
+    .description('Export account credentials as paste blobs')
+    .option('--index <n>', 'export one account by index; default all')
+    .option('--out <dir>', 'write one dsh-agy-<index>.blob file per account into this directory (default: print to stdout)')
+    .action(async (options: { index?: string; out?: string }) => {
+      await exportCommand(options)
     })
 
   program

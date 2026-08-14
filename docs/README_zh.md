@@ -67,7 +67,8 @@ dsh-agy logout         # 删除账号
 |---|---|---|
 | `dsh-agy login` | `--headless` — 打印授权 URL，等待粘贴重定向 URL<br>`--blob` — 输出凭据 blob 而不保存账号<br>`--port <n>` — loopback 回调端口（默认 `51121`）<br>`--project <id>` — 绑定登录到指定项目<br>`--timeout <ms>` — 回调超时（默认 `300000`） | 交互式 Google OAuth |
 | `dsh-agy status` | — | 账号列表 + 每模型配额摘要 |
-| `dsh-agy import <file>` | `--blob` — 输入是凭据 blob<br>`--email <email>` — 指定邮箱（跳过 userinfo 校验）<br>`--overwrite` — 覆盖同邮箱的已有账号 | 导入 agy auth.json 或凭据 blob |
+| `dsh-agy import <文件...>` | `--blob` — 输入是凭据 blob<br>`--email <email>` — 指定邮箱（跳过 userinfo 校验）<br>`--overwrite` — 覆盖同邮箱的已有账号 | 导入 agy auth.json 文件或凭据 blob（多文件 / 多行粘贴 = 批量导入） |
+| `dsh-agy export` | `--index <n>` — 只导出指定账号（默认全部）<br>`--out <dir>` — 每账号写一个 `dsh-agy-<index>.blob` 文件（默认输出到 stdout，每行一个 blob） | 将账号凭据导出为粘贴 blob |
 | `dsh-agy verify` | `--index <n>` — 只验证指定账号（默认全部） | refresh + 健康检查 |
 | `dsh-agy logout` | `--index <n>` — 账号索引（默认当前 active）<br>`--email <email>` — 账号邮箱 | 删除账号 |
 

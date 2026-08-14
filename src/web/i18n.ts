@@ -41,6 +41,9 @@ export interface I18nStrings {
   importJson: string
   importBlobBtn: string
   importSuccess: string
+  exportAll: string
+  importBatchResult: string
+  copyAllMsg: string
   fingerprintTitle: string
   fingerprintDevice: string
   fingerprintUserAgent: string
@@ -97,11 +100,14 @@ export const I18N_DICT: { en: I18nStrings; zh: I18nStrings } = {
     testing: 'Testing...',
     copied: 'Copied to clipboard!',
     importTitle: 'Import Credentials',
-    importDesc: 'Paste an agy auth.json token document, or a credential blob (from dsh-agy login --blob):',
-    importPlaceholder: '{"token":{"access_token":"...","refresh_token":"..."}} or dsh-agy-cred-v1....',
+    importDesc: 'Paste an agy auth.json token document, or a credential blob (from dsh-agy login --blob). Paste multiple blobs, one per line, for a batch import:',
+    importPlaceholder: '{"token":{"access_token":"...","refresh_token":"..."}} or dsh-agy-cred-v1.... (one blob per line for batch)',
     importJson: 'Import JSON',
     importBlobBtn: 'Import Blob',
     importSuccess: 'Successfully imported account: ',
+    exportAll: 'Export All',
+    importBatchResult: 'Imported {imported}, replaced {replaced}',
+    copyAllMsg: 'All credential blobs exported. Copied to clipboard!',
     fingerprintTitle: 'Device Fingerprint',
     fingerprintDevice: 'Device ID',
     fingerprintUserAgent: 'User Agent',
@@ -156,11 +162,14 @@ export const I18N_DICT: { en: I18nStrings; zh: I18nStrings } = {
     testing: '测试中...',
     copied: '已复制到剪贴板！',
     importTitle: '导入凭据',
-    importDesc: '粘贴 agy auth.json 文件内容，或输入凭据 blob（来自 dsh-agy login --blob）：',
-    importPlaceholder: '{"token":{"access_token":"...","refresh_token":"..."}} 或 dsh-agy-cred-v1....',
+    importDesc: '粘贴 agy auth.json 文件内容，或输入凭据 blob（来自 dsh-agy login --blob）。多个 blob 每行一个即可批量导入：',
+    importPlaceholder: '{"token":{"access_token":"...","refresh_token":"..."}} 或 dsh-agy-cred-v1....（批量：每行一个 blob）',
     importJson: '导入 JSON',
     importBlobBtn: '导入 Blob',
     importSuccess: '成功导入账号：',
+    exportAll: '导出全部',
+    importBatchResult: '导入 {imported} 个，替换 {replaced} 个',
+    copyAllMsg: '全部凭据 Blob 已导出并复制到剪贴板！',
     fingerprintTitle: '设备指纹信息',
     fingerprintDevice: '设备 ID (DeviceId)',
     fingerprintUserAgent: '用户代理 (User-Agent)',
