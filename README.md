@@ -65,7 +65,7 @@ cd dsh-agy && pnpm install && pnpm run build
 dsh plugin --profile web link .
 ```
 
-Requires Node >= 20.
+Requires Node >= 22.
 
 ## Uninstall
 
