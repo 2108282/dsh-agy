@@ -40,8 +40,14 @@ jobs:
           TARBALL_PATH="$(pwd)/$PKG"
           mkdir -p /tmp/dsh-agy-smoke && cd /tmp/dsh-agy-smoke
           npm init -y -s
+          # CLI must work with zero @deepseek-ai peer packages installed
+          # (peerDependenciesMeta optional contract)
           npm i --omit=peer "$TARBALL_PATH"
           ./node_modules/.bin/dsh-agy --help > /dev/null
+          # plugin entrypoints need the peer packages (a real DSH profile provides them)
+          npm i "$TARBALL_PATH" \
+            "@deepseek-ai/dsh-llm@$(node -p "require('$GITHUB_WORKSPACE/package.json').peerDependencies['@deepseek-ai/dsh-llm']")" \
+            "@deepseek-ai/cordis@$(node -p "require('$GITHUB_WORKSPACE/package.json').peerDependencies['@deepseek-ai/cordis']")"
           node -e "import('dsh-agy').then(m=>{if(!m.apply)process.exit(1)})"
           node -e "import('dsh-agy/web').then(m=>{if(!m.apply)process.exit(1)})"
         shell: bash
