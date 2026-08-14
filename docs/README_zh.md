@@ -1,5 +1,8 @@
 # dsh-agy（中文文档）
 
+[![CI](https://github.com/chaos-03x/dsh-agy/actions/workflows/ci.yml/badge.svg)](https://github.com/chaos-03x/dsh-agy/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/dsh-agy)](https://www.npmjs.com/package/dsh-agy)
+
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供 Google Antigravity (agy) 接入：
 OAuth 认证、多账号池 + 自动 429 轮换、设备指纹伪装，以及 CLI 与 Web 双管理入口。
 

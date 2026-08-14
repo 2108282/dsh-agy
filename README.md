@@ -1,5 +1,8 @@
 # dsh-agy
 
+[![CI](https://github.com/chaos-03x/dsh-agy/actions/workflows/ci.yml/badge.svg)](https://github.com/chaos-03x/dsh-agy/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/dsh-agy)](https://www.npmjs.com/package/dsh-agy)
+
 Google Antigravity (agy) access for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness):
 OAuth authentication, a multi-account pool with automatic 429 rotation, device
 fingerprinting, and both CLI and web management.
