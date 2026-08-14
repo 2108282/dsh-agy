@@ -15,6 +15,12 @@ OAuth 认证、多账号池 + 自动 429 轮换、设备指纹伪装，以及 CL
   凭据导出/导入、指纹管理。
 - **CLI**: `dsh-agy login|status|import|verify|logout`，独立于 harness 运行。
 
+## 效果演示
+
+DSH Web 内的 `/agy` 仪表盘——账号卡片、每模型配额条、单模型测试：
+
+![dsh-agy 仪表盘](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/screenshot_zh.png)
+
 ## 快速开始
 
 ### 路径 A：DSH Web 用户（推荐：全流程纯 Web UI，0 CLI 命令）

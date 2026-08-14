@@ -21,6 +21,13 @@ fingerprinting, and both CLI and web management.
 - **CLI**: `dsh-agy login|status|import|verify|logout` works standalone, with or
   without a harness.
 
+## Screenshots
+
+The `/agy` dashboard inside DSH Web — account cards, per-model quota bars, and
+one-shot model tests:
+
+![dsh-agy dashboard](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/screenshot_en.png)
+
 ## Quickstart
 
 ### Path A: DSH Web GUI Users (Recommended — 100% Web UI, zero CLI commands)
