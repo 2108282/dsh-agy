@@ -89,7 +89,9 @@ describe('encryption round trip', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('fails loud when the file mode is not 0600', async () => {
+  // POSIX owner-only enforcement is skipped on win32 by design (keyring.ts);
+  // Windows mode bits never report 0600, so the rejection cannot happen there.
+  it.skipIf(process.platform === 'win32')('fails loud when the file mode is not 0600', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
     const file = join(dir, 'agy-accounts.json')
     writeFileSync(file, '{"version":4,"accounts":[],"activeIndex":0}\n', { mode: 0o644 })
@@ -115,9 +117,11 @@ describe('encryption round trip', () => {
     })
     const storage = await store.load()
     expect(storage.accounts[0]?.email).toBe('first@x')
-    // file must be owner-only
-    const mode = (await import('node:fs')).statSync(file).mode & 0o777
-    expect(mode).toBe(0o600)
+    // file must be owner-only (POSIX only; skipped on win32 by design)
+    if (process.platform !== 'win32') {
+      const mode = (await import('node:fs')).statSync(file).mode & 0o777
+      expect(mode).toBe(0o600)
+    }
     rmSync(dir, { recursive: true, force: true })
   })
 })
@@ -154,8 +158,10 @@ describe('keyring persistMasterKey', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
     persistMasterKey(dir, 'k1')
     expect(loadMasterKey(dir)).toBe('k1')
-    const mode = (await import('node:fs')).statSync(join(dir, '.credentials.yaml')).mode & 0o777
-    expect(mode).toBe(0o600)
+    if (process.platform !== 'win32') {
+      const mode = (await import('node:fs')).statSync(join(dir, '.credentials.yaml')).mode & 0o777
+      expect(mode).toBe(0o600)
+    }
     rmSync(dir, { recursive: true, force: true })
   })
 })
