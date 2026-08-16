@@ -137,6 +137,7 @@ describe('translate', () => {
             mode: { type: 'string', enum: ['fast', 'slow'] },
           },
           required: ['name'],
+          additionalProperties: false,
         },
       }],
     }])
@@ -212,9 +213,13 @@ describe('translate', () => {
     for (const nested of ['items']) {
       if (nested in node) assertUpstreamContract(node[nested], `${path}.${nested}`)
     }
-    // additionalProperties is stripped entirely: upstream rejects it with
-    // "Unknown name" (verified by the OmniRoute gateway, #1421).
-    expect('additionalProperties' in node, `${path}.additionalProperties must be stripped`).toBe(false)
+    // additionalProperties accepts a boolean (false = no extra keys) or a
+    // nested schema — live-verified accepted by the Antigravity upstream.
+    if ('additionalProperties' in node) {
+      const ap = node.additionalProperties
+      if (typeof ap === 'object' && ap !== null) assertUpstreamContract(ap, `${path}.additionalProperties`)
+      else expect(typeof ap, `${path}.additionalProperties`).toBe('boolean')
+    }
   }
 
   // Real-world corpus: trimmed from GitHub MCP server `issue_write` — the #4
@@ -265,6 +270,48 @@ describe('translate', () => {
       const body = toAgyRequestBody(generateOptions({ tools: [tool] }), {})
       assertUpstreamContract(body.request.tools![0].functionDeclarations[0].parameters)
     }
+  })
+
+  it('sanitizes tool names to the upstream charset and dedupes', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [
+          { name: 'mcp__github__issue_write', description: 'd', parameters: { type: 'object', properties: {} } },
+          // illegal chars -> underscores; overlong -> hashed tail
+          { name: 'my tool.with/slashes!', description: 'd', parameters: { type: 'object', properties: {} } },
+          { name: 'x'.repeat(120), description: 'd', parameters: { type: 'object', properties: {} } },
+        ],
+      }),
+      {},
+    )
+    const names = body.request.tools![0].functionDeclarations.map((t) => t.name)
+    expect(names[0]).toBe('mcp__github__issue_write')
+    expect(names[1]).toMatch(/^my_tool_with_slashes_$/)
+    expect(names[2]!.length).toBeLessThanOrEqual(64)
+    expect(new Set(names).size).toBe(names.length)
+  })
+
+  it('excludes builtin Gemini tool names from functionDeclarations', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [
+          { name: 'web_search', description: 'd', parameters: { type: 'object', properties: {} } },
+          { name: 'google_search', description: 'd', parameters: { type: 'object', properties: {} } },
+          { name: 'mcp__github__issue_write', description: 'd', parameters: { type: 'object', properties: {} } },
+        ],
+      }),
+      {},
+    )
+    const names = body.request.tools![0].functionDeclarations.map((t) => t.name)
+    expect(names).toEqual(['mcp__github__issue_write'])
+  })
+
+  it('returns no tools block when all tools are builtin or sanitized away', () => {
+    const body = toAgyRequestBody(
+      generateOptions({ tools: [{ name: 'web_search', description: 'd', parameters: { type: 'object' } }] }),
+      {},
+    )
+    expect(body.request.tools).toBeUndefined()
   })
 
   it('falls back to empty args object when tool-call arguments are malformed', () => {

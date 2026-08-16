@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AgySessionManager, impersonationHeadersFor } from '../src/session.ts'
+import { AgySessionManager, impersonationHeadersFor, SESSION_AFFINITY_WINDOW_MS } from '../src/session.ts'
 import { InMemoryAccountStore } from '../src/store/accounts.ts'
 import type { ManagedAccount } from '../src/types.ts'
 
@@ -66,6 +66,41 @@ describe('AgySessionManager', () => {
     expect(rotations).toEqual(['0->1'])
     expect(after.accounts[0]!.fingerprint).toBeDefined()
     expect(after.accounts[0]!.fingerprintHistory).toHaveLength(1)
+  })
+
+  it('keeps session affinity within the window and re-balances after it', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // First pick lands on the active account (0) and pins it.
+    const first = await sessions.getSession()
+    expect(first!.index).toBe(0)
+
+    // Another turn in the same conversation: still account 0, even though the
+    // shared activeIndex moved elsewhere in the meantime.
+    await store.mutate((s) => { s.activeIndex = 1 })
+    const second = await sessions.getSession()
+    expect(second!.index).toBe(0)
+
+    // After the affinity window, the pool re-balances to the active index.
+    vi.setSystemTime(Date.now() + SESSION_AFFINITY_WINDOW_MS + 1)
+    const third = await sessions.getSession()
+    expect(third!.index).toBe(1)
+    vi.useRealTimers()
+  })
+
+  it('drops session affinity when the pinned account rotates', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    const first = await sessions.getSession()
+    expect(first!.index).toBe(0)
+    await sessions.reportFailure('rate-limit', first!)
+    // Rotation cleared the affinity: next pick follows the new active index.
+    const next = await sessions.getSession()
+    expect(next!.index).toBe(1)
   })
 
   it('regenerates the fingerprint on repeated rate-limits (bounded history)', async () => {

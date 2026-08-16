@@ -40,8 +40,9 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 
 后端把工具 `parameters` 按严格的 protobuf `Schema` 解析：未知关键字（`$schema`、`propertyNames`、`pattern`、`minLength`、……）与非法值形状（`enum: [true]` → TYPE_STRING 400；`type: ["string","number"]` → Unknown name "type" 400）都会使整个请求失败。清洗器（`src/adapter/translate.ts` 的 `sanitizeToolSchema`）执行的是完整契约，而非逐关键字打补丁：
 
-- **关键字** — 只保留 `type, format, title, description, nullable, items, enum, default, properties, required`；`additionalProperties` 整体剥离（上游以 `Unknown name` 拒绝，OmniRoute 网关实证）。
-- **值** — `type` 必须是单个枚举字符串（union 数组归一化为首个非 `null` 类型，`"null"` 对应 `nullable`）；`enum` 项必须是字符串（非字符串项被过滤，空 enum 整体省略）；`properties` 是 name→schema 映射；`items` 是嵌套 schema；`required` 是字符串数组。
+- **关键字** — 只保留 `type, format, title, description, nullable, items, enum, default, properties, required, additionalProperties`。
+- **值** — `type` 必须是单个枚举字符串（union 数组归一化为首个非 `null` 类型，`"null"` 对应 `nullable`）；`enum` 项必须是字符串（非字符串项被过滤，空 enum 整体省略）；`properties` 是 name→schema 映射；`items` 是嵌套 schema；`additionalProperties` 接受嵌套 schema 或布尔（`false` = 禁止额外键；Antigravity 上游活体验证接受——OmniRoute 剥离仅因公共 Gemini API 拒绝）；`required` 是字符串数组。
+- **工具名** — `functionDeclarations[].name` 只接受 `[a-zA-Z0-9_]` 且 ≤64 字符（MCP 工具名任意；清洗，超长/重名追加 sha256 尾）。内置 Gemini 工具名（`google_search`、`web_search`、`search_web`、`googleSearch`）整体剔除（上游将其视为原生工具）。
 - **测试** — `tests/adapter.test.ts` 的 `assertUpstreamContract` 递归断言清洗后输出的每个关键字与值形状均合规，任何新未知关键字或非法值形状都会在 CI 失败（不必等用户撞 400）；每个已知的 400 形状都以 fixture 钉住。真实 MCP schema（GitHub MCP `issue_write` 正是 #4 触发源：boolean enum + union type）应进入语料，以暴露手写测试看不到的形状。
 
 ## 4. OAuth 细节
@@ -62,7 +63,7 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 - **隐式缓存上报（实测确认）**：`usageMetadata.cachedContentTokenCount` 并非总是出现——只有缓存已预热且前缀足够大时才上报（gemini 系 ~16k+ 前缀、约第 3 个请求起命中；claude 系预热更快、可第 2 个请求即命中且命中率 ~99%）。单轮/小前缀请求一律缺失该字段，不代表模型不支持缓存。实测脚本 `scripts/probe-cache-context.mts`（三模型均复现：gemini-3.7-flash-tiered / gemini-3-flash-agent / claude-opus-4-6-thinking）。
 - **缓存键 = 前缀内容，与 sessionId 无关（实测确认）**：`scripts/probe-cache-loss.mts` 用与先前 probe 逐字节相同的 20.5k system 前缀 + 全新 sessionId，第一轮即命中 20447 tokens——缓存按前缀哈希跨 session 共享。DSH 新对话首轮 0% 的真实原因是 system 前缀 ~13.5k < 16k 阈值（从未被缓存）且各对话历史不同，不是 sessionId 隔离。
 - **缓存写入异步、滞后约 2 轮、按块批量（实测确认，命中率上限的根因）**：请求体逐字节前缀完全一致（append-only 构造）时，`cached` 仍每轮少于上一轮完整 prompt——命中前缀以"上一轮新增块"为单位跳升（实测每次恰好 +4086 = 一个填充块），写入滞后约 2 轮；稳态每轮未命中 ≈ 1.5-2× 每轮新增 → 命中率上限 ~88-92%。对比 DeepSeek 的即时完整写入（每轮未命中 ≈ 仅新增 → ~99%），这是 agy 命中率到不了 99% 的根因；上游行为，不可控。
-- 错误分类输入：HTTP 状态 + `Retry-After` / resetTime / 错误 JSON 形状 → runtime/classify。
+- 错误分类输入：HTTP 状态 + `Retry-After` / resetTime / 错误 JSON 形状 → runtime/classify。通用 400 归为 `request-error`（永久性——重试只是重发同一份坏 payload，不做轮换）；仅容量类 400（上下文溢出 / 模型不可用）为 transient。
 
 ## 6. 模型集
 

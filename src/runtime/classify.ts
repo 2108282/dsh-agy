@@ -132,7 +132,23 @@ export function classifyHttpError(
   if (status >= 500) {
     return { kind: 'transient', status, retryAfterMs, message: bodyText ? bodyText.slice(0, 200) : undefined }
   }
-  // 400-range others: request-level errors, no rotation semantics.
+  if (status === 400) {
+    // A 400 is a request-construction error (permanent — retrying sends the
+    // same broken payload). Only capacity-style phrases are recoverable
+    // (context overflow / model unavailable), mirroring OmniRoute's
+    // classifyProviderError: everything else surfaces as a terminal
+    // request-error so rotation does not waste attempts.
+    const text = (bodyText ?? '').toLowerCase()
+    const recoverable = (
+      (text.includes('context') && (text.includes('overflow') || text.includes('too long') || text.includes('exceeded')))
+      || (text.includes('model') && (text.includes('not found') || text.includes('unavailable') || text.includes('not supported')))
+    )
+    if (recoverable) {
+      return { kind: 'transient', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
+    }
+    return { kind: 'request-error', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
+  }
+  // 400-range others (401 handled above): request-level errors, no rotation semantics.
   return { kind: 'transient', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
 }
 

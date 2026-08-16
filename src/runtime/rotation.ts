@@ -120,6 +120,12 @@ export function decideRotation(
       account.cooldownReason = 'project-error'
       return { action: 'cool', backoffMs }
     }
+    case 'request-error': {
+      // Request-construction error (e.g. generic 400): permanent, retrying
+      // resends the same broken payload. No cooldown, no rotation, no revoke —
+      // the adapter surfaces it as a terminal UPSTREAM error.
+      return { action: 'noop' }
+    }
     case 'transient': {
       return { action: 'retry', backoffMs }
     }

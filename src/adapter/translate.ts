@@ -14,6 +14,7 @@
  * reference plugin's interception architecture (see docs/ARCHITECTURE.md).
  */
 
+import { createHash } from 'node:crypto'
 import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
@@ -71,10 +72,9 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
  * `$schema`, `propertyNames`, `pattern`, `minLength`, ... each fail in turn).
  * Denylisting is whack-a-mole, so keep only the keywords the upstream
  * accepts. Container shapes are handled distinctly: `properties` is a
- * name->schema map (keys preserved), `items` is a nested schema,
- * `required`/`enum` are plain arrays. `additionalProperties` is stripped
- * entirely (upstream rejects it with "Unknown name" — verified by the
- * OmniRoute gateway, which deletes it unconditionally).
+ * name->schema map (keys preserved), `items`/`additionalProperties` are
+ * nested schemas (additionalProperties also accepts a boolean — live-verified
+ * against the Antigravity upstream), `required`/`enum` are plain arrays.
  *
  * Keyword VALUES are also constrained by the protobuf shape (verified
  * empirically): `type` must be a single enum string (union arrays like
@@ -86,10 +86,10 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
 // the package public API (translate.ts is an internal module).
 export const AGY_SCHEMA_ALLOWLIST = new Set([
   'type', 'format', 'title', 'description', 'nullable',
-  'items', 'enum', 'default', 'properties', 'required',
+  'items', 'enum', 'default', 'properties', 'required', 'additionalProperties',
 ])
 const AGY_SCHEMA_MAP_KEYS = new Set(['properties'])
-const AGY_SCHEMA_NESTED_KEYS = new Set(['items'])
+const AGY_SCHEMA_NESTED_KEYS = new Set(['items', 'additionalProperties'])
 const AGY_SCHEMA_LIST_KEYS = new Set(['required', 'enum'])
 
 function sanitizeToolSchema(schema: unknown): unknown {
@@ -208,15 +208,43 @@ function messageToContent(message: Message, toolNames: Map<string, string>): Agy
   return { role, parts }
 }
 
+/**
+ * Builtin Gemini tools must not shadow functionDeclarations names (upstream
+ * treats them as native tools; verified by OmniRoute's GEMINI_BUILTIN_TOOL_NAMES).
+ */
+const AGY_BUILTIN_TOOL_NAMES = new Set(['google_search', 'web_search', 'search_web', 'googleSearch'])
+
+/** Upstream functionDeclarations names are `[a-zA-Z0-9_]` and ≤64 chars (OmniRoute-verified). */
+const AGY_TOOL_NAME_MAX_LENGTH = 64
+
+/** Sanitize a tool name to the upstream charset/length; dedupe via a short hash. */
+function sanitizeToolName(name: string, seen: Set<string>): string {
+  let candidate = name.replace(/[^a-zA-Z0-9_]/g, '_') || 'tool'
+  if (candidate.length > AGY_TOOL_NAME_MAX_LENGTH || seen.has(candidate)) {
+    const hash = createHash('sha256').update(candidate).digest('hex').slice(0, 8)
+    const prefix = candidate.slice(0, AGY_TOOL_NAME_MAX_LENGTH - hash.length - 1)
+    candidate = `${prefix}_${hash}`
+    let i = 2
+    while (seen.has(candidate)) candidate = `${prefix}_${i++}_${hash}`
+  }
+  seen.add(candidate)
+  return candidate
+}
+
 function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['request']['tools'] {
   if (!tools || tools.length === 0) return undefined
-  return [{
-    functionDeclarations: tools.map((tool) => ({
-      name: tool.name,
+  const seenNames = new Set<string>()
+  const declarations = []
+  for (const tool of tools) {
+    if (AGY_BUILTIN_TOOL_NAMES.has(tool.name)) continue
+    declarations.push({
+      name: sanitizeToolName(tool.name, seenNames),
       description: tool.description,
       parameters: sanitizeToolSchema(tool.parameters),
-    })),
-  }]
+    })
+  }
+  if (declarations.length === 0) return undefined
+  return [{ functionDeclarations: declarations }]
 }
 
 /** Build the wrapped Antigravity request body for one call. */

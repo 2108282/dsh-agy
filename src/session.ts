@@ -33,6 +33,13 @@ export interface SessionManagerOptions {
   onRotate?: (fromIndex: number, toIndex: number, reason: FailureKind) => void
 }
 
+/**
+ * Session affinity window: reuse the last-used account for new requests within
+ * this window (proxy for one DSH conversation, which exposes no id). After the
+ * window or on failure the pool re-balances.
+ */
+export const SESSION_AFFINITY_WINDOW_MS = 10 * 60 * 1000
+
 interface TokenCacheEntry {
   access: string
   expires: number
@@ -69,6 +76,15 @@ export class AgySessionManager {
   private readonly failureCounts = new Map<string, number>()
   /** Accounts whose request-time project discovery already failed (no retry per request). */
   private readonly projectRetryFailed = new Set<string>()
+
+  /**
+   * Session affinity (time-window approximation): DSH exposes no conversation
+   * id, so instead of pinning per session we reuse the last-used account while
+   * it is fresh. Keeps upstream prefix caching and sessionId continuity across
+   * the turns of one conversation (OmniRoute pins by session for the same
+   * reason). Cleared on rotate so a failure re-picks from activeIndex.
+   */
+  private lastUsed: { index: number; at: number } | null = null
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store
@@ -120,6 +136,16 @@ export class AgySessionManager {
 
     let resolved = resolveActiveAccount(storage)
     if (!resolved) return undefined
+    // Session affinity (time-window approximation): reuse the last-used account
+    // while it is fresh and healthy, so one conversation stays on one account
+    // (upstream prefix cache + sessionId continuity). DSH exposes no
+    // conversation id, so the window is the proxy; rotate clears it.
+    if (this.lastUsed && now - this.lastUsed.at < SESSION_AFFINITY_WINDOW_MS) {
+      const last = storage.accounts[this.lastUsed.index]
+      if (last && last.enabled !== false && !isCoolingDown(last, now)) {
+        resolved = { account: last, index: this.lastUsed.index }
+      }
+    }
     // Skip accounts that are cooling down (rate-limit cooldowns).
     if (isCoolingDown(resolved.account, now)) {
       const nextIndex = pickNextAccountIndex(storage.accounts, resolved.index, now)
@@ -172,6 +198,7 @@ export class AgySessionManager {
       }
     }
 
+    this.lastUsed = { index: picked.index, at: Date.now() }
     return {
       auth,
       account: picked.account,
@@ -229,6 +256,8 @@ export class AgySessionManager {
         storage.activeIndex = nextIndex
         this.onRotate?.(session.index, nextIndex, kind)
       }
+      // The pinned account failed — drop the affinity so the pool re-balances.
+      this.lastUsed = null
     }
 
     await this.store.save(storage)

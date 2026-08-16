@@ -142,6 +142,7 @@ export type FailureKind =
   | 'auth-failure'
   | 'network-error'
   | 'project-error'
+  | 'request-error'
   | 'transient'
 
 /** Rotation state machine decision for one failed attempt. */
@@ -150,3 +151,5 @@ export type RotationAction =
   | { action: 'cool'; backoffMs: number }
   | { action: 'rotate'; backoffMs: number }
   | { action: 'revoke' }
+  /** Permanent request-construction error: no state change, surface as-is. */
+  | { action: 'noop' }

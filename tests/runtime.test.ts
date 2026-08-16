@@ -66,7 +66,14 @@ describe('classifyHttpError', () => {
 
   it('classifies 5xx as transient with backoff retry', () => {
     expect(classifyHttpError(503, new Headers()).kind).toBe('transient')
-    expect(classifyHttpError(400, new Headers()).kind).toBe('transient')
+  })
+
+  it('classifies generic 400 as request-error (permanent) and capacity 400 as transient', () => {
+    expect(classifyHttpError(400, new Headers(), '{"error":{"message":"invalid JSON payload"}}').kind).toBe('request-error')
+    const overflow = classifyHttpError(400, new Headers(), 'context length exceeded maximum')
+    expect(overflow.kind).toBe('transient')
+    const modelGone = classifyHttpError(400, new Headers(), 'model not found')
+    expect(modelGone.kind).toBe('transient')
   })
 
   it('classifies fetch failures as network-error', () => {
@@ -116,6 +123,15 @@ describe('rotation state machine', () => {
     const decision = decideRotation('transient', acc, 0)
     expect(decision.action).toBe('retry')
     expect(acc.coolingDownUntil).toBeUndefined()
+  })
+
+  it('no-ops on request-error: no cooldown, no rotation, no revoke', () => {
+    const acc = account()
+    const decision = decideRotation('request-error', acc, 0)
+    expect(decision.action).toBe('noop')
+    expect(acc.coolingDownUntil).toBeUndefined()
+    expect(acc.enabled).not.toBe(false)
+    expect(acc.verificationRequired).toBeUndefined()
   })
 
   it('backs off exponentially across tiers', () => {
