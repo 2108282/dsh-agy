@@ -75,6 +75,7 @@ npm pack --dry-run           # Verify packaged files before release (npm ships w
 - Upstream tool-schema 400s are fixed by extending the contract (`sanitizeToolSchema` + a fixture test), never by one-off keyword patches — contract, values, and corpus are pinned in `docs/ANTIGRAVITY-API.md` §3.1.
 - Commit messages follow Conventional Commits (`fix(scope): ...`, `feat(scope): ...`).
 - `docs/` is not bundled with npm: links from `README.md` to `docs/` must resolve properly on GitHub.
+- Docs are maintained as EN + zh mirrors (`docs/*_zh.md`); any update to one must update the other in the same commit.
 - Windows skips POSIX owner-only file permission checks by design (see `keyring.ts`); `$DSH_HOME` relocates all stored paths.
 
 ## DSH / Toolchain Pitfalls (from decommissioned ENGINEERING-NOTES)
