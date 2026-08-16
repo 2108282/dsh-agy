@@ -143,6 +143,40 @@ describe('translate', () => {
     }])
   })
 
+  it('normalizes enum and type VALUES to upstream-valid shapes (upstream 400)', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [{
+          name: 'mcp__github__issue_write',
+          description: 'd1',
+          parameters: {
+            type: 'object',
+            properties: {
+              // non-string enum items are rejected (TYPE_STRING) -> filtered, enum omitted
+              delete: { type: 'boolean', description: 'x', enum: [true] },
+              // numeric enum items are rejected too -> only strings survive
+              level: { type: 'integer', enum: [1, 2, 3] },
+              // string enum survives untouched
+              state: { type: 'string', enum: ['open', 'closed'] },
+              // union type arrays are rejected (Unknown name "type") -> first non-null type
+              value: { type: ['string', 'number', 'boolean'], description: 'Value to set.' },
+              nullableValue: { type: ['null', 'number'], description: 'Nullable number.' },
+            },
+            required: ['state'],
+          },
+        }],
+      }),
+      {},
+    )
+    const p = body.request.tools![0].functionDeclarations[0].parameters as Record<string, any>
+    expect(p.properties.delete).toEqual({ type: 'boolean', description: 'x' })
+    expect(p.properties.level).toEqual({ type: 'integer' })
+    expect(p.properties.state).toEqual({ type: 'string', enum: ['open', 'closed'] })
+    expect(p.properties.value).toEqual({ type: 'string', description: 'Value to set.' })
+    expect(p.properties.nullableValue).toEqual({ type: 'number', description: 'Nullable number.' })
+    expect(p.required).toEqual(['state'])
+  })
+
   it('falls back to empty args object when tool-call arguments are malformed', () => {
     const messages = [
       { id: 'a', role: 'assistant' as const, content: [

@@ -73,6 +73,12 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
  * accepts. Container shapes are handled distinctly: `properties` is a
  * name->schema map (keys preserved), `items`/`additionalProperties` are
  * nested schemas, `required`/`enum` are plain arrays.
+ *
+ * Keyword VALUES are also constrained by the protobuf shape (verified
+ * empirically): `type` must be a single enum string (union arrays like
+ * `["string","number"]` are rejected) and every `enum` item must be a
+ * string (booleans/numbers are rejected). Values are normalized to the
+ * nearest valid form instead of being dropped wholesale.
  */
 const AGY_SCHEMA_ALLOWLIST = new Set([
   'type', 'format', 'title', 'description', 'nullable',
@@ -85,8 +91,18 @@ const AGY_SCHEMA_LIST_KEYS = new Set(['required', 'enum'])
 function sanitizeToolSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema
   if (Array.isArray(schema)) return schema.map((entry) => sanitizeToolSchema(entry))
+
+  // Normalize union types: upstream `type` is a single enum string. Pick the
+  // first non-null string type (`"null"` maps to the `nullable` keyword);
+  // fall back to `string` when no usable type remains.
+  let normalized = schema as Record<string, unknown>
+  if (Array.isArray(normalized.type)) {
+    const types = normalized.type.filter((t): t is string => typeof t === 'string' && t !== 'null')
+    normalized = { ...normalized, type: types[0] ?? 'string' }
+  }
+
   const result: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(normalized)) {
     if (!AGY_SCHEMA_ALLOWLIST.has(key)) continue
     if (AGY_SCHEMA_MAP_KEYS.has(key)) {
       const map: Record<string, unknown> = {}
@@ -101,7 +117,14 @@ function sanitizeToolSchema(schema: unknown): unknown {
       continue
     }
     if (AGY_SCHEMA_LIST_KEYS.has(key)) {
-      result[key] = value
+      // Upstream `enum` items must be strings; filter the rest and omit an
+      // empty enum entirely (an empty array would be rejected too).
+      if (key === 'enum' && Array.isArray(value)) {
+        const filtered = value.filter((v): v is string => typeof v === 'string')
+        if (filtered.length > 0) result[key] = filtered
+      } else {
+        result[key] = value
+      }
       continue
     }
     result[key] = value

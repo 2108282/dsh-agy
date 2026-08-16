@@ -33,7 +33,15 @@ OAuth endpoints (fixed): authorize `https://accounts.google.com/o/oauth2/v2/auth
 - `X-Goog-Api-Client`: pool `google-cloud-sdk vscode_cloudshelleditor/0.1`, `vscode/1.86.0`, `vscode/1.87.0`, `vscode/1.96.0`.
 - `Client-Metadata` actually only sends `{ideType:"ANTIGRAVITY"}` in code (freely-added `platform`/`pluginType` get rejected by backend enum validation).
 - Dual style (antigravity vs gemini-cli) **not done**.
-- **Request envelope (OmniRoute active format)**: top level `{project, requestId, model, userAgent:"antigravity", requestType:"agent", request:{contents, tools?, toolConfig:{functionCallingConfig:{mode:"VALIDATED"}}, generationConfig?, sessionId}}`. Claude models strip the trailing model turn; tool schemas recursively strip `enumDescriptions` (backend rejects them).
+- **Request envelope (OmniRoute active format)**: top level `{project, requestId, model, userAgent:"antigravity", requestType:"agent", request:{contents, tools?, toolConfig:{functionCallingConfig:{mode:"VALIDATED"}}, generationConfig?, sessionId}}`. Claude models strip the trailing model turn; tool schemas are reduced to an upstream allowlist with normalized keyword values (backend rejects ANY unknown keyword AND any non-protobuf value shape; see §3.1).
+
+### 3.1 Tool Schema Contract (verified; whack-a-mole defense)
+
+The backend parses tool `parameters` as a strict protobuf `Schema`: unknown keys (`$schema`, `propertyNames`, `pattern`, `minLength`, ...) and invalid value shapes (`enum: [true]` → TYPE_STRING 400; `type: ["string","number"]` → Unknown name "type" 400) each fail the whole request. The sanitizer (`src/adapter/translate.ts` `sanitizeToolSchema`) enforces the full contract, not per-keyword patches:
+
+- **Keys** — only `type, format, title, description, nullable, items, enum, default, properties, required, additionalProperties` survive.
+- **Values** — `type` must be a single enum string (union arrays normalize to the first non-`null` type, `"null"` maps to `nullable`); `enum` items must be strings (non-strings filtered, empty enum omitted entirely); `properties` is a name→schema map; `items`/`additionalProperties` are nested schemas; `required` is a string array.
+- **Tests** — `tests/adapter.test.ts` pins each known rejection shape as a fixture; a new upstream 400 must first become a failing fixture test, then a sanitizer change. Real-world MCP schemas (GitHub MCP `issue_write` was the trigger: boolean enum + union type) belong in the corpus to surface shapes hand-written tests miss.
 
 ## 4. OAuth Details
 

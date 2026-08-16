@@ -72,6 +72,7 @@ npm pack --dry-run           # Verify packaged files before release (npm ships w
 - **CLI Entrypoint (`src/cli/`) MUST NOT import any `@deepseek-ai/*` packages at runtime** — this fulfills the `peerDependenciesMeta` optional contract. Indirect imports via shared chunks (`session.ts`) also break this guarantee. Always verify the CLI bundle has zero harness runtime dependencies.
 - The version string is only defined in `package.json` (read at CLI runtime, see `src/cli/index.ts`).
 - `AGY_CLIENT_ID` and `AGY_CLIENT_SECRET` are **public client credentials** embedded in the Antigravity desktop application; they are not project secrets — do not "fix" them by deletion or obfuscation.
+- Upstream tool-schema 400s are fixed by extending the contract (`sanitizeToolSchema` + a fixture test), never by one-off keyword patches — contract, values, and corpus are pinned in `docs/ANTIGRAVITY-API.md` §3.1.
 - Commit messages follow Conventional Commits (`fix(scope): ...`, `feat(scope): ...`).
 - `docs/` is not bundled with npm: links from `README.md` to `docs/` must resolve properly on GitHub.
 - Windows skips POSIX owner-only file permission checks by design (see `keyring.ts`); `$DSH_HOME` relocates all stored paths.
