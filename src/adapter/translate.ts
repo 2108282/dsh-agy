@@ -80,7 +80,9 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
  * string (booleans/numbers are rejected). Values are normalized to the
  * nearest valid form instead of being dropped wholesale.
  */
-const AGY_SCHEMA_ALLOWLIST = new Set([
+// Exported for the contract invariant test (tests/adapter.test.ts); not part of
+// the package public API (translate.ts is an internal module).
+export const AGY_SCHEMA_ALLOWLIST = new Set([
   'type', 'format', 'title', 'description', 'nullable',
   'items', 'enum', 'default', 'properties', 'required', 'additionalProperties',
 ])

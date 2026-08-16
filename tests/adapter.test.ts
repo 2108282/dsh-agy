@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AgyAdapter } from '../src/adapter/adapter.ts'
@@ -175,6 +175,101 @@ describe('translate', () => {
     expect(p.properties.value).toEqual({ type: 'string', description: 'Value to set.' })
     expect(p.properties.nullableValue).toEqual({ type: 'number', description: 'Nullable number.' })
     expect(p.required).toEqual(['state'])
+  })
+
+  /**
+   * Recursively assert a sanitized tool schema satisfies the upstream protobuf
+   * contract (docs/ANTIGRAVITY-API.md §3.1): only allowlisted keywords, and each
+   * keyword value shaped like the proto field it maps to. This is the
+   * whack-a-mole guard: any future unknown key or invalid value shape fails CI
+   * here, before a user hits upstream.
+   */
+  function assertUpstreamContract(schema: unknown, path = 'parameters'): void {
+    expect(schema, `${path}: expected object`).toBeTypeOf('object')
+    expect(Array.isArray(schema), `${path}: expected object, got array`).toBe(false)
+    const node = schema as Record<string, unknown>
+    for (const key of Object.keys(node)) {
+      expect(AGY_SCHEMA_ALLOWLIST.has(key), `${path}.${key}: unknown keyword`).toBe(true)
+    }
+    if ('type' in node) expect(typeof node.type, `${path}.type`).toBe('string')
+    if ('enum' in node) {
+      const items = node.enum as unknown[]
+      expect(Array.isArray(items), `${path}.enum: expected array`).toBe(true)
+      expect(items.length, `${path}.enum: empty enum is rejected upstream`).toBeGreaterThan(0)
+      for (const item of items) expect(typeof item, `${path}.enum item`).toBe('string')
+    }
+    if ('required' in node) {
+      for (const item of node.required as unknown[]) expect(typeof item, `${path}.required item`).toBe('string')
+    }
+    if ('nullable' in node) expect(typeof node.nullable, `${path}.nullable`).toBe('boolean')
+    for (const scalar of ['format', 'title', 'description']) {
+      if (scalar in node) expect(typeof node[scalar], `${path}.${scalar}`).toBe('string')
+    }
+    if ('properties' in node) {
+      for (const [name, child] of Object.entries(node.properties as Record<string, unknown>)) {
+        assertUpstreamContract(child, `${path}.properties.${name}`)
+      }
+    }
+    for (const nested of ['items']) {
+      if (nested in node) assertUpstreamContract(node[nested], `${path}.${nested}`)
+    }
+    // JSON-Schema allows a boolean schema for additionalProperties (false = no
+    // extra keys); upstream accepts it (pinned by the allowlist test below).
+    if ('additionalProperties' in node) {
+      const ap = node.additionalProperties
+      if (typeof ap === 'object' && ap !== null) assertUpstreamContract(ap, `${path}.additionalProperties`)
+      else expect(typeof ap, `${path}.additionalProperties`).toBe('boolean')
+    }
+  }
+
+  // Real-world corpus: trimmed from GitHub MCP server `issue_write` — the #4
+  // trigger (boolean enum + union type). Hand-written tests only cover known
+  // shapes; real MCP schemas surface unknown ones.
+  const REAL_WORLD_TOOL_SCHEMAS = [{
+    name: 'mcp__github__issue_write',
+    description: 'Create or update a GitHub issue',
+    parameters: {
+      type: 'object',
+      properties: {
+        owner: { type: 'string', description: 'Repository owner' },
+        repo: { type: 'string', description: 'Repository name' },
+        title: { type: 'string', description: 'Issue title' },
+        issue_fields: {
+          type: 'array',
+          description: 'Fields to set on the issue',
+          items: {
+            type: 'object',
+            properties: {
+              delete: { type: 'boolean', description: 'Set to true to clear this field', enum: [true] },
+              field: { type: 'string', enum: ['body', 'assignees', 'milestone'] },
+              value: { type: ['string', 'number', 'boolean'], description: 'Value to set.' },
+            },
+          },
+        },
+      },
+      required: ['owner', 'repo', 'title'],
+    },
+  }, {
+    name: 'mcp__context7__query_docs',
+    description: 'Query library documentation',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query', minLength: 1, maxLength: 500, pattern: '.*' },
+        library: { type: 'string', description: 'Library id', enum: ['/vercel/next.js', '/facebook/react'] },
+        maxResults: { type: 'integer', description: 'Max results', minimum: 1, maximum: 5, default: 3 },
+      },
+      required: ['query'],
+      additionalProperties: false,
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+    },
+  }]
+
+  it('sanitized output of a real-world tool corpus satisfies the upstream contract', () => {
+    for (const tool of REAL_WORLD_TOOL_SCHEMAS) {
+      const body = toAgyRequestBody(generateOptions({ tools: [tool] }), {})
+      assertUpstreamContract(body.request.tools![0].functionDeclarations[0].parameters)
+    }
   })
 
   it('falls back to empty args object when tool-call arguments are malformed', () => {
