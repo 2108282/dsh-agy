@@ -597,3 +597,173 @@ describe('AgyAdapter', () => {
     }).rejects.toMatchObject({ code: 'RATE_LIMIT', failure: { providerRetryAfterMs: 2000 } })
   })
 })
+
+describe('parseAgySse inbound shape contract', () => {
+  /**
+   * Block-stream well-formedness invariants. The upstream response is external
+   * input of arbitrary shape; every parsed stream must satisfy these
+   * regardless of how the model interleaves text / reasoning / functionCalls.
+   * This is the inbound mirror of assertUpstreamContract (outbound).
+   */
+  function assertBlockStreamWellFormed(chunks: unknown[]): void {
+    const openIndexes = new Set<number>()
+    let sawUsage = false
+    let sawFinish = false
+    for (const chunk of chunks as Array<{ type: string; index?: number; block?: { type: string; arguments?: string } }>) {
+      switch (chunk.type) {
+        case 'block-start': {
+          expect(openIndexes.has(chunk.index!), `block-start ${chunk.index} while block open`).toBe(false)
+          openIndexes.add(chunk.index!)
+          break
+        }
+        case 'text-delta':
+        case 'reasoning-delta':
+        case 'tool-call-delta': {
+          expect(openIndexes.has(chunk.index!), `${chunk.type} ${chunk.index} without open block`).toBe(true)
+          break
+        }
+        case 'block-end': {
+          expect(openIndexes.has(chunk.index!), `block-end ${chunk.index} without block-start`).toBe(true)
+          openIndexes.delete(chunk.index!)
+          if (chunk.block?.type === 'tool-call') {
+            // args must always be standalone valid JSON — never concatenated
+            // fragments from consecutive functionCall parts
+            expect(() => JSON.parse(chunk.block?.arguments ?? ''), `tool-call ${chunk.index} args not valid JSON`).not.toThrow()
+          }
+          break
+        }
+        case 'usage': {
+          expect(sawUsage, 'duplicate usage').toBe(false)
+          sawUsage = true
+          break
+        }
+        case 'finish': {
+          expect(sawFinish, 'duplicate finish').toBe(false)
+          sawFinish = true
+          break
+        }
+      }
+    }
+    expect(openIndexes.size, 'unclosed blocks at stream end').toBe(0)
+    expect(sawFinish, 'stream must end with finish').toBe(true)
+    expect((chunks[chunks.length - 1] as { type: string }).type, 'finish must be last').toBe('finish')
+  }
+
+  const SHAPES: Array<{ name: string; lines: string[]; assert?: (chunks: unknown[]) => void }> = [
+    {
+      name: 'single text block, split across events',
+      lines: [
+        'data: [{"candidates":[{"content":{"parts":[{"text":"Hel"},{"text":"lo"}]}}]}]',
+        'data: [{"candidates":[{"content":{"parts":[{"text":"!"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}]',
+        'data: [DONE]',
+      ],
+      assert: (chunks) => {
+        const starts = chunks.filter((c) => (c as { type: string }).type === 'block-start')
+        expect(starts).toHaveLength(1)
+        const text = chunks.filter((c) => (c as { type: string }).type === 'text-delta').map((c) => (c as { text: string }).text).join('')
+        expect(text).toBe('Hello!')
+      },
+    },
+    {
+      name: 'reasoning then text then tool call (full interleave)',
+      lines: [
+        'data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"hmm"},{"text":"answer"}]}}]}]',
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"bash","args":{"cmd":"ls"}}}]}}]}]',
+        'data: [DONE]',
+      ],
+      assert: (chunks) => {
+        const types = chunks.map((c) => (c as { type: string }).type)
+        expect(types.filter((t) => t === 'block-start')).toHaveLength(3)
+        expect(types.filter((t) => t === 'block-end')).toHaveLength(3)
+        const tool = chunks.find((c) => (c as { type: string }).type === 'block-end' && (c as { block: { type: string } }).block.type === 'tool-call')
+        expect(tool).toMatchObject({ block: { type: 'tool-call', id: 'c1', arguments: '{"cmd":"ls"}' } })
+      },
+    },
+    {
+      name: 'two consecutive functionCalls in one event (parallel tools)',
+      lines: [
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"edit_file","args":{"path":"/a"}}},{"functionCall":{"id":"c2","name":"bash","args":{"cmd":"ls"}}}]}}]}]',
+        'data: [DONE]',
+      ],
+      assert: (chunks) => {
+        const toolEnds = chunks.filter((c) => (c as { type: string }).type === 'block-end' && (c as { block: { type: string } }).block.type === 'tool-call')
+        expect(toolEnds).toHaveLength(2)
+        expect((toolEnds[0] as { block: { arguments: string } }).block.arguments).toBe('{"path":"/a"}')
+        expect((toolEnds[1] as { block: { arguments: string } }).block.arguments).toBe('{"cmd":"ls"}')
+      },
+    },
+    {
+      name: 'two consecutive functionCalls across separate events',
+      lines: [
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"edit_file","args":{"path":"/a"}}}]}}]}]',
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c2","name":"bash","args":{"cmd":"ls"}}}]}}]}]',
+        'data: [DONE]',
+      ],
+      assert: (chunks) => {
+        const toolEnds = chunks.filter((c) => (c as { type: string }).type === 'block-end' && (c as { block: { type: string } }).block.type === 'tool-call')
+        expect(toolEnds).toHaveLength(2)
+      },
+    },
+    {
+      name: 'functionCall args arriving as raw JSON string part',
+      lines: [
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"bash","args":"{\\"cmd\\":\\"ls\\"}"}}]}}]}]',
+        'data: [DONE]',
+      ],
+      assert: (chunks) => {
+        const tool = chunks.find((c) => (c as { type: string }).type === 'block-end' && (c as { block: { type: string } }).block.type === 'tool-call')
+        expect(tool).toMatchObject({ block: { arguments: '{"cmd":"ls"}' } })
+      },
+    },
+    {
+      name: 'empty parts array (no content)',
+      lines: [
+        'data: [{"candidates":[{"content":{"parts":[]}}]}]',
+        'data: [DONE]',
+      ],
+    },
+    {
+      name: 'candidates absent entirely',
+      lines: [
+        'data: [{"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":0}}]',
+        'data: [DONE]',
+      ],
+    },
+    {
+      name: 'usageMetadata on every event (cumulative)',
+      lines: [
+        'data: [{"candidates":[{"content":{"parts":[{"text":"a"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}]',
+        'data: [{"candidates":[{"content":{"parts":[{"text":"b"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2}}]',
+        'data: [DONE]',
+      ],
+      assert: (chunks) => {
+        const usages = chunks.filter((c) => (c as { type: string }).type === 'usage')
+        expect(usages).toHaveLength(1) // emitted once, final totals
+      },
+    },
+  ]
+
+  it.each(SHAPES)('well-formed: $name', async ({ lines, assert }) => {
+    const chunks = await collect(parseAgySse(sseStream(lines)))
+    assertBlockStreamWellFormed(chunks)
+    assert?.(chunks)
+  })
+
+  it('text reconstruction is invariant to chunk boundaries (property test)', async () => {
+    // The same logical text split at different SSE boundaries must rebuild
+    // identically (mirrors OmniRoute's sse-parser property test).
+    const full = 'The quick brown fox jumps over the lazy dog. '.repeat(20)
+    const boundaries = [1, 7, 31, 128]
+    const rebuilt: string[] = []
+    for (const size of boundaries) {
+      const parts: string[] = []
+      for (let i = 0; i < full.length; i += size) parts.push(full.slice(i, i + size))
+      const lines = parts.map((p) => `data: [{"candidates":[{"content":{"parts":[{"text":${JSON.stringify(p)}}]}}]}]`)
+      lines.push('data: [DONE]')
+      const chunks = await collect(parseAgySse(sseStream(lines)))
+      assertBlockStreamWellFormed(chunks)
+      rebuilt.push(chunks.filter((c) => (c as { type: string }).type === 'text-delta').map((c) => (c as { text: string }).text).join(''))
+    }
+    expect(new Set(rebuilt)).toEqual(new Set([full]))
+  })
+})
