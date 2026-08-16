@@ -174,7 +174,8 @@ describe('fingerprint', () => {
     expect(fp.sessionToken).toMatch(/^[0-9a-f]{32}$/)
     expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ (windows|darwin)\/\S+$/)
     expect(fp.clientMetadata.ideType).toBe('ANTIGRAVITY')
-    expect(['WINDOWS', 'MACOS']).toContain(fp.clientMetadata.platform)
+    // Client-Metadata must only transmit ideType (backend rejects extras)
+    expect(Object.keys(fp.clientMetadata)).toEqual(['ideType'])
   })
 
   it('composes only User-Agent from a fingerprint', () => {

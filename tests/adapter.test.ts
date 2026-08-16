@@ -137,7 +137,6 @@ describe('translate', () => {
             mode: { type: 'string', enum: ['fast', 'slow'] },
           },
           required: ['name'],
-          additionalProperties: false,
         },
       }],
     }])
@@ -213,13 +212,9 @@ describe('translate', () => {
     for (const nested of ['items']) {
       if (nested in node) assertUpstreamContract(node[nested], `${path}.${nested}`)
     }
-    // JSON-Schema allows a boolean schema for additionalProperties (false = no
-    // extra keys); upstream accepts it (pinned by the allowlist test below).
-    if ('additionalProperties' in node) {
-      const ap = node.additionalProperties
-      if (typeof ap === 'object' && ap !== null) assertUpstreamContract(ap, `${path}.additionalProperties`)
-      else expect(typeof ap, `${path}.additionalProperties`).toBe('boolean')
-    }
+    // additionalProperties is stripped entirely: upstream rejects it with
+    // "Unknown name" (verified by the OmniRoute gateway, #1421).
+    expect('additionalProperties' in node, `${path}.additionalProperties must be stripped`).toBe(false)
   }
 
   // Real-world corpus: trimmed from GitHub MCP server `issue_write` — the #4
@@ -467,7 +462,7 @@ describe('AgyAdapter', () => {
       impersonation: {
         'User-Agent': 'antigravity/1.18.3 darwin/arm64',
         'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
-        'Client-Metadata': '{"ideType":"ANTIGRAVITY","platform":"MACOS","pluginType":"GEMINI"}',
+        'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
       },
       ...overrides,
     }

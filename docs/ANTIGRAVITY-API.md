@@ -39,8 +39,8 @@ OAuth endpoints (fixed): authorize `https://accounts.google.com/o/oauth2/v2/auth
 
 The backend parses tool `parameters` as a strict protobuf `Schema`: unknown keys (`$schema`, `propertyNames`, `pattern`, `minLength`, ...) and invalid value shapes (`enum: [true]` → TYPE_STRING 400; `type: ["string","number"]` → Unknown name "type" 400) each fail the whole request. The sanitizer (`src/adapter/translate.ts` `sanitizeToolSchema`) enforces the full contract, not per-keyword patches:
 
-- **Keys** — only `type, format, title, description, nullable, items, enum, default, properties, required, additionalProperties` survive.
-- **Values** — `type` must be a single enum string (union arrays normalize to the first non-`null` type, `"null"` maps to `nullable`); `enum` items must be strings (non-strings filtered, empty enum omitted entirely); `properties` is a name→schema map; `items` is a nested schema; `additionalProperties` accepts a nested schema OR a boolean (`false` = no extra keys); `required` is a string array.
+- **Keys** — only `type, format, title, description, nullable, items, enum, default, properties, required` survive; `additionalProperties` is stripped entirely (upstream rejects it with `Unknown name`, verified by the OmniRoute gateway).
+- **Values** — `type` must be a single enum string (union arrays normalize to the first non-`null` type, `"null"` maps to `nullable`); `enum` items must be strings (non-strings filtered, empty enum omitted entirely); `properties` is a name→schema map; `items` is a nested schema; `required` is a string array.
 - **Tests** — `tests/adapter.test.ts` `assertUpstreamContract` recursively asserts every keyword and value shape of the sanitized output, so any future unknown key or invalid value shape fails CI before a user hits upstream; each known rejection shape is pinned as a fixture. Real-world MCP schemas (GitHub MCP `issue_write` was the trigger: boolean enum + union type) belong in the corpus to surface shapes hand-written tests miss.
 
 ## 4. OAuth Details

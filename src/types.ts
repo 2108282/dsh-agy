@@ -1,10 +1,12 @@
 /** Shared domain types for dsh-agy. */
 
-/** Device fingerprint persisted per account (rate-limit mitigation). */
+/**
+ * Device fingerprint persisted per account (rate-limit mitigation).
+ * Client-Metadata must only transmit ideType: the backend's enum validation
+ * rejects freely-added platform/pluginType fields (AGENTS.md invariant).
+ */
 export interface ClientMetadata {
   ideType: string
-  platform: string
-  pluginType: string
 }
 
 export interface Fingerprint {

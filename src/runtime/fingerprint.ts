@@ -62,10 +62,6 @@ function randomFrom<T>(arr: readonly T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]!
 }
 
-function platformToDisplayName(platform: string): 'WINDOWS' | 'MACOS' {
-  return platform.startsWith('windows') ? 'WINDOWS' : 'MACOS'
-}
-
 /** Generate a randomized device fingerprint representing one apparent device. */
 export function generateFingerprint(
   data: FingerprintData = getFingerprintData(),
@@ -77,10 +73,10 @@ export function generateFingerprint(
     sessionToken: randomBytes(16).toString('hex'),
     userAgent: `antigravity/${version} ${platform}`,
     apiClient: randomFrom(data.sdkClients),
+    // Client-Metadata must only transmit ideType (backend enum validation
+    // rejects freely-added platform/pluginType; AGENTS.md invariant).
     clientMetadata: {
       ideType: randomFrom(data.ideTypes),
-      platform: platformToDisplayName(platform),
-      pluginType: randomFrom(data.pluginTypes),
     },
     createdAt: Date.now(),
   }
@@ -103,8 +99,6 @@ export function getRandomizedHeaders(
     'X-Goog-Api-Client': randomFrom(data.sdkClients),
     'Client-Metadata': JSON.stringify({
       ideType: randomFrom(data.ideTypes),
-      platform: platformToDisplayName(platform),
-      pluginType: randomFrom(data.pluginTypes),
     }),
   }
 }

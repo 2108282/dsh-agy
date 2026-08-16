@@ -40,7 +40,7 @@ describe('AgySessionManager', () => {
     stubTokenEndpoint()
     const fp = {
       deviceId: 'd1', sessionToken: 's1', userAgent: 'antigravity/9.9.9 darwin/arm64',
-      apiClient: 'fixed-client', clientMetadata: { ideType: 'ANTIGRAVITY', platform: 'MACOS', pluginType: 'GEMINI' },
+      apiClient: 'fixed-client', clientMetadata: { ideType: 'ANTIGRAVITY' },
       createdAt: 0,
     }
     const store = new InMemoryAccountStore(storage([{ ...account(), fingerprint: fp }]))
@@ -203,12 +203,12 @@ describe('impersonationHeadersFor', () => {
     expect(impersonationHeadersFor(base)).toBeDefined()
     void second
 
-    const fp = { deviceId: 'd', sessionToken: 's', userAgent: 'antigravity/1.0.0 windows/amd64', apiClient: 'c', clientMetadata: { ideType: 'ANTIGRAVITY', platform: 'WINDOWS', pluginType: 'GEMINI' }, createdAt: 0 }
+    const fp = { deviceId: 'd', sessionToken: 's', userAgent: 'antigravity/1.0.0 windows/amd64', apiClient: 'c', clientMetadata: { ideType: 'ANTIGRAVITY' }, createdAt: 0 }
     const stable = impersonationHeadersFor({ ...base, fingerprint: fp })
     expect(stable).toEqual({
       'User-Agent': 'antigravity/1.0.0 windows/amd64',
       'X-Goog-Api-Client': 'c',
-      'Client-Metadata': '{"ideType":"ANTIGRAVITY","platform":"WINDOWS","pluginType":"GEMINI"}',
+      'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
     })
   })
 })

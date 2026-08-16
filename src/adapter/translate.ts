@@ -71,8 +71,10 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
  * `$schema`, `propertyNames`, `pattern`, `minLength`, ... each fail in turn).
  * Denylisting is whack-a-mole, so keep only the keywords the upstream
  * accepts. Container shapes are handled distinctly: `properties` is a
- * name->schema map (keys preserved), `items`/`additionalProperties` are
- * nested schemas, `required`/`enum` are plain arrays.
+ * name->schema map (keys preserved), `items` is a nested schema,
+ * `required`/`enum` are plain arrays. `additionalProperties` is stripped
+ * entirely (upstream rejects it with "Unknown name" — verified by the
+ * OmniRoute gateway, which deletes it unconditionally).
  *
  * Keyword VALUES are also constrained by the protobuf shape (verified
  * empirically): `type` must be a single enum string (union arrays like
@@ -84,10 +86,10 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
 // the package public API (translate.ts is an internal module).
 export const AGY_SCHEMA_ALLOWLIST = new Set([
   'type', 'format', 'title', 'description', 'nullable',
-  'items', 'enum', 'default', 'properties', 'required', 'additionalProperties',
+  'items', 'enum', 'default', 'properties', 'required',
 ])
 const AGY_SCHEMA_MAP_KEYS = new Set(['properties'])
-const AGY_SCHEMA_NESTED_KEYS = new Set(['items', 'additionalProperties'])
+const AGY_SCHEMA_NESTED_KEYS = new Set(['items'])
 const AGY_SCHEMA_LIST_KEYS = new Set(['required', 'enum'])
 
 function sanitizeToolSchema(schema: unknown): unknown {
