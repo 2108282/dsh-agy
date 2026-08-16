@@ -129,16 +129,25 @@ export async function* parseAgySse(
     return block
   }
 
-  const ensureBlock = (kind: OpenBlock['kind'], meta: { id?: string; name?: string } = {}): StreamChunk | null => {
+  /**
+   * Ensure a block of the given kind is open, switching when needed.
+   * Returns chunks to yield (a closed block's end, then the new block's start).
+   * Callers MUST yield everything returned — dropping the end silently corrupts
+   * the block stream for DSH (verified: multi-tool turns and text→tool
+   * transitions lost their block-end).
+   */
+  const ensureBlock = (kind: OpenBlock['kind'], meta: { id?: string; name?: string } = {}): StreamChunk[] => {
+    const out: StreamChunk[] = []
     if (open && open.kind !== kind) {
-      void closeBlock()
+      const end = closeBlock()
+      if (end) out.push(end)
     }
     if (!open) {
       open = { kind, arguments: '', text: '', id: meta.id, name: meta.name }
       const blockType = kind === 'tool-call' ? 'tool-call' : kind
-      return { type: 'block-start', index: blockIndex, blockType }
+      out.push({ type: 'block-start', index: blockIndex, blockType })
     }
-    return null
+    return out
   }
 
   try {
@@ -166,24 +175,31 @@ export async function* parseAgySse(
           }
           for (const part of candidate.content?.parts ?? []) {
             if (part.text !== undefined && part.thought !== true) {
-              const start = ensureBlock('text')
-              if (start) yield start
+              for (const chunk of ensureBlock('text')) yield chunk
               open!.text += part.text
               yield { type: 'text-delta', index: blockIndex, text: part.text }
             } else if (part.text !== undefined && part.thought === true) {
-              const start = ensureBlock('reasoning')
-              if (start) yield start
+              for (const chunk of ensureBlock('reasoning')) yield chunk
               open!.text += part.text
               yield { type: 'reasoning-delta', index: blockIndex, text: part.text }
             } else if (part.functionCall) {
               // Use the upstream functionCall id when present so the signature
               // captured on this part can be replayed for the same id next turn.
               const upstreamId = part.functionCall.id || String(blockIndex)
+              // Each functionCall part is an ATOMIC block: a stream can carry
+              // several functionCall parts in one turn (multi-tool responses),
+              // and they share kind "tool-call" — ensureBlock alone would not
+              // switch between them, concatenating their args JSON into one
+              // invalid string. Close any open block (yielding its end) first.
+              if (open) {
+                const end = closeBlock()
+                if (end) yield end
+              }
               const start = ensureBlock('tool-call', {
                 id: upstreamId,
                 name: part.functionCall.name,
               })
-              if (start) yield start
+              if (start.length > 0) yield start[0]!
               if (part.thoughtSignature) {
                 options.onToolSignature?.(upstreamId, part.thoughtSignature)
               }

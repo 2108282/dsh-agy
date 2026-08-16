@@ -429,6 +429,37 @@ describe('parseAgySse', () => {
     expect(chunks[2]).toMatchObject({ type: 'block-end', block: { type: 'tool-call', name: 'web_search', arguments: '{"q":"x"}' } })
   })
 
+  it('isolates consecutive functionCall parts into separate atomic blocks', async () => {
+    // Multi-tool turns: two functionCall parts in one event must become two
+    // independent blocks — concatenated args JSON would fail DSH validation
+    // with "arguments" must be an object.
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"edit_file","args":{"path":"/a"}}},{"functionCall":{"id":"c2","name":"bash","args":{"cmd":"ls"}}}]}}]}]',
+      'data: [DONE]',
+    ])))
+    const toolCalls = chunks.filter((c) => (c as { type: string }).type === 'block-end' && (c as { block: { type: string } }).block.type === 'tool-call')
+    expect(toolCalls).toHaveLength(2)
+    expect(toolCalls[0]).toMatchObject({ block: { type: 'tool-call', id: 'c1', arguments: '{"path":"/a"}' } })
+    expect(toolCalls[1]).toMatchObject({ block: { type: 'tool-call', id: 'c2', arguments: '{"cmd":"ls"}' } })
+    const starts = chunks.filter((c) => (c as { type: string }).type === 'block-start')
+    expect(starts).toHaveLength(2)
+    expect((starts[0] as { index: number }).index).not.toBe((starts[1] as { index: number }).index)
+  })
+
+  it('yields the text block-end when a functionCall interrupts', async () => {
+    // Cross-kind switch must close (and yield the end of) the open text block
+    // before opening the tool-call block — dropped block-ends corrupt DSH.
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"thinking"}]}}]}]',
+      'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"bash","args":{"cmd":"ls"}}}]}}]}]',
+      'data: [DONE]',
+    ])))
+    const ends = chunks.filter((c) => (c as { type: string }).type === 'block-end')
+    expect(ends).toHaveLength(2)
+    expect(ends[0]).toMatchObject({ block: { type: 'text', text: 'thinking' } })
+    expect(ends[1]).toMatchObject({ block: { type: 'tool-call', id: 'c1' } })
+  })
+
   it('captures functionCall thoughtSignature and upstream id via callback', async () => {
     const captured: Array<[string, string]> = []
     const chunks = await collect(parseAgySse(sseStream([
