@@ -956,7 +956,7 @@ export function renderDashboardHtml(): string {
       } catch (e) { toast(String(e), 'error'); }
     };
 
-    const importLines = () => $('input-import').value.split('\n')
+    const importLines = () => $('input-import').value.split('\\n')
       .map((s) => s.trim())
       .filter(Boolean);
 
@@ -980,7 +980,7 @@ export function renderDashboardHtml(): string {
       try {
         const r = await api('/export-all', { method: 'POST' });
         if (!r.blobs || r.blobs.length === 0) { toast('No accounts to export', 'info'); return; }
-        const text = r.blobs.map((b) => b.blob).join('\n');
+        const text = r.blobs.map((b) => b.blob).join('\\n');
         copyToClipboard(text, t('copyAllMsg'));
         $('diagnostics-panel').open = true;
         $('diagnostics-output').textContent = text;

@@ -14,6 +14,19 @@ describe('dsh-agy web routes & page rendering', () => {
     expect(html).toContain('account-list')
   })
 
+  it('serves a syntactically valid inline dashboard script (template-literal escapes)', () => {
+    // Regression: '\n' inside the page.ts template literal renders as a real
+    // newline, breaking the inline <script> and killing every button handler
+    // (login button appeared dead). The served script must parse.
+    const html = renderDashboardHtml()
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+    expect(script).toBeTruthy()
+    expect(() => new Function(script!)).not.toThrow()
+    // The line-splitting helpers must emit backslash-n, not a literal newline.
+    expect(script).toContain("split('\\n')")
+    expect(script).toContain(".join('\\n')")
+  })
+
   it('renders callback html for success and failure states', () => {
     const successHtml = renderCallbackHtml({ ok: true, email: 'test@example.com', baseUrl: 'http://127.0.0.1:3080' })
     expect(successHtml).toContain('Sign-in Successful')
