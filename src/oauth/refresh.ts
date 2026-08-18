@@ -6,6 +6,7 @@
 import type { OAuthAuthDetails } from '../types.ts'
 import { calculateTokenExpiry, formatRefreshParts, parseRefreshParts } from './auth.ts'
 import { AGY_CLIENT_ID, AGY_CLIENT_SECRET, OAUTH_TOKEN_URL } from './constants.ts'
+import { proxiedFetch } from '../proxy.ts'
 
 interface OAuthErrorPayload {
   error?:
@@ -94,7 +95,7 @@ export async function refreshAccessToken(auth: OAuthAuthDetails): Promise<Refres
 
   try {
     const startTime = Date.now()
-    const response = await fetch(OAUTH_TOKEN_URL, {
+    const response = await proxiedFetch(OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',

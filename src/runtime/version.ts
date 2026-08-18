@@ -6,6 +6,7 @@
  */
 
 import { AGY_VERSION_FALLBACK } from '../oauth/constants.ts'
+import { proxiedFetch } from '../proxy.ts'
 
 const VERSION_CACHE_TTL_MS = 6 * 60 * 60 * 1000
 const VERSION_FETCH_TIMEOUT_MS = 5_000
@@ -100,17 +101,17 @@ async function resolveProductVersion(
 }
 
 /** Resolve the newest known Antigravity version from the IDE feed. */
-export function resolveAntigravityIdeVersion(fetchImpl: FetchLike = fetch): Promise<string> {
+export function resolveAntigravityIdeVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string> {
   return resolveProductVersion(ideState, AGY_VERSION_FALLBACK, IDE_RELEASE_FEED_URL, parseIdeReleaseFeed, fetchImpl)
 }
 
 /** Resolve the newest known Antigravity version from the CLI releases. */
-export function resolveAntigravityCliVersion(fetchImpl: FetchLike = fetch): Promise<string> {
+export function resolveAntigravityCliVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string> {
   return resolveProductVersion(cliState, AGY_VERSION_FALLBACK, CLI_RELEASE_URL, parseCliRelease, fetchImpl)
 }
 
 /** Best available version: newest of both sources, cached 6h. */
-export async function resolveAntigravityVersion(fetchImpl: FetchLike = fetch): Promise<string> {
+export async function resolveAntigravityVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string> {
   const [ide, cli] = await Promise.all([resolveAntigravityIdeVersion(fetchImpl), resolveAntigravityCliVersion(fetchImpl)])
   return pickNewestVersion(ide, cli) ?? AGY_VERSION_FALLBACK
 }

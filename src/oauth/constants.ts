@@ -7,6 +7,8 @@
  * this project.
  */
 
+import { proxiedFetch } from '../proxy.ts'
+
 export const AGY_CLIENT_ID =
   '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com'
 
@@ -60,7 +62,7 @@ export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403])
 export async function fetchAgyFirstOk(
   urlPath: string,
   init: RequestInit,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = proxiedFetch,
 ): Promise<Response> {
   let lastSkipped: Response | null = null
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {

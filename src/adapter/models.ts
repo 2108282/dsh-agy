@@ -6,6 +6,7 @@
 
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
+import { proxiedFetch } from '../proxy.ts'
 import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId } from './catalog.ts'
 
 export const AGY_PROVIDER = 'agy'
@@ -27,7 +28,7 @@ export interface DiscoveredModels {
 export async function fetchAvailableModels(
   accessToken: string,
   projectId?: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = proxiedFetch,
 ): Promise<DiscoveredModels> {
   let lastError: unknown = null
   const body = projectId ? { project: projectId } : {}
@@ -83,7 +84,7 @@ export function catalogModelList(): LlmModelInfo[] {
 export async function listAgyModels(
   accessToken: string | undefined,
   projectId: string | undefined,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = proxiedFetch,
 ): Promise<readonly LlmModelInfo[]> {
   if (!accessToken) return catalogModelList()
   try {

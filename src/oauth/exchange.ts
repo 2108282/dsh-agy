@@ -16,6 +16,7 @@ import {
   getAgyBootstrapUserAgent,
 } from './constants.ts'
 import { decodeState } from './pkce.ts'
+import { proxiedFetch } from '../proxy.ts'
 
 const FETCH_TIMEOUT_MS = 10_000
 
@@ -38,7 +39,7 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = F
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, { ...options, signal: controller.signal })
+    return await proxiedFetch(url, { ...options, signal: controller.signal })
   } finally {
     clearTimeout(timeout)
   }
@@ -229,7 +230,7 @@ export async function exchangeAntigravity(
     }
 
     const startTime = Date.now()
-    const tokenResponse = await fetch(OAUTH_TOKEN_URL, {
+    const tokenResponse = await proxiedFetch(OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
@@ -253,7 +254,7 @@ export async function exchangeAntigravity(
 
     const tokenPayload = (await tokenResponse.json()) as TokenPayload
 
-    const userInfoResponse = await fetch(`${OAUTH_USERINFO_URL}?alt=json`, {
+    const userInfoResponse = await proxiedFetch(`${OAUTH_USERINFO_URL}?alt=json`, {
       headers: {
         Authorization: `Bearer ${tokenPayload.access_token}`,
         'User-Agent': getAgyBootstrapUserAgent(),

@@ -7,6 +7,7 @@
 
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapClientMetadata, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { decodeCredentialBlob } from '../oauth/blob.ts'
+import { proxiedFetch } from '../proxy.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { ManagedAccount } from '../types.ts'
 
@@ -84,7 +85,7 @@ export async function enrichWithAntigravityBackend(parsed: ParsedAgyAuth): Promi
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 8000)
   try {
-    const res = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+    const res = await proxiedFetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
       headers: { Authorization: `Bearer ${parsed.accessToken}` },
       signal: controller.signal,
     })
@@ -108,7 +109,7 @@ export async function enrichWithAntigravityBackend(parsed: ParsedAgyAuth): Promi
     }
     for (const endpoint of AGY_ENDPOINT_FALLBACKS) {
       try {
-        const res = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+        const res = await proxiedFetch(`${endpoint}/v1internal:loadCodeAssist`, {
           method: 'POST',
           headers,
           body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } }),

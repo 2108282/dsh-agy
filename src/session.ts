@@ -25,6 +25,7 @@ import {
 } from './runtime/fingerprint.ts'
 import { deriveAntigravitySessionId } from './runtime/identity.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
+import { proxiedFetch } from './proxy.ts'
 import type { Fingerprint } from './types.ts'
 
 export interface SessionManagerOptions {
@@ -342,7 +343,7 @@ export class AgySessionManager {
     const auth = await this.accessTokenFor(account)
     if (!auth) return { ok: false, error: 'refresh failed (revoked?)' }
     try {
-      const response = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+      const response = await proxiedFetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
         headers: { Authorization: `Bearer ${auth.access}` },
       })
       if (!response.ok) return { ok: false, error: `userinfo ${response.status}` }
