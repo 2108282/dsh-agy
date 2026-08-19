@@ -47,7 +47,9 @@ Dependency direction: `oauth/` and `store/` are leaves (no internal deps); `runt
 | `oauth/blob` | `encode/decode(blob)` | prefix validation, provider binding anti-replay | pure unit |
 | `store/accounts` | `load() / save(acc) / mutate(fn)` | encryption, proper-lockfile, migration chain, dedup, 0600 | **in-memory fake** (second adapter, a legitimate seam) |
 | `runtime/classify` | `classify(error) -> Kind` | 429/403/network-error parsing, Retry-After, resetTime | fixture |
-| `runtime/rotation` | `onFailure(acc, kind) -> Action` | cooldown, tiered backoff, activeIndex switching, fingerprint-regeneration trigger | state-machine unit tests |
+| `runtime/rotation` | `onFailure(acc, kind) -> Action` | cooldown to the server-reported reset time (capped 30min/24h), tiered backoff, activeIndex switching, fingerprint-regeneration trigger | state-machine unit tests |
+| `runtime/quota` | `rank(accounts, model) -> order` | fetchAvailableModels → per-family quota records (google/anthropic/openai), drained/hot-window guards, required-drain ranking (OMP-aligned) | pure unit |
+| `runtime/risk` | `isDisabled() / fingerprintMode()` | env-gated kill switch + stable-identity mode (BYO client credentials resolve in oauth/constants) | pure unit |
 | `runtime/fingerprint` | `generate() -> Fingerprint` | random platform/arch/SDK pool, history mgmt (<=5), version sync; **data externalized to JSON** | pure unit |
 | `adapter/translate` | `toBody(generateOptions) -> RequestBody` | DSH messages/tools -> Gemini contents[], thinking carried verbatim | fixture (recorded requests) |
 | `adapter/parse` | `fromSSE(line) -> Chunk[]` | SSE line parsing, candidates[] -> StreamChunk, usage/error events | fixture (recorded responses) |
@@ -67,8 +69,8 @@ Dependency direction: `oauth/` and `store/` are leaves (no internal deps); `runt
 | `thinking-recovery.ts` + warmup | Root cause was "strip thinking to dodge signature validation"; we carry reasoning blocks verbatim, so this problem doesn't arise |
 | `cross-model-integration.ts` | DSH history is provider-neutral blocks; the loop owns cross-model continuity; the source was already deleted in the archived repo |
 | gemini-cli header style / dual quota pool | Google no longer supports that client path; a single quota pool simplifies rotation |
-| Model-family split `activeIndexByFamily` | Not needed for the 1-3 account scenario |
-| Plugin Config (schemastery) | No user configuration surface |
+| Model-family split `activeIndexByFamily` | One affinity pin + family-scoped quota ranking (`runtime/quota`) covers the need without per-family active indices |
+| Plugin Config (schemastery) | No plugin Config schema — risk controls are plain env switches (`runtime/risk`) instead |
 
 ## 5. Directory Tree (final shape)
 

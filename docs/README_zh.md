@@ -13,7 +13,7 @@ OAuth 认证、多账号池 + 自动 429 轮换、设备指纹伪装，以及 CL
 
 - **OAuth 登录**: 通过浏览器 OAuth 回调一键登录，支持 headless 粘贴 URL 模式与远程粘贴凭据 blob 通道。
 - **双管理入口**: web 和 cli 任选其一，核心功能一致。
-- **多账号池**: 加密账号存储、限流自动轮换、分级退避冷却、每账号设备指纹。
+- **多账号池**: 加密账号存储、用量感知选号（模型族配额 + OMP 对齐排名）、限流自动轮换、冷却到真实 reset 时间、每账号设备指纹。
 - **配额仪表盘**: 仅在 DSH Web 启动时有效，在你的 dsh web 地址后添加 `/agy` 访问：登录、账号管理、每模型配额条、模型测试、
   凭据导出/导入、指纹管理。
 - **CLI**: `dsh-agy login|status|import|verify|logout`，独立于 harness 运行。
@@ -70,6 +70,7 @@ dsh-agy logout         # 删除账号
 | `dsh-agy import <文件...>` | `--blob` — 输入是凭据 blob<br>`--email <email>` — 指定邮箱（跳过 userinfo 校验）<br>`--overwrite` — 覆盖同邮箱的已有账号 | 导入 agy auth.json 文件或凭据 blob（多文件 / 多行粘贴 = 批量导入） |
 | `dsh-agy export` | `--index <n>` — 只导出指定账号（默认全部）<br>`--out <dir>` — 每账号写一个 `dsh-agy-<index>.blob` 文件（默认输出到 stdout，每行一个 blob） | 将账号凭据导出为粘贴 blob |
 | `dsh-agy verify` | `--index <n>` — 只验证指定账号（默认全部） | refresh + 健康检查 |
+| `dsh-agy health` | `--index <n...>` — 只检查指定账号（默认全部启用账号）<br>`--interval <ms>` — 按间隔重复检查 | 批量健康检查（refresh + userinfo），凭据恢复有效的账号自动重新启用 |
 | `dsh-agy logout` | `--index <n>` — 账号索引（默认当前 active）<br>`--email <email>` — 账号邮箱 | 删除账号 |
 
 ### 路径 C：本地源码开发与调试（Link 模式）
@@ -108,16 +109,30 @@ rm -f ~/.dsh/agy-fingerprint-data.json   # 仅当创建过覆盖文件
 
 ### 轮换机制
 
+用量感知选号：多账号时，按请求模型对应的后端计数器族（`gemini-*` → Google、
+`claude-*` → Anthropic、`gpt-*` → OpenAI）排序——即将到期且仍有额度的账号优先
+使用（"不用白不用"），接近耗尽的族会被避开，完全耗尽的族会把账号阻断到真实
+reset 时间。
+
 429 (Too Many Requests)响应：
 
 | 分类 | 行为 |
 |---|---|
 | `soft_rate_limit`（Retry-After < 3s） | 同账号立即重试，不冷却 |
-| `rate_limited` | 5 分钟冷却 + 切换到下一账号（单账号时冷却后重试同号） |
-| `quota_exhausted`（"quota reached"/"individual quota"/RESOURCE_EXHAUSTED…） | 24 小时冷却——当天不再尝试调用该账号 |
+| `rate_limited` | 冷却到服务端上报的 reset 时间（上限 30 分钟，无上报时 5 分钟）+ 切换到下一账号（单账号时冷却后重试同号） |
+| `quota_exhausted`（"quota reached"/"individual quota"/RESOURCE_EXHAUSTED…） | 冷却到服务端上报的 reset 时间（上限 24 小时）——到点前不再尝试调用该账号 |
 | `unknown` | 指数退避 |
 
 401/403 → 账号吊销（标记需重新认证）。成功重置失败计数。
+
+### 风险管控（环境开关）
+
+| 环境变量 | 作用 |
+|---|---|
+| `DSH_AGY_DISABLE=1` | 总开关：插件不注册任何东西（provider + `/agy` 路由），CLI 拒绝运行。 |
+| `DSH_AGY_FINGERPRINT_MODE=stable` | 每账号固定一个客户端身份——不做逐请求随机头、不再生指纹（OMP 式固定客户端姿态）。默认 `dynamic` 保持逐请求随机。 |
+| `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | harness 内后台批量健康探测（按间隔 refresh + userinfo）；默认关闭。 |
+| `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | 自备 OAuth App 逃生通道：覆盖内置的公开 Antigravity 客户端凭据。 |
 
 
 ### 关于缓存命中：为什么达不到 DeepSeek V4 的 99%？

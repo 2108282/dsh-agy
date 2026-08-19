@@ -43,9 +43,20 @@ export function isRateLimited(account: ManagedAccount, now = Date.now()): boolea
   return Object.values(times).some((reset) => typeof reset === 'number' && reset > now)
 }
 
-/** Record a rate-limit reset for one model key. */
+/** Whether the requested model family on this account is rate-limited. */
+export function isFamilyRateLimited(account: ManagedAccount, family: string | undefined, now = Date.now()): boolean {
+  if (!family) return false
+  const resetAt = account.rateLimitResetTimes?.[family]
+  return typeof resetAt === 'number' && resetAt > now
+}
+
+/** Record a rate-limit reset for one model key, retaining the latest reset time. */
 export function recordRateLimit(account: ManagedAccount, modelKey: string, resetAtMs: number): void {
-  account.rateLimitResetTimes = { ...(account.rateLimitResetTimes ?? {}), [modelKey]: resetAtMs }
+  const current = account.rateLimitResetTimes?.[modelKey] ?? 0
+  account.rateLimitResetTimes = {
+    ...(account.rateLimitResetTimes ?? {}),
+    [modelKey]: Math.max(current, resetAtMs),
+  }
 }
 
 /** Clear expired rate limits and cooldowns in place. */
@@ -66,6 +77,16 @@ export function clearExpiredState(account: ManagedAccount, now = Date.now()): vo
 export const FULL_QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000
 /** 5min cooldown for per-minute rate limits. */
 export const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000
+/** Cap for a server-reported reset time on per-minute limits (guards against bogus far-future values). */
+export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000
+
+/** Absolute server-reported reset in ms when it lies in the future, else undefined. */
+export function parseFutureResetMs(resetTime: string | undefined, now = Date.now()): number | undefined {
+  if (!resetTime) return undefined
+  const reset = Date.parse(resetTime)
+  if (Number.isNaN(reset) || reset <= now) return undefined
+  return reset
+}
 
 /**
  * Decide what to do after one failed attempt.
@@ -74,6 +95,7 @@ export const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000
  * @param account - the account that failed (mutated with cooldown/rate-limit state).
  * @param consecutiveFailures - consecutive failures on this account.
  * @param retryAfterMs - server-provided retry delay when present.
+ * @param resetTime - server-provided absolute reset time; cooldowns use it (capped) instead of fixed windows.
  */
 export function decideRotation(
   kind: FailureKind,
@@ -81,6 +103,7 @@ export function decideRotation(
   consecutiveFailures: number,
   retryAfterMs?: number,
   category: RateLimitCategory = 'unknown',
+  resetTime?: string,
 ): RotationAction {
   const now = Date.now()
   const backoffMs = backoffFor(consecutiveFailures)
@@ -92,15 +115,25 @@ export function decideRotation(
         return { action: 'retry', backoffMs: Math.min(retryAfterMs ?? backoffMs, 3000) }
       }
       if (category === 'quota_exhausted') {
-        // Daily/plan quota gone: long cooldown; a single account just waits.
-        account.coolingDownUntil = now + FULL_QUOTA_COOLDOWN_MS
-        account.cooldownReason = undefined
-        return { action: 'cool', backoffMs: FULL_QUOTA_COOLDOWN_MS }
+        // Daily/plan quota gone: cool until the real reset when the backend
+        // reported one (capped at 24h), else the fixed daily window.
+        const resetMs = parseFutureResetMs(resetTime, now)
+        const cooldownMs = resetMs !== undefined
+          ? Math.min(resetMs - now, FULL_QUOTA_COOLDOWN_MS)
+          : FULL_QUOTA_COOLDOWN_MS
+        account.coolingDownUntil = now + Math.max(cooldownMs, 60_000)
+        account.cooldownReason = 'quota-exhausted'
+        return { action: 'cool', backoffMs: Math.max(cooldownMs, 60_000) }
       }
-      const cooldownMs = retryAfterMs ?? RATE_LIMIT_COOLDOWN_MS
-      account.coolingDownUntil = now + cooldownMs
-      account.cooldownReason = undefined // per-model resets live in rateLimitResetTimes
-      return { action: 'rotate', backoffMs }
+      // Per-minute rate limit: prefer the server's real reset (capped), then
+      // Retry-After, then the fixed short window. The family-scoped reset is
+      // recorded in account.rateLimitResetTimes, so other model families on
+      // this account stay unblocked (AuthStorage-aligned).
+      const resetMs = parseFutureResetMs(resetTime, now)
+      const cooldownMs = resetMs !== undefined
+        ? Math.min(resetMs - now, MAX_RATE_LIMIT_COOLDOWN_MS)
+        : (retryAfterMs ?? RATE_LIMIT_COOLDOWN_MS)
+      return { action: 'rotate', backoffMs: Math.max(cooldownMs, 1000) }
     }
     case 'auth-failure': {
       // Terminal: account credentials are dead; never auto-recover.
@@ -140,10 +173,16 @@ export function pickNextAccountIndex(
   accounts: ManagedAccount[],
   currentIndex: number,
   now = Date.now(),
+  modelOrFamily?: string,
 ): number {
   if (accounts.length <= 1) return currentIndex
   const enabled = accounts.map((a, i) => ({ account: a, index: i }))
-    .filter(({ account, index }) => index !== currentIndex && account.enabled !== false && !isCoolingDown(account, now))
+    .filter(({ account, index }) => {
+      if (index === currentIndex || account.enabled === false) return false
+      if (isCoolingDown(account, now)) return false
+      if (modelOrFamily && isFamilyRateLimited(account, modelOrFamily, now)) return false
+      return true
+    })
   if (enabled.length === 0) return currentIndex
   // Round-robin: first candidate after current index, else first eligible.
   const after = enabled.find((e) => e.index > currentIndex)

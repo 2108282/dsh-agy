@@ -4,26 +4,41 @@
  * in-harness plugin shell, the CLI, and the web routes.
  */
 
-import type { AgyAccountSession } from './adapter/adapter.ts'
-import type { AccountStorageV4, FailureKind, ManagedAccount, OAuthAuthDetails } from './types.ts'
+import { AgyAuthError, AgyPoolBlockedError } from './types.ts'
+import type { AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails } from './types.ts'
 import { refreshAccessToken } from './oauth/refresh.ts'
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from './oauth/auth.ts'
 import type { AccountStore } from './store/accounts.ts'
-import { resolveActiveAccount } from './store/accounts.ts'
 import {
+  MAX_RATE_LIMIT_COOLDOWN_MS,
+  RATE_LIMIT_COOLDOWN_MS,
   clearExpiredState,
   decideRotation,
   isCoolingDown,
+  isFamilyRateLimited,
+  parseFutureResetMs,
   pickNextAccountIndex,
+  recordRateLimit,
 } from './runtime/rotation.ts'
+import {
+  familyKeyOf,
+  familyQuotaFor,
+  ingestFamilyQuotas,
+  isFamilyDrained,
+  isQuotaStale,
+  modelFamilyOf,
+  rankPoolCandidates,
+} from './runtime/quota.ts'
 import {
   DEFAULT_FINGERPRINT_DATA,
   generateFingerprint,
   getRandomizedHeaders,
+  getStableHeaders,
   recordFingerprintVersion,
   updateFingerprintVersion,
 } from './runtime/fingerprint.ts'
 import { deriveAntigravitySessionId } from './runtime/identity.ts'
+import { fingerprintMode } from './runtime/risk.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
 import { proxiedFetch } from './proxy.ts'
 import type { Fingerprint } from './types.ts'
@@ -32,6 +47,16 @@ export interface SessionManagerOptions {
   store: AccountStore
   /** Called after rotation changes the active index (for logging/UI). */
   onRotate?: (fromIndex: number, toIndex: number, reason: FailureKind) => void
+  /** Called after a health check finishes (batch probe results). */
+  onHealthReport?: (results: AccountHealthResult[]) => void
+}
+
+/** One account's health check result (refresh + userinfo). */
+export interface AccountHealthResult {
+  index: number
+  email?: string
+  ok: boolean
+  error?: string
 }
 
 /**
@@ -46,10 +71,16 @@ interface TokenCacheEntry {
   expires: number
 }
 
+interface QuotaRefreshResult {
+  key: string
+  quotas: Record<string, CachedQuota>
+  updatedAt: number
+}
+
 /**
  * Resolve the impersonation headers for one request from the account's
- * persistent fingerprint (stable identity), falling back to full per-request
- * randomization when the account has no fingerprint yet.
+ * persistent fingerprint (stable identity). The fallback randomizes per
+ * request in `dynamic` mode and pins one identity in `stable` mode.
  */
 export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSession['impersonation'] {
   const fingerprint = account.fingerprint
@@ -60,23 +91,33 @@ export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSess
       'Client-Metadata': JSON.stringify(fingerprint.clientMetadata),
     }
   }
-  const randomized = getRandomizedHeaders(DEFAULT_FINGERPRINT_DATA)
+  const headers = fingerprintMode() === 'stable'
+    ? getStableHeaders(DEFAULT_FINGERPRINT_DATA)
+    : getRandomizedHeaders(DEFAULT_FINGERPRINT_DATA)
   return {
-    'User-Agent': randomized['User-Agent'],
-    'X-Goog-Api-Client': randomized['X-Goog-Api-Client'],
-    'Client-Metadata': randomized['Client-Metadata'],
+    'User-Agent': headers['User-Agent'],
+    'X-Goog-Api-Client': headers['X-Goog-Api-Client'],
+    'Client-Metadata': headers['Client-Metadata'],
   }
 }
 
 export class AgySessionManager {
   private readonly store: AccountStore
   private readonly onRotate: SessionManagerOptions['onRotate']
+  private readonly onHealthReport: SessionManagerOptions['onHealthReport']
   private readonly tokenCache = new Map<string, TokenCacheEntry>()
   /** In-flight refresh promises keyed by account: concurrent requests share one refresh. */
   private readonly refreshInFlight = new Map<string, Promise<OAuthAuthDetails | undefined>>()
+  /** In-flight quota fetches keyed by account: concurrent selections share one fetchAvailableModels call. */
+  private readonly quotaRefreshInFlight = new Map<string, Promise<QuotaRefreshResult | null>>()
   private readonly failureCounts = new Map<string, number>()
   /** Accounts whose request-time project discovery already failed (no retry per request). */
   private readonly projectRetryFailed = new Set<string>()
+
+  /** Bound for one quota poll so selection never stalls on a hung endpoint. */
+  private static readonly QUOTA_FETCH_TIMEOUT_MS = 3_000
+  /** Refresh the token this far ahead of expiry so a request never blocks on the token endpoint. */
+  private static readonly REFRESH_SKEW_MS = 2 * 60 * 1000
 
   /**
    * Session affinity (time-window approximation): DSH exposes no conversation
@@ -85,185 +126,368 @@ export class AgySessionManager {
    * the turns of one conversation (OmniRoute pins by session for the same
    * reason). Cleared on rotate so a failure re-picks from activeIndex.
    */
-  private lastUsed: { index: number; at: number } | null = null
+  private lastUsed: { key: string; at: number } | null = null
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store
     this.onRotate = options.onRotate
+    this.onHealthReport = options.onHealthReport
   }
 
   private accountKey(account: ManagedAccount): string {
-    return account.email ?? `idx-${account.refresh}`
+    return account.id ?? account.email ?? `idx-${account.refresh}`
   }
 
-  /** Resolve a usable access token for the account, refreshing when expired. */
+  /**
+   * Refresh the account's access token (single-flight per account). A transient
+   * refresh failure keeps the cached token in place (retain-last-good): the old
+   * token stays valid until its own expiry and a later request retries the
+   * refresh. Only `invalid_grant` drops the cache.
+   */
+  private refreshToken(key: string, account: ManagedAccount, cached?: TokenCacheEntry): Promise<OAuthAuthDetails | undefined> {
+    const inFlight = this.refreshInFlight.get(key)
+    if (inFlight) return inFlight
+
+    const refreshing = (async (): Promise<OAuthAuthDetails | undefined> => {
+      const result = await refreshAccessToken(
+        { access: cached?.access ?? '', expires: cached?.expires ?? 0, refresh: account.refresh },
+        { clientId: account.clientId },
+      )
+      if (result.type === 'success') {
+        if (!account.clientId && result.clientId) {
+          await this.store.mutate((s) => {
+            const target = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+            if (!target) throw new Error(`Account ${key} not found during clientId migration`)
+            target.clientId = result.clientId
+          })
+          account.clientId = result.clientId
+        }
+        // Cache token strictly AFTER disk persistence has succeeded
+        this.tokenCache.set(key, { access: result.auth.access, expires: result.auth.expires })
+        return result.auth
+      }
+      if (result.type === 'failed') {
+        if (cached && !accessTokenExpired({ access: cached.access, expires: cached.expires, refresh: account.refresh })) {
+          return { access: cached.access, expires: cached.expires, refresh: account.refresh }
+        }
+        const kind = result.error.status === 429
+          ? 'rate-limit'
+          : result.error.status === 0 || result.error.status === 408 || result.error.status >= 500
+            ? 'transport'
+            : 'invalid-credential'
+        throw new AgyAuthError(kind, result.error.message, { cause: result.error })
+      }
+      if (result.type === 'revoked') {
+        // Account credentials are dead — mark it disabled and verificationRequired in the store
+        this.tokenCache.delete(key)
+        await this.store.mutate((s) => {
+          const target = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+          if (target) {
+            target.enabled = false
+            target.verificationRequired = true
+            target.verificationRequiredAt = Date.now()
+            target.verificationRequiredReason = 'auth-failure'
+          }
+        })
+        account.enabled = false
+        account.verificationRequired = true
+        account.verificationRequiredAt = Date.now()
+        account.verificationRequiredReason = 'auth-failure'
+        return undefined
+      }
+      return undefined
+    })()
+    this.refreshInFlight.set(key, refreshing)
+    refreshing.then(
+      () => this.refreshInFlight.delete(key),
+      () => this.refreshInFlight.delete(key),
+    )
+    return refreshing
+  }
+
+  /** Resolve a usable access token for the account, pre-emptively refreshing near expiry. */
   private async accessTokenFor(account: ManagedAccount): Promise<OAuthAuthDetails | undefined> {
     const key = this.accountKey(account)
     const cached = this.tokenCache.get(key)
     const now = Date.now()
     if (cached && !accessTokenExpired({ access: cached.access, expires: cached.expires, refresh: account.refresh })) {
+      // Pre-emptive refresh within the skew: serve the still-valid token and
+      // refresh in the background (OMP-style refresh skew).
+      if (cached.expires <= now + AgySessionManager.REFRESH_SKEW_MS) {
+        void this.refreshToken(key, account, cached)
+      }
       return { access: cached.access, expires: cached.expires, refresh: account.refresh }
     }
+    return this.refreshToken(key, account, cached)
+  }
 
-    const inFlight = this.refreshInFlight.get(key)
-    if (inFlight) return inFlight
+  /**
+   * Refresh stale per-account quota caches (family-scoped, health-based TTL).
+   * Failures leave the account unmeasured: ranking treats it as a fallback
+   * instead of blocking selection on a hung endpoint.
+   */
+  private async refreshQuotaCache(storage: AccountStorageV4): Promise<void> {
+    const now = Date.now()
+    const stale = storage.accounts.filter((account) => account.enabled !== false && isQuotaStale(account, now))
+    if (stale.length === 0) return
 
-    const refreshing = (async (): Promise<OAuthAuthDetails | undefined> => {
-      const result = await refreshAccessToken({ access: cached?.access ?? '', expires: cached?.expires ?? 0, refresh: account.refresh })
-      if (result.type === 'success') {
-        this.tokenCache.set(key, { access: result.auth.access, expires: result.auth.expires })
-        return result.auth
+    const results = await Promise.all(stale.map(async (account) => {
+      const key = this.accountKey(account)
+      if (this.quotaRefreshInFlight.has(key)) return this.quotaRefreshInFlight.get(key)
+      const refresh = (async () => {
+        try {
+          const auth = await this.accessTokenFor(account)
+          if (!auth) return null
+          const { fetchAvailableModels } = await import('./adapter/models.ts')
+          const boundedFetch: typeof fetch = (input, init) => {
+            const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
+            const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+            return fetch(input, { ...init, signal })
+          }
+          const discovered = await fetchAvailableModels(auth.access, account.projectId, boundedFetch)
+          const quotas = ingestFamilyQuotas(discovered)
+          return { key, quotas, updatedAt: Date.now() }
+        } catch {
+          return null
+        }
+      })()
+      this.quotaRefreshInFlight.set(key, refresh)
+      try {
+        return await refresh
+      } finally {
+        this.quotaRefreshInFlight.delete(key)
       }
-      if (result.type === 'revoked') {
-        // Account credentials are dead — mark it disabled; the next failure path
-        // will surface the message.
-        this.tokenCache.delete(key)
-        return undefined
-      }
-      return undefined
-    })()
+    }))
 
-    this.refreshInFlight.set(key, refreshing)
-    try {
-      return await refreshing
-    } finally {
-      this.refreshInFlight.delete(key)
+    const updates = results.filter((r): r is { key: string; quotas: Record<string, CachedQuota>; updatedAt: number } => Boolean(r && Object.keys(r.quotas).length > 0))
+    if (updates.length > 0) {
+      for (const update of updates) {
+        const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
+        if (target) {
+          target.cachedQuota = update.quotas
+          target.cachedQuotaUpdatedAt = update.updatedAt
+        }
+      }
+      try {
+        await this.store.mutate((s) => {
+          for (const update of updates) {
+            const target = s.accounts.find((candidate) => this.accountKey(candidate) === update.key)
+            if (target) {
+              target.cachedQuota = update.quotas
+              target.cachedQuotaUpdatedAt = update.updatedAt
+            }
+          }
+        })
+      } catch {
+        // Quota is a derived cache — a failed write degrades gracefully without
+        // failing the active request (next refresh cycle re-ingests).
+      }
     }
   }
 
-  private async pickAccount(storage: AccountStorageV4): Promise<{ account: ManagedAccount; index: number } | undefined> {
+  /**
+   * Pick the account for one request: the affinity pin wins while it is fresh,
+   * healthy, and not drained for the requested model; otherwise the pool is
+   * ranked by family-scoped usage (OMP-aligned) and the best candidate wins.
+   */
+  private async pickAccount(storage: AccountStorageV4, model?: string): Promise<{ account: ManagedAccount; index: number } | undefined> {
     const now = Date.now()
     for (const account of storage.accounts) clearExpiredState(account, now)
 
-    let resolved = resolveActiveAccount(storage)
-    if (!resolved) return undefined
+    const family = modelFamilyOf(model)
+    const familyKey = familyKeyOf(model)
     // Session affinity (time-window approximation): reuse the last-used account
     // while it is fresh and healthy, so one conversation stays on one account
-    // (upstream prefix cache + sessionId continuity). DSH exposes no
-    // conversation id, so the window is the proxy; rotate clears it.
+    // (upstream prefix cache + sessionId continuity). A drained family or a
+    // cooldown breaks the pin and re-ranks, mirroring OMP's pinned-until-unusable.
     if (this.lastUsed && now - this.lastUsed.at < SESSION_AFFINITY_WINDOW_MS) {
-      const last = storage.accounts[this.lastUsed.index]
-      if (last && last.enabled !== false && !isCoolingDown(last, now)) {
-        resolved = { account: last, index: this.lastUsed.index }
+      const lastIndex = storage.accounts.findIndex((a) => this.accountKey(a) === this.lastUsed!.key)
+      if (lastIndex !== -1) {
+        const last = storage.accounts[lastIndex]!
+        if (
+          last.enabled !== false &&
+          !isCoolingDown(last, now) &&
+          !isFamilyRateLimited(last, familyKey, now) &&
+          !isFamilyDrained(last, family, now)
+        ) {
+          return { account: last, index: lastIndex }
+        }
       }
     }
-    // Skip accounts that are cooling down (rate-limit cooldowns).
-    if (isCoolingDown(resolved.account, now)) {
-      const nextIndex = pickNextAccountIndex(storage.accounts, resolved.index, now)
-      if (nextIndex !== resolved.index) {
-        resolved = { account: storage.accounts[nextIndex]!, index: nextIndex }
-      }
-    }
-    return resolved
-  }
+    const eligible = storage.accounts
+      .map((account, index) => ({ account, index }))
+      .filter(({ account }) => account.enabled !== false)
+    if (eligible.length === 0) return undefined
 
+    const ranked = rankPoolCandidates(eligible, model, now, storage.activeIndex)
+    const picked = ranked.find((candidate) => candidate.blockedUntil === null)
+    if (!picked) {
+      const quotaExhausted = (account: ManagedAccount): boolean => {
+        if (account.cooldownReason === 'quota-exhausted' && (account.coolingDownUntil ?? 0) > now) return true
+        const quota = familyQuotaFor(account, family)
+        if ((quota?.remainingFraction ?? 1) > 0 || !quota?.resetTime) return false
+        const resetAt = Date.parse(quota.resetTime)
+        return !Number.isNaN(resetAt) && resetAt > now
+      }
+      const retryable = ranked.filter((candidate) => !quotaExhausted(candidate.account))
+      const blocked = retryable.length > 0 ? retryable : ranked
+      const blockedUntil = Math.min(...blocked.map((candidate) => candidate.blockedUntil ?? now))
+      throw new AgyPoolBlockedError(retryable.length > 0 ? 'retryable' : 'quota-exhausted', blockedUntil)
+    }
+    if (picked.index !== storage.activeIndex) {
+      storage.activeIndex = picked.index
+      await this.store.mutate((s) => {
+        s.activeIndex = picked.index
+      })
+    }
+    return { account: picked.account, index: picked.index }
+  }
   /**
    * Adapter hook: resolve the active session (refresh if needed), healing a
    * missing projectId at request time — the OAuth-time loadCodeAssist may have
    * transiently failed even when the Google account owns a Cloud Code project
    * (mirrors OmniRoute's ensureAntigravityProjectAssigned + persistence).
+   * @param model - requested model id; drives family-scoped quota ranking.
    */
-  async getSession(): Promise<AgyAccountSession | undefined> {
-    const storage = await this.store.load()
-    const picked = await this.pickAccount(storage)
-    if (!picked) return undefined
+  async getSession(model?: string): Promise<AgyAccountSession | undefined> {
+    let storage = await this.store.load()
+    const maxAttempts = storage.accounts.filter((account) => account.enabled !== false).length
 
-    const auth = await this.accessTokenFor(picked.account)
-    if (!auth) return undefined
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const eligible = storage.accounts.filter((account) => account.enabled !== false)
+      if (eligible.length > 1) {
+        await this.refreshQuotaCache(storage)
+        // In-memory overlay on storage already took place in refreshQuotaCache.
+      }
+      const picked = await this.pickAccount(storage, model)
+      if (!picked) return undefined
+      const auth = await this.accessTokenFor(picked.account)
+      if (!auth) {
+        // The selected credential was revoked and disabled by accessTokenFor.
+        // Re-read and select another enabled account within this same request.
+        this.lastUsed = null
+        storage = await this.store.load()
+        continue
+      }
 
-    const key = this.accountKey(picked.account)
-    if (!picked.account.projectId && !this.projectRetryFailed.has(key)) {
-      try {
-        const { loadCodeAssist } = await import('./oauth/exchange.ts')
-        const { projectId } = await loadCodeAssist(auth.access)
-        if (projectId) {
-          await this.store.mutate((s) => {
-            const account = s.accounts[picked.index]
-            if (account) {
-              account.projectId = projectId
-              // Keep the packed refresh string in sync.
-              const parts = parseRefreshParts(account.refresh)
-              account.refresh = formatRefreshParts({
-                refreshToken: parts.refreshToken,
-                projectId,
-                managedProjectId: parts.managedProjectId,
-              })
-            }
-          })
-          picked.account.projectId = projectId
-        } else {
+      const key = this.accountKey(picked.account)
+      if (!picked.account.projectId && !this.projectRetryFailed.has(key)) {
+        try {
+          const { loadCodeAssist } = await import('./oauth/exchange.ts')
+          const { projectId } = await loadCodeAssist(auth.access)
+          if (projectId) {
+            await this.store.mutate((s) => {
+              const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+              if (account) {
+                account.projectId = projectId
+                // Keep the packed refresh string in sync.
+                const parts = parseRefreshParts(account.refresh)
+                account.refresh = formatRefreshParts({
+                  refreshToken: parts.refreshToken,
+                  projectId,
+                  managedProjectId: parts.managedProjectId,
+                })
+              }
+            })
+            picked.account.projectId = projectId
+          } else {
+            this.projectRetryFailed.add(key)
+          }
+        } catch {
           this.projectRetryFailed.add(key)
         }
-      } catch {
-        this.projectRetryFailed.add(key)
+      }
+
+      this.lastUsed = { key, at: Date.now() }
+      return {
+        auth,
+        account: picked.account,
+        index: picked.index,
+        impersonation: impersonationHeadersFor(picked.account),
       }
     }
 
-    this.lastUsed = { index: picked.index, at: Date.now() }
-    return {
-      auth,
-      account: picked.account,
-      index: picked.index,
-      impersonation: impersonationHeadersFor(picked.account),
-    }
+    return undefined
   }
 
   /** Adapter hook: apply rotation decisions and fingerprint regeneration. */
   async reportFailure(
     kind: FailureKind,
     session: AgyAccountSession,
-    info?: { retryAfterMs?: number; status?: number; rateLimitCategory?: import('./runtime/classify.ts').RateLimitCategory },
+    info?: {
+      retryAfterMs?: number
+      status?: number
+      rateLimitCategory?: import('./runtime/classify.ts').RateLimitCategory
+      /** Server-reported absolute reset time; drives precise cooldowns. */
+      resetTime?: string
+      /** Requested model id; drives family-scoped rate-limit bookkeeping. */
+      model?: string
+    },
   ): Promise<void> {
-    const storage = await this.store.load()
-    const account = storage.accounts[session.index]
-    if (!account) return
-
-    const key = this.accountKey(account)
+    if (!session?.account) return
+    const key = this.accountKey(session.account)
     const consecutive = (this.failureCounts.get(key) ?? 0) + 1
     this.failureCounts.set(key, consecutive)
+    let nextIndexToRotate: number | null = null
+    const fpCachedVersion = kind === 'rate-limit' ? peekCachedAntigravityVersion() : null
+    const fpResolvedVersion = (kind === 'rate-limit' && !fpCachedVersion) ? await resolveAntigravityVersionBounded() : (fpCachedVersion ?? '1.18.3')
 
-    const decision = decideRotation(kind, account, consecutive, info?.retryAfterMs, info?.rateLimitCategory)
+    await this.store.mutate((storage) => {
+      const account = storage.accounts.find((a) => this.accountKey(a) === key)
+      if (!account) return
 
-    if (decision.action === 'revoke') {
-      this.tokenCache.delete(key)
-      this.failureCounts.delete(key)
-      await this.store.save(storage)
-      return
-    }
+      const decision = decideRotation(kind, account, consecutive, info?.retryAfterMs, info?.rateLimitCategory, info?.resetTime)
 
-    // Fingerprint lifecycle: create on first rate-limit, regenerate after
-    // repeated failures (bounded by history inside recordFingerprintVersion).
-    // UA versions come from the version resolver (bounded, cached 6h) so
-    // fingerprints never pin a stale Antigravity client version.
-    if (kind === 'rate-limit') {
-      if (!account.fingerprint) {
-        account.fingerprint = generateFingerprint(undefined, await resolveAntigravityVersionBounded())
-        account.fingerprintHistory = recordFingerprintVersion(account.fingerprintHistory, account.fingerprint, 'initial')
-      } else {
-        // In-place UA refresh from the cached version (no network on this path).
-        const cached = peekCachedAntigravityVersion()
-        if (cached) updateFingerprintVersion(account.fingerprint, cached)
-        if (consecutive >= 2) {
-          const fresh = generateFingerprint(undefined, await resolveAntigravityVersionBounded())
-          account.fingerprintHistory = recordFingerprintVersion(account.fingerprintHistory, fresh, 'regenerated')
-          account.fingerprint = fresh
+      if (kind === 'rate-limit' && info?.rateLimitCategory !== 'soft_rate_limit') {
+        // Family-scoped bookkeeping of the real reset (display + ranking wall).
+        // Soft rate limits are transient bursts handled via immediate retry — do not block the family.
+        const familyKey = familyKeyOf(info?.model)
+        const resetMs = parseFutureResetMs(info?.resetTime, Date.now()) ??
+          (Date.now() + Math.min(info?.retryAfterMs ?? RATE_LIMIT_COOLDOWN_MS, MAX_RATE_LIMIT_COOLDOWN_MS))
+        recordRateLimit(account, familyKey, resetMs)
+      }
+
+      if (decision.action === 'revoke') {
+        this.tokenCache.delete(key)
+        this.failureCounts.delete(key)
+        return
+      }
+
+      // Fingerprint lifecycle: create on first rate-limit, regenerate after
+      // repeated failures (bounded by history inside recordFingerprintVersion).
+      // UA versions come from the version resolver (bounded, cached 6h) so
+      // fingerprints never pin a stale Antigravity client version. The `stable`
+      // risk mode pins one identity per account: create once, never regenerate.
+      if (kind === 'rate-limit' && info?.rateLimitCategory !== 'soft_rate_limit') {
+        if (!account.fingerprint) {
+          account.fingerprint = generateFingerprint(undefined, fpResolvedVersion)
+          account.fingerprintHistory = recordFingerprintVersion(account.fingerprintHistory, account.fingerprint, 'initial')
+        } else {
+          if (fpCachedVersion) updateFingerprintVersion(account.fingerprint, fpCachedVersion)
+          if (fingerprintMode() !== 'stable' && consecutive >= 2) {
+            const fresh = generateFingerprint(undefined, fpResolvedVersion)
+            account.fingerprintHistory = recordFingerprintVersion(account.fingerprintHistory, fresh, 'regenerated')
+            account.fingerprint = fresh
+          }
         }
       }
-    }
 
-    if (decision.action === 'rotate') {
-      const nextIndex = pickNextAccountIndex(storage.accounts, session.index)
-      if (nextIndex !== session.index) {
-        storage.activeIndex = nextIndex
-        this.onRotate?.(session.index, nextIndex, kind)
+      if (decision.action === 'rotate') {
+        const currentIndex = storage.accounts.findIndex((a) => this.accountKey(a) === key)
+        const familyKey = familyKeyOf(info?.model)
+        const nextIndex = pickNextAccountIndex(storage.accounts, currentIndex >= 0 ? currentIndex : storage.activeIndex, Date.now(), familyKey)
+        if (nextIndex !== storage.activeIndex) {
+          storage.activeIndex = nextIndex
+          nextIndexToRotate = nextIndex
+        }
+        this.lastUsed = null
       }
-      // The pinned account failed — drop the affinity so the pool re-balances.
-      this.lastUsed = null
+    })
+
+    if (nextIndexToRotate !== null) {
+      this.onRotate?.(session.index, nextIndexToRotate, kind)
     }
-
-    await this.store.save(storage)
   }
-
   /** Adapter hook: reset the failure counter after a clean completion. */
   async markSuccess(session: AgyAccountSession): Promise<void> {
     const account = session.account
@@ -276,9 +500,9 @@ export class AgySessionManager {
    * Returns the collected text or a structured error message.
    */
   async testCall(model: string, prompt = 'Reply with exactly: OK', maxTokens = 1024): Promise<{ ok: boolean; text?: string; error?: string }> {
-    const session = await this.getSession()
-    if (!session) return { ok: false, error: 'No agy account configured — run `dsh-agy login` first.' }
     try {
+      const session = await this.getSession(model)
+      if (!session) return { ok: false, error: 'No agy account configured — run `dsh-agy login` first.' }
       const { toAgyRequestBody } = await import('./adapter/translate.ts')
       const { fetchAgyFirstOk } = await import('./oauth/constants.ts')
       const { parseAgySse } = await import('./adapter/parse.ts')
@@ -335,11 +559,8 @@ export class AgySessionManager {
     }
   }
 
-  /** CLI/web helper: verify an account's credentials (refresh + userinfo). */
-  async verifyAccount(index: number): Promise<{ ok: boolean; email?: string; error?: string }> {
-    const storage = await this.store.load()
-    const account = storage.accounts[index]
-    if (!account) return { ok: false, error: 'account not found' }
+  /** Probe one account: refresh + userinfo; a live credential re-enables the account. */
+  private async probeAccount(index: number, account: ManagedAccount): Promise<{ ok: boolean; email?: string; error?: string }> {
     const auth = await this.accessTokenFor(account)
     if (!auth) return { ok: false, error: 'refresh failed (revoked?)' }
     try {
@@ -364,6 +585,47 @@ export class AgySessionManager {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
+  }
+
+  /** CLI/web helper: verify an account's credentials (refresh + userinfo). */
+  async verifyAccount(index: number): Promise<{ ok: boolean; email?: string; error?: string }> {
+    const storage = await this.store.load()
+    const account = storage.accounts[index]
+    if (!account) return { ok: false, error: 'account not found' }
+    return this.probeAccount(index, account)
+  }
+
+  /**
+   * Batch health check over all enabled accounts (or the given indices):
+   * refresh + userinfo per account, live credentials re-enable the account.
+   * Reports results through onHealthReport when a listener is registered.
+   */
+  async checkAccounts(indices?: number[]): Promise<AccountHealthResult[]> {
+    const storage = await this.store.load()
+    const targets = indices !== undefined
+      ? indices.filter((index) => storage.accounts[index])
+      : storage.accounts.map((_, index) => index).filter((index) => storage.accounts[index]!.enabled !== false)
+
+    const results: AccountHealthResult[] = await Promise.all(targets.map(async (index) => {
+      const probed = await this.probeAccount(index, storage.accounts[index]!)
+      return { index, ...probed }
+    }))
+    this.onHealthReport?.(results)
+    return results
+  }
+
+  /**
+   * Start a background health probe on an interval (disposable stop handle).
+   * The timer is unref'd unless told otherwise so harness processes can still
+   * exit; the CLI loop mode passes `unref: false`.
+   */
+  startHealthProbe(intervalMs: number, options: { unref?: boolean } = {}): () => void {
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) return () => {}
+    const timer = setInterval(() => {
+      void this.checkAccounts().catch(() => {})
+    }, intervalMs)
+    if (options.unref !== false) timer.unref?.()
+    return () => clearInterval(timer)
   }
 }
 
