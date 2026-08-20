@@ -81,6 +81,24 @@ dsh-agy logout         # remove account
 | `dsh-agy health` | `--index <n...>` — check only these accounts (default: all enabled)<br>`--interval <ms>` — repeat on an interval instead of once | Batch health check (refresh + userinfo), re-enables accounts whose credentials are live again |
 | `dsh-agy logout` | `--index <n>` — account index (default: active)<br>`--email <email>` — account email | Remove an account |
 
+### Per-account proxy
+
+Each account can have its own proxy; credentials are encrypted at rest and displayed masked as `protocol//host:port`.
+
+```sh
+dsh-agy login --proxy socks5://user:pass@host:1080
+dsh-agy import --proxy <url> file.json
+dsh-agy proxy set --index 0 --proxy <url>   # set / update
+dsh-agy proxy clear --index 0               # clear (fall back to env)
+dsh-agy proxy test --index 0                # TCP 2s fast-fail probe
+dsh-agy proxy list                          # masked list
+dsh-agy status                              # shows proxy column (masked host:port)
+```
+
+Fallback: with no per-account proxy, requests use `EnvHttpProxyAgent` (`HTTP_PROXY`/`HTTPS_PROXY` with `NO_PROXY` honored). Per-account proxies ignore `NO_PROXY`, are fail-closed (unreachable proxy skips the account without cooldown and clears affinity), and loopback targets (`localhost`/`127.0.0.1`/`::1`) are always forced direct.
+
+Web dashboard (`/agy`): each account card shows an inline Proxy row `[input] [Save][Clear][Test]` with masked `host:port`; writes via `POST /agy/api/proxy`, probes via `POST /agy/api/proxy/test`.
+
 ### Path C: Local Development & Link
 
 ```sh

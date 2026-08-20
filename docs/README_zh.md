@@ -73,6 +73,24 @@ dsh-agy logout         # 删除账号
 | `dsh-agy health` | `--index <n...>` — 只检查指定账号（默认全部启用账号）<br>`--interval <ms>` — 按间隔重复检查 | 批量健康检查（refresh + userinfo），凭据恢复有效的账号自动重新启用 |
 | `dsh-agy logout` | `--index <n>` — 账号索引（默认当前 active）<br>`--email <email>` — 账号邮箱 | 删除账号 |
 
+### 每账号代理（Per-account proxy）
+
+每个账号可独立配置代理；凭据落盘加密，展示时脱敏为 `protocol//host:port`。
+
+```sh
+dsh-agy login --proxy socks5://user:pass@host:1080
+dsh-agy import --proxy <url> file.json
+dsh-agy proxy set --index 0 --proxy <url>   # 设置/更新
+dsh-agy proxy clear --index 0               # 清除（回退到环境变量代理）
+dsh-agy proxy test --index 0                # TCP 2s fast-fail 探测
+dsh-agy proxy list                          # 脱敏列表
+dsh-agy status                              # 展示 proxy 列（脱敏 host:port）
+```
+
+回退：未配置每账号代理时，请求走 `EnvHttpProxyAgent`（`HTTP_PROXY`/`HTTPS_PROXY` 且遵循 `NO_PROXY`）。每账号代理忽略 `NO_PROXY`、fail-closed（代理不可达则跳过该账号、不写冷却并清除亲和），且 loopback 目标（`localhost`/`127.0.0.1`/`::1`）始终强制直连。
+
+Web 仪表盘（`/agy`）：每张账号卡片内联 Proxy 行 `[输入框] [Save][Clear][Test]`，显示脱敏 `host:port`；写入走 `POST /agy/api/proxy`，探测走 `POST /agy/api/proxy/test`。
+
 ### 路径 C：本地源码开发与调试（Link 模式）
 
 ```sh
