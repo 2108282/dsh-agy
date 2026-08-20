@@ -85,7 +85,7 @@ export type RefreshResult =
  * For legacy accounts without a stored clientId, embedded credentials are tried
  * first with an env-override fallback before treating invalid_grant as fatal.
  */
-export async function refreshAccessToken(auth: OAuthAuthDetails, options?: { clientId?: string }): Promise<RefreshResult> {
+export async function refreshAccessToken(auth: OAuthAuthDetails, options?: { clientId?: string; proxyUrl?: string }): Promise<RefreshResult> {
   const parts = parseRefreshParts(auth.refresh)
   if (!parts.refreshToken) {
     return { type: 'failed', error: new AgyTokenRefreshError({
@@ -119,7 +119,7 @@ export async function refreshAccessToken(auth: OAuthAuthDetails, options?: { cli
           client_id: clientId,
           client_secret: clientSecret,
         }),
-      })
+      }, options?.proxyUrl ? { proxyUrl: options.proxyUrl } : undefined)
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => undefined)

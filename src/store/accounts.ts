@@ -68,20 +68,46 @@ function isEncrypted(value: string): boolean {
   return value.startsWith(ENC_PREFIX)
 }
 
-/** Decrypt one account's refresh field when encrypted; plaintext passes through (legacy). */
+/** Decrypt one account's refresh/proxy fields when encrypted; plaintext passes through (legacy). */
 function decryptAccount(account: ManagedAccount, codec: SecretCodec): ManagedAccount {
-  if (isEncrypted(account.refresh)) {
-    return { ...account, refresh: codec.decrypt(account.refresh) }
+  let out = account
+  if (isEncrypted(out.refresh)) {
+    out = { ...out, refresh: codec.decrypt(out.refresh) }
   }
-  return account
+  if (out.proxy && isEncrypted(out.proxy)) {
+    out = { ...out, proxy: codec.decrypt(out.proxy) }
+  }
+  return out
 }
 
-/** Encrypt one account's refresh field (plaintext stays plaintext if no codec change). */
+/** Encrypt one account's refresh/proxy fields (plaintext stays plaintext if no codec change). */
 function encryptAccount(account: ManagedAccount, codec: SecretCodec): ManagedAccount {
-  if (!isEncrypted(account.refresh)) {
-    return { ...account, refresh: codec.encrypt(account.refresh) }
+  let out = account
+  if (!isEncrypted(out.refresh)) {
+    out = { ...out, refresh: codec.encrypt(out.refresh) }
   }
-  return account
+  if (out.proxy && !isEncrypted(out.proxy)) {
+    out = { ...out, proxy: codec.encrypt(out.proxy) }
+  }
+  return out
+}
+
+/** Mask a proxy URL for display/logs: protocol//host:port (no credentials, no query). */
+export function maskProxyUrl(proxyUrl?: string): string | null {
+  if (!proxyUrl) return null
+  try {
+    const u = new URL(proxyUrl)
+    const port = u.port || (u.protocol === 'https:' ? '443' : u.protocol === 'socks5:' || u.protocol === 'socks5h:' ? '1080' : '8080')
+    return `${u.protocol}//${u.hostname}:${port}`
+  } catch {
+    return null
+  }
+}
+
+/** Normalize empty-string proxy to undefined (migration helper). */
+export function normalizeProxyValue(proxy?: string): string | undefined {
+  if (!proxy || !proxy.trim()) return undefined
+  return proxy.trim()
 }
 
 export function ensureAccountIds(storage: AccountStorageV4): { storage: AccountStorageV4; mutated: boolean } {

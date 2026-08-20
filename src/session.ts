@@ -40,7 +40,7 @@ import {
 import { deriveAntigravitySessionId } from './runtime/identity.ts'
 import { fingerprintMode } from './runtime/risk.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
-import { proxiedFetch } from './proxy.ts'
+import { isProxyUnreachableError, proxiedFetch } from './proxy.ts'
 import type { Fingerprint } from './types.ts'
 
 export interface SessionManagerOptions {
@@ -151,7 +151,7 @@ export class AgySessionManager {
     const refreshing = (async (): Promise<OAuthAuthDetails | undefined> => {
       const result = await refreshAccessToken(
         { access: cached?.access ?? '', expires: cached?.expires ?? 0, refresh: account.refresh },
-        { clientId: account.clientId },
+        { clientId: account.clientId, proxyUrl: account.proxy },
       )
       if (result.type === 'success') {
         if (!account.clientId && result.clientId) {
@@ -169,6 +169,9 @@ export class AgySessionManager {
       if (result.type === 'failed') {
         if (cached && !accessTokenExpired({ access: cached.access, expires: cached.expires, refresh: account.refresh })) {
           return { access: cached.access, expires: cached.expires, refresh: account.refresh }
+        }
+        if (isProxyUnreachableError(result.error)) {
+          throw new AgyAuthError('transport', 'proxy_unreachable', { cause: result.error })
         }
         const kind = result.error.status === 429
           ? 'rate-limit'
@@ -244,7 +247,15 @@ export class AgySessionManager {
             const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
             return fetch(input, { ...init, signal })
           }
-          const discovered = await fetchAvailableModels(auth.access, account.projectId, boundedFetch)
+          const discovered = await fetchAvailableModels(auth.access, account.projectId, (input, init) => {
+            const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
+            const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+            // Explicit threading of per-account proxy (fail-closed). Use proxiedFetch when proxy is set.
+            if (account.proxy) {
+              return proxiedFetch(input, { ...init, signal }, { proxyUrl: account.proxy })
+            }
+            return fetch(input, { ...init, signal })
+          })
           const quotas = ingestFamilyQuotas(discovered)
           return { key, quotas, updatedAt: Date.now() }
         } catch {
@@ -361,7 +372,33 @@ export class AgySessionManager {
       }
       const picked = await this.pickAccount(storage, model)
       if (!picked) return undefined
-      const auth = await this.accessTokenFor(picked.account)
+      let auth: OAuthAuthDetails | undefined
+      try {
+        auth = await this.accessTokenFor(picked.account)
+      } catch (error) {
+        if (error instanceof AgyAuthError && error.kind === 'transport' && isProxyUnreachableError(error)) {
+          // Fail-closed for per-account proxy: skip this account this request, do not write cooldown.
+          this.lastUsed = null
+          // Rotate activeIndex away from the dead proxy account for next pick
+          const deadIndex = storage.accounts.findIndex((a) => this.accountKey(a) === this.accountKey(picked.account))
+          if (deadIndex !== -1) {
+            const next = pickNextAccountIndex(storage.accounts, deadIndex, Date.now())
+            if (next !== storage.activeIndex) {
+              storage.activeIndex = next
+              await this.store.mutate((s) => { s.activeIndex = next }).catch(() => {})
+            }
+          }
+          storage = await this.store.load()
+          continue
+        }
+        // Also handle direct isProxyUnreachableError without AgyAuthError wrapper
+        if (isProxyUnreachableError(error)) {
+          this.lastUsed = null
+          storage = await this.store.load()
+          continue
+        }
+        throw error
+      }
       if (!auth) {
         // The selected credential was revoked and disabled by accessTokenFor.
         // Re-read and select another enabled account within this same request.
@@ -570,7 +607,7 @@ export class AgySessionManager {
       if (!auth) return { ok: false, error: 'refresh failed (revoked?)' }
       const response = await proxiedFetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
         headers: { Authorization: `Bearer ${auth.access}` },
-      })
+      }, account.proxy ? { proxyUrl: account.proxy } : undefined)
       if (!response.ok) return { ok: false, error: `userinfo ${response.status}` }
       const info = (await response.json()) as { email?: string }
       // Credentials are live again — clear any auth-failure disable so the

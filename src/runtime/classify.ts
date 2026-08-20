@@ -158,6 +158,21 @@ export function classifyFetchError(error: unknown): ClassifiedError {
   if (error instanceof DOMException && error.name === 'AbortError') {
     return { kind: 'network-error', message }
   }
+  // Proxy unreachable is a distinct transport failure (fail-closed, not network-error cooldown)
+  // Check cause chain via isProxyUnreachableError helper without circular import (inline check)
+  const code = (error as { code?: unknown })?.code
+  const cause = (error as { cause?: unknown })?.cause
+  const causeCode = cause && typeof cause === 'object' ? (cause as { code?: unknown }).code : undefined
+  const errorCode = (error as { errorCode?: unknown })?.errorCode
+  if (
+    errorCode === 'proxy_unreachable' ||
+    errorCode === 'PROXY_UNREACHABLE' ||
+    code === 'PROXY_UNREACHABLE' ||
+    causeCode === 'PROXY_UNREACHABLE' ||
+    (typeof message === 'string' && (message.includes('proxy_unreachable') || message.includes('PROXY_UNREACHABLE') || message.includes('Proxy unreachable')))
+  ) {
+    return { kind: 'proxy-unreachable', message }
+  }
   return { kind: 'network-error', message }
 }
 

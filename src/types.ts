@@ -60,6 +60,8 @@ export interface ManagedAccount {
   fingerprintHistory?: FingerprintVersion[]
   cachedQuota?: Record<string, CachedQuota>
   cachedQuotaUpdatedAt?: number
+  /** Per-account proxy URL (e.g. http://user:pass@host:8080 or socks5://host:1080). Undefined = follow env. */
+  proxy?: string
 }
 
 export interface AccountStorageV1 {
@@ -198,6 +200,7 @@ export type FailureKind =
   | 'project-error'
   | 'request-error'
   | 'transient'
+  | 'proxy-unreachable'
 
 /** Rotation state machine decision for one failed attempt. */
 export type RotationAction =
