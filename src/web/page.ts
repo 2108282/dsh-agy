@@ -771,7 +771,7 @@ export function renderDashboardHtml(): string {
 
         '<div style="margin-top:14px;padding:10px 12px;border:1px solid var(--border-l1);border-radius:8px;background:var(--bg-surface-elevated);display:flex;flex-wrap:wrap;gap:8px;align-items:center;">' +
           '<span style="font-size:13px;font-weight:500;white-space:nowrap;">Proxy:</span>' +
-          '<input id="proxy-input-' + index + '" placeholder="socks5://user:pass@host:1080" style="flex:1;min-width:220px;font-family:var(--ds-font-family-code);font-size:12.5px;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:6px;color:var(--text-primary);outline:none;">' +
+          '<input id="proxy-input-' + selectedIndex + '" placeholder="socks5://user:pass@host:1080" style="flex:1;min-width:220px;font-family:var(--ds-font-family-code);font-size:12.5px;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:6px;color:var(--text-primary);outline:none;">' +
           '<button class="btn btn-primary btn-sm" id="btn-proxy-save">Save</button>' +
           '<button class="btn btn-secondary btn-sm" id="btn-proxy-clear">Clear</button>' +
           '<button class="btn btn-secondary btn-sm" id="btn-proxy-test">Test</button>' +

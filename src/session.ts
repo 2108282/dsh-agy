@@ -363,6 +363,7 @@ export class AgySessionManager {
   async getSession(model?: string): Promise<AgyAccountSession | undefined> {
     let storage = await this.store.load()
     const maxAttempts = storage.accounts.filter((account) => account.enabled !== false).length
+    let proxyUnreachableCount = 0
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const eligible = storage.accounts.filter((account) => account.enabled !== false)
@@ -378,6 +379,7 @@ export class AgySessionManager {
       } catch (error) {
         if (error instanceof AgyAuthError && error.kind === 'transport' && isProxyUnreachableError(error)) {
           // Fail-closed for per-account proxy: skip this account this request, do not write cooldown.
+          proxyUnreachableCount++
           this.lastUsed = null
           // Rotate activeIndex away from the dead proxy account for next pick
           const deadIndex = storage.accounts.findIndex((a) => this.accountKey(a) === this.accountKey(picked.account))
@@ -393,6 +395,7 @@ export class AgySessionManager {
         }
         // Also handle direct isProxyUnreachableError without AgyAuthError wrapper
         if (isProxyUnreachableError(error)) {
+          proxyUnreachableCount++
           this.lastUsed = null
           storage = await this.store.load()
           continue
@@ -444,6 +447,9 @@ export class AgySessionManager {
       }
     }
 
+    if (proxyUnreachableCount === maxAttempts && maxAttempts > 0) {
+      throw new AgyAuthError('transport', 'proxy_unreachable')
+    }
     return undefined
   }
 

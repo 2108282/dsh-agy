@@ -40,7 +40,7 @@ export function normalizeProxyUrl(proxyUrl: string): string {
   try {
     parsed = new URL(baseRaw)
   } catch {
-    throw new Error(`[proxy] invalid proxy URL: ${proxyUrl}`)
+    throw new Error(`[proxy] invalid proxy URL: ${proxyUrlForLogs(proxyUrl)}`)
   }
   // normalize socks5h -> socks5 (remote DNS, same agent)
   let protocol = parsed.protocol.toLowerCase()

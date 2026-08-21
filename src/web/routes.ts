@@ -344,7 +344,12 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
   const handleProxy = async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const body = await readJson(req)
-      const index = Number(body.index)
+      const rawIdx = Number(body.index)
+      if (!Number.isInteger(rawIdx) || !Number.isFinite(rawIdx) || rawIdx < 0) {
+        sendJson(res, 400, { error: 'invalid index' })
+        return
+      }
+      const index = rawIdx
       const raw = typeof body.proxy === 'string' ? body.proxy : ''
       if (!raw.trim()) {
         // clear
@@ -377,11 +382,24 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
   const handleProxyTest = async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const body = await readJson(req)
-      const index = Number(body.index)
+      const rawIdx2 = body.index !== undefined ? Number(body.index) : NaN
+      const hasExplicitProxy = typeof body.proxy === 'string' && body.proxy.trim() !== ''
+      if (!hasExplicitProxy) {
+        if (!Number.isInteger(rawIdx2) || !Number.isFinite(rawIdx2) || rawIdx2 < 0) {
+          sendJson(res, 400, { error: 'invalid index' })
+          return
+        }
+      } else if (body.index !== undefined) {
+        if (!Number.isInteger(rawIdx2) || !Number.isFinite(rawIdx2) || rawIdx2 < 0) {
+          sendJson(res, 400, { error: 'invalid index' })
+          return
+        }
+      }
+      const index = hasExplicitProxy && body.index === undefined ? -1 : rawIdx2
       let target: string | undefined
-      if (typeof body.proxy === 'string' && body.proxy.trim() !== '') {
+      if (hasExplicitProxy) {
         try {
-          target = normalizeProxyUrl(body.proxy)
+          target = normalizeProxyUrl(body.proxy as string)
         } catch (e) {
           sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) })
           return
@@ -400,7 +418,7 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
         target = account.proxy
       }
       // mask for response, never raw
-      const masked = maskProxyUrl(target) ?? proxyUrlForLogs(target)
+      const masked = maskProxyUrl(target!) ?? proxyUrlForLogs(target!)
       let ok = false
       let errMsg: string | undefined
       try {
