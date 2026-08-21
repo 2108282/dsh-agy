@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapClientMetadata, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { decodeCredentialBlob } from '../oauth/blob.ts'
-import { proxiedFetch } from '../proxy.ts'
+import { normalizeProxyUrl, proxiedFetch } from '../proxy.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { ManagedAccount } from '../types.ts'
 
@@ -158,7 +158,7 @@ export async function parseImportSource(source: unknown, kind: 'json' | 'blob'):
 export async function importManySources(
   items: Array<{ source: unknown; kind: 'json' | 'blob' }>,
   store: AccountStore,
-  options: { email?: string; overwriteExisting?: boolean } = {},
+  options: { email?: string; overwriteExisting?: boolean; proxy?: string } = {},
 ): Promise<{ imported: number; replaced: number; errors: string[] }> {
   const result = { imported: 0, replaced: 0, errors: [] as string[] }
   for (const item of items) {
@@ -178,10 +178,18 @@ export async function importManySources(
 export async function upsertImportedAccount(
   store: AccountStore,
   enriched: EnrichedAgyAuth,
-  options: { email?: string; overwriteExisting?: boolean } = {},
+  options: { email?: string; overwriteExisting?: boolean; proxy?: string } = {},
 ): Promise<{ account: ManagedAccount; created: boolean }> {
   const resolvedEmail = options.email || enriched.email
   const refresh = `${enriched.refreshToken}|${enriched.projectId ?? ''}`
+  // Normalize proxy if explicitly provided (empty -> clear -> undefined)
+  let normalizedProxy: string | undefined
+  let proxyProvided = options.proxy !== undefined
+  if (proxyProvided) {
+    const raw = options.proxy ?? ''
+    if (!raw.trim()) normalizedProxy = undefined
+    else normalizedProxy = normalizeProxyUrl(raw)
+  }
 
   return store.mutate((storage) => {
     const existingIndex = resolvedEmail
@@ -197,7 +205,7 @@ export async function upsertImportedAccount(
         )
       }
       const existing = storage.accounts[existingIndex]!
-      storage.accounts[existingIndex] = {
+      const updated: ManagedAccount = {
         ...existing,
         id: existing.id || randomUUID(),
         refresh,
@@ -210,6 +218,11 @@ export async function upsertImportedAccount(
         verificationRequiredAt: undefined,
         verificationRequiredReason: undefined,
       }
+      if (proxyProvided) {
+        if (normalizedProxy) updated.proxy = normalizedProxy
+        else delete (updated as { proxy?: string }).proxy
+      }
+      storage.accounts[existingIndex] = updated
       return { account: storage.accounts[existingIndex]!, created: false }
     }
 
@@ -222,7 +235,9 @@ export async function upsertImportedAccount(
       addedAt: Date.now(),
       lastUsed: Date.now(),
       enabled: true,
+      ...(normalizedProxy ? { proxy: normalizedProxy } : {}),
     }
+    // When proxy was explicitly cleared (empty string) for new account, just omit proxy field
     storage.accounts.push(account)
     if (storage.activeIndex >= storage.accounts.length - 1 && storage.accounts.length === 1) {
       storage.activeIndex = 0

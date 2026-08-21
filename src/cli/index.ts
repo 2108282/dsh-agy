@@ -15,11 +15,12 @@ import { encodeCredentialBlob } from '../oauth/blob.ts'
 import { AGY_DEFAULT_REDIRECT_URI } from '../oauth/constants.ts'
 import { createAesGcmCodec, deriveKey, loadMasterKey, resolveDshHome, resolveMasterKeyCodec } from '../store/keyring.ts'
 import type { SecretCodec } from '../store/keyring.ts'
-import { JsonAccountStore } from '../store/accounts.ts'
+import { JsonAccountStore, maskProxyUrl } from '../store/accounts.ts'
 import { AgySessionManager } from '../session.ts'
 import { isAgyDisabled } from '../runtime/risk.ts'
 import { startCallbackServer, openBrowser } from './callback-server.ts'
 import { importManySources, upsertImportedAccount } from './import.ts'
+import { isProxyReachable, normalizeProxyUrl } from '../proxy.ts'
 
 /** Package version, read from the shipped package.json — never hard-coded twice. */
 const { version: PACKAGE_VERSION } = JSON.parse(
@@ -54,6 +55,17 @@ function createReadOnlyStoreOrExit(): JsonAccountStore {
   }
 }
 
+function resolveProxyOption(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined
+  if (!raw.trim()) return ''
+  try {
+    return normalizeProxyUrl(raw)
+  } catch (error) {
+    console.error(`Invalid proxy URL: ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  }
+}
+
 async function ask(question: string): Promise<string> {
   const rl = createInterface({ input, output })
   try {
@@ -68,7 +80,10 @@ function isRemoteSession(): boolean {
   return !!(process.env.SSH_CONNECTION || process.env.SSH_CLIENT || process.env.SSH_TTY)
 }
 
-async function loginCommand(options: { headless: boolean; blob: boolean; port: number; project?: string; timeout?: string }) {
+async function loginCommand(options: { headless: boolean; blob: boolean; port: number; project?: string; timeout?: string; proxy?: string }) {
+  const proxyInput = resolveProxyOption(options.proxy)
+  // proxy "" sentinel means clear; normalizeProxyUrl already handled
+  const normalizedProxy = proxyInput === '' ? '' : proxyInput
   const store = createStore()
   const redirectUri = `http://localhost:${options.port}/oauth-callback`
   if (!options.headless && isRemoteSession()) {
@@ -128,6 +143,9 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
   }
 
   if (options.blob) {
+    if (normalizedProxy !== undefined) {
+      console.log('(Note: --proxy is ignored with --blob; proxy is only stored with the account)')
+    }
     const blob = encodeCredentialBlob('agy', {
       access_token: result.access,
       refresh_token: result.refresh.split('|')[0],
@@ -135,6 +153,7 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
     })
     console.log(`\nPaste this blob into the remote dashboard/CLI:\n\n${blob}\n`)
   } else {
+    const proxyForUpsert = normalizedProxy !== undefined ? normalizedProxy : undefined
     const { account, created } = await upsertImportedAccount(store, {
       accessToken: result.access,
       refreshToken: result.refresh.split('|')[0]!,
@@ -144,8 +163,9 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
       email: result.email ?? null,
       projectId: result.projectId || null,
       clientId: result.clientId || null,
-    }, { overwriteExisting: true })
-    console.log(`${created ? 'Added' : 'Updated'} account: ${account.email ?? '(no email)'} (project: ${result.projectId || 'default'})`)
+    }, { overwriteExisting: true, ...(proxyForUpsert !== undefined ? { proxy: proxyForUpsert } : {}) })
+    const masked = maskProxyUrl(account.proxy)
+    console.log(`${created ? 'Added' : 'Updated'} account: ${account.email ?? '(no email)'} (project: ${result.projectId || 'default'})${masked ? ` proxy: ${masked}` : ''}`)
   }
 
   await callback?.close()
@@ -166,7 +186,8 @@ async function statusCommand() {
       : account.verificationRequired ? 'verification-required'
       : account.coolingDownUntil && account.coolingDownUntil > Date.now() ? 'cooling'
       : 'active'
-    console.log(` ${marker} [${index}] ${account.email ?? '(no email)'} — ${state}${account.projectId ? ` (project: ${account.projectId})` : ''}`)
+    const maskedProxy = maskProxyUrl(account.proxy)
+    console.log(` ${marker} [${index}] ${account.email ?? '(no email)'} — ${state}${account.projectId ? ` (project: ${account.projectId})` : ''}${maskedProxy ? ` proxy: ${maskedProxy}` : ''}`)
 
     // Best-effort quota summary via fetchAvailableModels (fresh access token).
     const session = await sessions.getSession().catch(() => undefined)
@@ -194,8 +215,9 @@ async function statusCommand() {
   }
 }
 
-async function importCommand(options: { blob: boolean; files?: string[]; email?: string; overwrite: boolean }) {
+async function importCommand(options: { blob: boolean; files?: string[]; email?: string; overwrite: boolean; proxy?: string }) {
   const store = createStore()
+  const proxyForUpsert = resolveProxyOption(options.proxy)
   let items: Array<{ source: unknown; kind: 'json' | 'blob' }>
   if (options.files && options.files.length > 0) {
     items = options.files.map((file) => {
@@ -206,10 +228,12 @@ async function importCommand(options: { blob: boolean; files?: string[]; email?:
     const pasted = await ask('Paste the agy token JSON (or blob with --blob): ')
     items = [{ source: pasted, kind: options.blob ? 'blob' : 'json' }]
   }
-  const result = await importManySources(items, store, {
+  const importOpts: { email?: string; overwriteExisting?: boolean; proxy?: string } = {
     email: options.email,
     overwriteExisting: options.overwrite,
-  })
+  }
+  if (proxyForUpsert !== undefined) importOpts.proxy = proxyForUpsert
+  const result = await importManySources(items, store, importOpts)
   console.log(`Imported ${result.imported}, replaced ${result.replaced}${result.errors.length > 0 ? `, ${result.errors.length} failed` : ''}`)
   for (const error of result.errors) console.log(`  ! ${error}`)
 }
@@ -315,6 +339,84 @@ async function logoutCommand(options: { index?: string; email?: string }) {
   })
 }
 
+async function proxySetCommand(options: { index: string; proxy: string }) {
+  const idx = Number(options.index)
+  if (!Number.isInteger(idx) || idx < 0) {
+    console.error('Invalid --index (must be >= 0)')
+    process.exit(1)
+  }
+  const raw = options.proxy ?? ''
+  if (!raw.trim()) {
+    console.error('Missing --proxy value')
+    process.exit(1)
+  }
+  let normalized: string
+  try {
+    normalized = normalizeProxyUrl(raw)
+  } catch (error) {
+    console.error(`Invalid proxy URL: ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  }
+  const store = createStore()
+  await store.mutate((storage) => {
+    const account = storage.accounts[idx]
+    if (!account) throw new Error(`account not found (index ${idx})`)
+    account.proxy = normalized
+  })
+  console.log(`[${idx}] proxy set to ${maskProxyUrl(normalized)}`)
+}
+
+async function proxyClearCommand(options: { index: string }) {
+  const idx = Number(options.index)
+  if (!Number.isInteger(idx) || idx < 0) {
+    console.error('Invalid --index (must be >= 0)')
+    process.exit(1)
+  }
+  const store = createStore()
+  await store.mutate((storage) => {
+    const account = storage.accounts[idx]
+    if (!account) throw new Error(`account not found (index ${idx})`)
+    delete (account as { proxy?: string }).proxy
+  })
+  console.log(`[${idx}] proxy cleared`)
+}
+
+async function proxyTestCommand(options: { index: string }) {
+  const idx = Number(options.index)
+  if (!Number.isInteger(idx) || idx < 0) {
+    console.error('Invalid --index (must be >= 0)')
+    process.exit(1)
+  }
+  const store = createReadOnlyStoreOrExit()
+  const storage = await store.load()
+  const account = storage.accounts[idx]
+  if (!account) {
+    console.error(`account not found (index ${idx})`)
+    process.exit(1)
+  }
+  if (!account.proxy) {
+    console.log(`[${idx}] no proxy configured`)
+    return
+  }
+  const masked = maskProxyUrl(account.proxy)
+  const reachable = await isProxyReachable(account.proxy)
+  if (reachable) console.log(`[${idx}] ${masked} — ok`)
+  else console.log(`[${idx}] ${masked} — proxy_unreachable`)
+}
+
+async function proxyListCommand() {
+  const store = createReadOnlyStoreOrExit()
+  const storage = await store.load()
+  if (storage.accounts.length === 0) {
+    console.log('No agy accounts.')
+    return
+  }
+  for (const [index, account] of storage.accounts.entries()) {
+    const masked = maskProxyUrl(account.proxy)
+    console.log(` [${index}] ${account.email ?? '(no email)'} — ${masked ?? '(no proxy)'}`)
+  }
+}
+
 export function createProgram(): Command {
   const program = new Command()
   program
@@ -337,6 +439,7 @@ export function createProgram(): Command {
     .option('--port <n>', 'loopback callback port', '51121')
     .option('--project <id>', 'bind the login to a specific project')
     .option('--timeout <ms>', 'callback timeout', '300000')
+    .option('--proxy <url>', 'per-account proxy URL (http/https/socks5); empty to clear')
     .action(async (options) => {
       await loginCommand({ ...options, timeout: options.timeout })
     })
@@ -355,7 +458,8 @@ export function createProgram(): Command {
     .option('--blob', 'the pasted value is a credential blob', false)
     .option('--email <email>', 'account email (skips userinfo verification)')
     .option('--overwrite', 'replace an existing account with the same email', false)
-    .action(async (files: string[] | undefined, options: { blob: boolean; email?: string; overwrite: boolean }) => {
+    .option('--proxy <url>', 'per-account proxy URL (http/https/socks5); empty to clear')
+    .action(async (files: string[] | undefined, options: { blob: boolean; email?: string; overwrite: boolean; proxy?: string }) => {
       await importCommand({ ...options, files })
     })
 
@@ -392,6 +496,36 @@ export function createProgram(): Command {
     .option('--email <email>', 'account email')
     .action(async (options: { index?: string; email?: string }) => {
       await logoutCommand(options)
+    })
+
+  const proxy = program.command('proxy').description('Manage per-account proxies')
+  proxy
+    .command('set')
+    .description('Set proxy for an account')
+    .requiredOption('--index <n>', 'account index')
+    .requiredOption('--proxy <url>', 'proxy URL (http/https/socks5)')
+    .action(async (options: { index: string; proxy: string }) => {
+      await proxySetCommand(options)
+    })
+  proxy
+    .command('clear')
+    .description('Clear proxy for an account')
+    .requiredOption('--index <n>', 'account index')
+    .action(async (options: { index: string }) => {
+      await proxyClearCommand(options)
+    })
+  proxy
+    .command('test')
+    .description('Test proxy reachability for an account (TCP 2s fast-fail)')
+    .requiredOption('--index <n>', 'account index')
+    .action(async (options: { index: string }) => {
+      await proxyTestCommand(options)
+    })
+  proxy
+    .command('list')
+    .description('List accounts with masked proxies')
+    .action(async () => {
+      await proxyListCommand()
     })
 
   return program

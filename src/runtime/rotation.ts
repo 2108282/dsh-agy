@@ -162,6 +162,11 @@ export function decideRotation(
     case 'transient': {
       return { action: 'retry', backoffMs }
     }
+    case 'proxy-unreachable': {
+      // Per-account proxy dead: fail-closed, skip this account for this request only.
+      // Do NOT write coolingDownUntil / rateLimitResetTimes — next request may retry.
+      return { action: 'rotate', backoffMs: Math.min(backoffMs, 1000) }
+    }
   }
 }
 

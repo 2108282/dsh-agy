@@ -54,6 +54,7 @@ Dependency direction: `oauth/` and `store/` are leaves (no internal deps); `runt
 | `adapter/translate` | `toBody(generateOptions) -> RequestBody` | DSH messages/tools -> Gemini contents[], thinking carried verbatim | fixture (recorded requests) |
 | `adapter/parse` | `fromSSE(line) -> Chunk[]` | SSE line parsing, candidates[] -> StreamChunk, usage/error events | fixture (recorded responses) |
 | `adapter/models` | `listModels() / resolveModel(id)` | fetchAvailableModels fetch + catalog metadata merge + filter + fallback | fixture |
+| `proxy` | `normalizeProxyUrl(url) / proxyUrlForLogs(url) / isProxyUnreachableError(err) / dispatcherForAsync(url) / isProxyReachable(url) / proxiedFetch(input, init)` | URL normalization (`socks://`→`socks5://`, `socks5h`→`socks5`, default ports, `?family=`), fast-fail 2s TCP (30s healthy / 2s unhealthy cache), dispatcher cache (`ProxyAgent` keepAlive:1, `SocksProxyAgent` lazy via `socks-proxy-agent`), loopback forced direct, fail-closed (skips account without cooldown), encrypted at rest + masked display via `store/accounts` | pure unit + TCP probe stub |
 
 ## 3. Thin Shells (deliberately shallow, no abstraction)
 
@@ -88,6 +89,7 @@ dsh-agy/
 ├── src/
 │   ├── index.ts            # plugin shell
 │   ├── types.ts / invariant.ts
+│   ├── proxy.ts            # per-account proxy (normalize, fast-fail 2s TCP 30s/2s cache, dispatcher cache keepAlive:1, SOCKS lazy, loopback direct, fail-closed, masked storage)
 │   ├── oauth/  store/  runtime/  adapter/  cli/  web/
 └── tests/
     ├── fixtures/           # recorded payloads (sanitized)

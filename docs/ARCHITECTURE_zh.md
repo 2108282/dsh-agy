@@ -53,6 +53,7 @@
 | `adapter/translate` | `toBody(generateOptions) → RequestBody` | DSH messages/tools → Gemini contents[]，thinking 原样携带 | fixture（录制请求） |
 | `adapter/parse` | `fromSSE(line) → Chunk[]` | SSE 行解析、candidates[] → StreamChunk、usage/错误事件 | fixture（录制响应原文） |
 | `adapter/models` | `listModels() / resolveModel(id)` | fetchAvailableModels 拉取 + 目录元数据合并 + 过滤 + 降级 | fixture |
+| `proxy` | `normalizeProxyUrl(url) / proxyUrlForLogs(url) / isProxyUnreachableError(err) / dispatcherForAsync(url) / isProxyReachable(url) / proxiedFetch(input, init)` | URL 归一化（`socks://`→`socks5://`、`socks5h`→`socks5`、默认端口、`?family=`）、2s TCP fast-fail（健康 30s / 不健康 2s 缓存）、dispatcher 缓存（`ProxyAgent` keepAlive:1、`SocksProxyAgent` 懒加载 via `socks-proxy-agent`）、loopback 强制直连、fail-closed（跳过账号不冷却）、落盘加密 + 脱敏展示（经 `store/accounts`） | 纯单元 + TCP 探测 stub |
 
 ## 3. 薄壳（刻意浅，不抽象）
 
@@ -87,6 +88,7 @@ dsh-agy/
 ├── src/
 │   ├── index.ts            # 插件壳
 │   ├── types.ts / invariant.ts
+│   ├── proxy.ts            # 每账号代理（归一化、2s TCP fast-fail 30s/2s 缓存、dispatcher 缓存 keepAlive:1、SOCKS 懒加载、loopback 直连、fail-closed、脱敏存储）
 │   ├── oauth/  store/  runtime/  adapter/  cli/  web/
 └── tests/
     ├── fixtures/           # 录制 payloads（脱敏）

@@ -18,6 +18,8 @@ import { importManySources, upsertImportedAccount } from '../cli/import.ts'
 import { generateFingerprint, recordFingerprintVersion } from '../runtime/fingerprint.ts'
 import { resolveAntigravityVersionBounded } from '../runtime/version.ts'
 import { renderDashboardHtml, renderCallbackHtml } from './page.ts'
+import { maskProxyUrl } from '../store/accounts.ts'
+import { isProxyReachable, normalizeProxyUrl, proxyUrlForLogs } from '../proxy.ts'
 
 export interface WebRoute {
   kind: 'exact' | 'prefix'
@@ -91,6 +93,8 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
           : null,
         fingerprintHistory: (account.fingerprintHistory ?? []).length,
         quota: null as Record<string, unknown> | null,
+        proxy: account.proxy ? maskProxyUrl(account.proxy) : null,
+        proxyMasked: account.proxy ? maskProxyUrl(account.proxy) : null,
       }
       list.push(entry)
     }
@@ -337,6 +341,99 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     }
   }
 
+  const handleProxy = async (req: IncomingMessage, res: ServerResponse) => {
+    try {
+      const body = await readJson(req)
+      const rawIdx = Number(body.index)
+      if (!Number.isInteger(rawIdx) || !Number.isFinite(rawIdx) || rawIdx < 0) {
+        sendJson(res, 400, { error: 'invalid index' })
+        return
+      }
+      const index = rawIdx
+      const raw = typeof body.proxy === 'string' ? body.proxy : ''
+      if (!raw.trim()) {
+        // clear
+        await store.mutate((storage) => {
+          const account = storage.accounts[index]
+          if (!account) throw new Error('account not found')
+          delete account.proxy
+        })
+        sendJson(res, 200, { ok: true, proxy: null, proxyMasked: null, rawLogs: null })
+        return
+      }
+      let normalized: string
+      try {
+        normalized = normalizeProxyUrl(raw)
+      } catch (e) {
+        sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) })
+        return
+      }
+      await store.mutate((storage) => {
+        const account = storage.accounts[index]
+        if (!account) throw new Error('account not found')
+        account.proxy = normalized
+      })
+      sendJson(res, 200, { ok: true, proxy: maskProxyUrl(normalized), proxyMasked: maskProxyUrl(normalized), rawLogs: proxyUrlForLogs(normalized) })
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  const handleProxyTest = async (req: IncomingMessage, res: ServerResponse) => {
+    try {
+      const body = await readJson(req)
+      const rawIdx2 = body.index !== undefined ? Number(body.index) : NaN
+      const hasExplicitProxy = typeof body.proxy === 'string' && body.proxy.trim() !== ''
+      if (!hasExplicitProxy) {
+        if (!Number.isInteger(rawIdx2) || !Number.isFinite(rawIdx2) || rawIdx2 < 0) {
+          sendJson(res, 400, { error: 'invalid index' })
+          return
+        }
+      } else if (body.index !== undefined) {
+        if (!Number.isInteger(rawIdx2) || !Number.isFinite(rawIdx2) || rawIdx2 < 0) {
+          sendJson(res, 400, { error: 'invalid index' })
+          return
+        }
+      }
+      const index = hasExplicitProxy && body.index === undefined ? -1 : rawIdx2
+      let target: string | undefined
+      if (hasExplicitProxy) {
+        try {
+          target = normalizeProxyUrl(body.proxy as string)
+        } catch (e) {
+          sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) })
+          return
+        }
+      } else {
+        const storage = await store.load()
+        const account = storage.accounts[index]
+        if (!account) {
+          sendJson(res, 400, { error: 'account not found' })
+          return
+        }
+        if (!account.proxy) {
+          sendJson(res, 400, { error: 'no proxy configured for this account' })
+          return
+        }
+        target = account.proxy
+      }
+      // mask for response, never raw
+      const masked = maskProxyUrl(target!) ?? proxyUrlForLogs(target!)
+      let ok = false
+      let errMsg: string | undefined
+      try {
+        ok = await isProxyReachable(target, 2000)
+        if (!ok) errMsg = 'proxy unreachable: ' + masked
+      } catch (e) {
+        ok = false
+        errMsg = e instanceof Error ? e.message : String(e)
+      }
+      sendJson(res, 200, { ok, masked, ...(errMsg ? { error: errMsg } : {}) })
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   return [
     { kind: 'exact', path: '/agy', handler: (req, res) => {
       if (req.method === 'GET') {
@@ -362,6 +459,8 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     { kind: 'exact', path: '/agy/api/test', handler: handleTest },
     { kind: 'exact', path: '/agy/api/export', handler: handleExport },
     { kind: 'exact', path: '/agy/api/fingerprint', handler: handleFingerprint },
+    { kind: 'exact', path: '/agy/api/proxy', handler: handleProxy },
+    { kind: 'exact', path: '/agy/api/proxy/test', handler: handleProxyTest },
   ]
 }
 

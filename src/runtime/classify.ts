@@ -5,6 +5,7 @@
  */
 
 import type { FailureKind } from '../types.ts'
+import { isProxyUnreachableError } from '../proxy.ts'
 
 export interface ClassifiedError {
   kind: FailureKind
@@ -157,6 +158,9 @@ export function classifyFetchError(error: unknown): ClassifiedError {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof DOMException && error.name === 'AbortError') {
     return { kind: 'network-error', message }
+  }
+  if (isProxyUnreachableError(error)) {
+    return { kind: 'proxy-unreachable', message }
   }
   return { kind: 'network-error', message }
 }

@@ -767,6 +767,15 @@ export function renderDashboardHtml(): string {
             '<button class="btn btn-secondary btn-sm" id="btn-action-fp">' + esc(t('fingerprint')) + '</button>' +
             '<button class="btn btn-danger btn-sm" id="btn-action-delete">' + esc(t('deleteAccount')) + '</button>' +
           '</div>' +
+          '</div>' +
+
+        '<div style="margin-top:14px;padding:10px 12px;border:1px solid var(--border-l1);border-radius:8px;background:var(--bg-surface-elevated);display:flex;flex-wrap:wrap;gap:8px;align-items:center;">' +
+          '<span style="font-size:13px;font-weight:500;white-space:nowrap;">Proxy:</span>' +
+          '<input id="proxy-input-' + selectedIndex + '" placeholder="socks5://user:pass@host:1080" style="flex:1;min-width:220px;font-family:var(--ds-font-family-code);font-size:12.5px;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:6px;color:var(--text-primary);outline:none;">' +
+          '<button class="btn btn-primary btn-sm" id="btn-proxy-save">Save</button>' +
+          '<button class="btn btn-secondary btn-sm" id="btn-proxy-clear">Clear</button>' +
+          '<button class="btn btn-secondary btn-sm" id="btn-proxy-test">Test</button>' +
+          '<span id="proxy-status" style="font-size:12px;color:var(--text-secondary);">' + ((a.proxy || a.proxyMasked) ? 'Current: ' + esc(a.proxy || a.proxyMasked) : 'No proxy (using env)') + '</span>' +
         '</div>' +
 
         '<div style="margin-top:16px;">' +
@@ -896,6 +905,58 @@ export function renderDashboardHtml(): string {
         $('diagnostics-output').textContent = lines.join('\\n');
         toast(t('modelsTestedSummary').replace('{total}', String(models.length)).replace('{ok}', String(okCount)).replace('{failed}', String(failCount)), failCount === 0 ? 'success' : 'warn');
         btnTestAll.disabled = false;
+      };
+
+      // Proxy actions
+      const btnProxySave = $('btn-proxy-save');
+      if (btnProxySave) btnProxySave.onclick = async () => {
+        const input = $('proxy-input-' + index);
+        const proxy = input ? input.value.trim() : '';
+        btnProxySave.disabled = true;
+        try {
+          const r = await api('/proxy', { method: 'POST', body: JSON.stringify({ index, proxy }) });
+          const masked = r.proxy || r.proxyMasked || '';
+          const statusEl = $('proxy-status');
+          if (statusEl) statusEl.textContent = masked ? 'Current: ' + masked : 'No proxy (using env)';
+          toast(masked ? 'Proxy saved: ' + masked : 'Proxy cleared (using env)', 'success');
+          render();
+        } catch (e) { toast(String(e), 'error'); }
+        finally { btnProxySave.disabled = false; }
+      };
+      const btnProxyClear = $('btn-proxy-clear');
+      if (btnProxyClear) btnProxyClear.onclick = async () => {
+        btnProxyClear.disabled = true;
+        try {
+          await api('/proxy', { method: 'POST', body: JSON.stringify({ index, proxy: '' }) });
+          const statusEl = $('proxy-status');
+          if (statusEl) statusEl.textContent = 'No proxy (using env)';
+          const input = $('proxy-input-' + index);
+          if (input) input.value = '';
+          toast('Proxy cleared (using env)', 'success');
+          render();
+        } catch (e) { toast(String(e), 'error'); }
+        finally { btnProxyClear.disabled = false; }
+      };
+      const btnProxyTest = $('btn-proxy-test');
+      if (btnProxyTest) btnProxyTest.onclick = async () => {
+        const input = $('proxy-input-' + index);
+        const val = input ? input.value.trim() : '';
+        const body = val ? { index, proxy: val } : { index };
+        btnProxyTest.disabled = true;
+        btnProxyTest.textContent = '...';
+        try {
+          const r = await api('/proxy/test', { method: 'POST', body: JSON.stringify(body) });
+          const masked = r.masked ? esc(r.masked) : '';
+          const statusEl = $('proxy-status');
+          if (r.ok) {
+            toast('Proxy reachable: ' + (r.masked || ''), 'success');
+            if (statusEl) statusEl.textContent = 'Reachable: ' + (r.masked || '');
+          } else {
+            toast('Proxy unreachable: ' + (r.masked || '') + (r.error ? ' - ' + r.error : ''), 'error');
+            if (statusEl) statusEl.textContent = 'Unreachable: ' + (r.masked || '') + (r.error ? ' (' + r.error + ')' : '');
+          }
+        } catch (e) { toast(String(e), 'error'); }
+        finally { btnProxyTest.disabled = false; btnProxyTest.textContent = 'Test'; }
       };
 
       // Single model tests

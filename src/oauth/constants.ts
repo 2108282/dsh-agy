@@ -91,7 +91,10 @@ export async function fetchAgyFirstOk(
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
       if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
       lastSkipped = response
-    } catch {
+    } catch (error) {
+      // Fail-closed: per-account proxy unreachable must not be swallowed and retried on next endpoint
+      const { isProxyUnreachableError } = await import('../proxy.ts')
+      if (isProxyUnreachableError(error)) throw error
       // network error — try the next endpoint
     }
   }
