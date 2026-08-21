@@ -9,6 +9,7 @@
 import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { AgyAdapter } from './adapter/adapter.ts'
+import type { AgyAttachmentStore } from './adapter/adapter.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { resolveAntigravityVersion } from './runtime/version.ts'
 import { AgySessionManager } from './session.ts'
@@ -80,6 +81,7 @@ export async function createAgyRuntime(ctx: Context): Promise<{
     getSession: (model) => sessions.getSession(model),
     reportFailure: (kind, session, info) => sessions.reportFailure(kind, session, info),
     markSuccess: (session) => sessions.markSuccess(session),
+    resolveAttachments: () => ctx.get('attachments') as AgyAttachmentStore | undefined,
   })
   return { store, sessions, adapter }
 }

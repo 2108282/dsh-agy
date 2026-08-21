@@ -28,10 +28,36 @@ import { classifyFetchError, classifyHttpError } from '../runtime/classify.ts'
 import { deriveAntigravitySessionId, generateAntigravityRequestId } from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
+import type { AgyResolvedImage } from './translate.ts'
 import { parseAgySse } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
 
 export type { AgyAccountSession }
+
+/**
+ * Structural view of the harness attachment service (ctx.attachments).
+ * Deliberately not an import of @deepseek-ai/dsh-attachment: the CLI bundle
+ * must stay free of harness runtime dependencies, and the real store
+ * satisfies this shape.
+ */
+export interface AgyAttachmentStore {
+  readImage(ref: {
+    attachmentId: string
+    mediaType: string
+  }): Promise<{ ref: { mediaType: string }; data: Uint8Array }>
+}
+
+/** Collect image refs from user-message content only (spec scope: user images; tool-result nesting out of scope). */
+function collectImageRefs(options: GenerateOptions): Array<{ attachmentId: string; mediaType: string }> {
+  const refs: Array<{ attachmentId: string; mediaType: string }> = []
+  for (const message of options.messages) {
+    if (message.role !== 'user') continue
+    for (const block of message.content) {
+      if (block.type === 'image') refs.push(block.attachment)
+    }
+  }
+  return refs
+}
 
 export interface AgyAdapterOptions {
   /** Resolve the active account for a request (model-aware: family-scoped quota ranking). */
@@ -52,6 +78,8 @@ export interface AgyAdapterOptions {
   ): Promise<void>
   /** Report a clean stream completion (resets the failure counter). */
   markSuccess?(session: AgyAccountSession): Promise<void>
+  /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
+  resolveAttachments?(): AgyAttachmentStore | undefined
 }
 
 const UPSTREAM_ERROR_CODE = 'UPSTREAM'
@@ -96,7 +124,46 @@ export class AgyAdapter extends LlmAdapter {
     return resolveAgyModel(provider, model)
   }
 
+  /**
+   * Pre-resolve every image attachment into base64 bytes before translation.
+   * Image input hard-fails with UNSUPPORTED_CONTENT (terminal, never retried)
+   * when the store is missing or a read fails — silently dropping images and
+   * sending text-only is the exact failure mode this path exists to prevent.
+   */
+  private async resolveRequestImages(options: GenerateOptions): Promise<Map<string, AgyResolvedImage>> {
+    const refs = collectImageRefs(options)
+    const images = new Map<string, AgyResolvedImage>()
+    if (refs.length === 0) return images
+    const store = this.options.resolveAttachments?.()
+    if (!store) {
+      throw new LlmError(
+        'agy image input requires the durable attachment service (in-harness plugin only)',
+        'UNSUPPORTED_CONTENT',
+      )
+    }
+    for (const ref of refs) {
+      try {
+        const stored = await store.readImage(ref)
+        images.set(ref.attachmentId, {
+          mediaType: stored.ref.mediaType,
+          data: Buffer.from(stored.data).toString('base64'),
+        })
+      } catch (cause) {
+        throw new LlmError(
+          `agy image attachment "${ref.attachmentId}" could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`,
+          'UNSUPPORTED_CONTENT',
+          { cause: cause instanceof Error ? cause : undefined },
+        )
+      }
+    }
+    return images
+  }
+
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    // Spec D1 sequence: resolve images first — a locally-failing image request
+    // must surface UNSUPPORTED_CONTENT (user story 8) instead of being masked
+    // by account-pool errors, and must not touch pool state at all.
+    const images = await this.resolveRequestImages(options)
     let session: AgyAccountSession | undefined
     try {
       session = await this.options.getSession(options.model)
@@ -135,6 +202,7 @@ export class AgyAdapter extends LlmAdapter {
     const body = toAgyRequestBody(options, {
       projectId: session.account.projectId,
       sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
+      ...(images.size > 0 ? { images } : {}),
     })
     const headers = buildRequestHeaders(session)
 

@@ -2,12 +2,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
-import { fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
+import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AgyAdapter } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 function textMessage(role: Message['role'], text: string): Message {
   return { id: `m-${Math.random()}`, role, content: [{ type: 'text', text }] } as Message
+}
+
+function imageMessage(): Message {
+  return {
+    id: 'm-img',
+    role: 'user',
+    content: [
+      { type: 'text', text: '看图' },
+      { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+    ],
+  } as Message
 }
 
 function generateOptions(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
@@ -31,6 +42,21 @@ describe('translate', () => {
     expect(body.request.sessionId).toBe('s1')
   })
 
+  it('translates user image blocks into inlineData parts from resolved bytes', () => {
+    const messages = [
+      { id: 'a', role: 'user' as const, content: [
+        { type: 'text' as const, text: '这张图片是什么' },
+        { type: 'image' as const, attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+    ]
+    const images = new Map([['att-1', { mediaType: 'image/png', data: 'aGVsbG8=' }]])
+    const body = toAgyRequestBody(generateOptions({ messages }), { images })
+    expect(body.request.contents[0]!.parts).toEqual([
+      { text: '这张图片是什么' },
+      { inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' } },
+    ])
+  })
+
   it('maps reasoning blocks to thought parts and carries them as-is', () => {
     const messages = [
       { id: 'a', role: 'assistant' as const, content: [
@@ -44,6 +70,43 @@ describe('translate', () => {
       { thought: true, text: 'thinking...' },
       { text: 'answer' },
     ])
+  })
+
+  it('keeps inlineData parts on Claude models while stripping the trailing model turn', () => {
+    const messages = [
+      { id: 'a', role: 'user' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'att-1', mediaType: 'image/jpeg', bytes: 4, width: 1, height: 1 } },
+        { type: 'text' as const, text: '看图' },
+      ]},
+      { id: 'b', role: 'assistant' as const, content: [{ type: 'text' as const, text: 'prefill' }] },
+    ]
+    const images = new Map([['att-1', { mediaType: 'image/jpeg', data: 'aGVsbG8=' }]])
+    const body = toAgyRequestBody(generateOptions({ model: 'claude-opus-4-6-thinking', messages }), { images })
+    expect(body.request.contents).toHaveLength(1)
+    expect(body.request.contents[0]!.parts).toEqual([
+      { inlineData: { mimeType: 'image/jpeg', data: 'aGVsbG8=' } },
+      { text: '看图' },
+    ])
+  })
+
+  it('skips non-user image blocks instead of crashing on the unresolved-map guard', () => {
+    const messages = [
+      { id: 'a', role: 'assistant' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'att-assistant', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+        { type: 'text' as const, text: 'answer' },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages }), {})
+    expect(body.request.contents[0]!.parts).toEqual([{ text: 'answer' }])
+  })
+
+  it('throws instead of silently dropping an image missing from the resolved map', () => {
+    const messages = [
+      { id: 'a', role: 'user' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'att-missing', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+    ]
+    expect(() => toAgyRequestBody(generateOptions({ messages }), {})).toThrowError(/att-missing/)
   })
 
   it('maps tool calls and results with name resolution', () => {
@@ -519,6 +582,17 @@ describe('models', () => {
     expect(models.length).toBeGreaterThan(0)
   })
 
+  it('declares input modalities per catalog vision metadata (unknown ids default to image)', () => {
+    const merged = mergeModelCatalog({ models: { 'gemini-3.6-flash-high': {}, 'some-new-model': {} } })
+    expect(merged.find((m) => m.id === 'gemini-3.6-flash-high')?.inputModalities).toEqual(['text', 'image'])
+    expect(merged.find((m) => m.id === 'some-new-model')?.inputModalities).toEqual(['text', 'image'])
+    const byId = new Map(catalogModelList().map((m) => [m.id, m.inputModalities]))
+    expect(byId.get('gemini-3.6-flash-high')).toEqual(['text', 'image'])
+    expect(byId.get('gpt-oss-120b-medium')).toEqual(['text'])
+    expect(resolveAgyModel('agy', 'brand-new-model').inputModalities).toEqual(['text', 'image'])
+    expect(resolveAgyModel('agy', 'gemini-2.5-flash').inputModalities).toEqual(['text'])
+  })
+
   it('resolves exact-model metadata from the catalog', () => {
     const resolved = resolveAgyModel('agy', 'claude-opus-4-6-thinking')
     expect(resolved.name).toContain('Claude Opus')
@@ -570,6 +644,33 @@ describe('AgyAdapter', () => {
     for await (const chunk of adapter.stream(generateOptions())) chunks.push(chunk)
     expect(chunks.some((c) => (c as { type: string }).type === 'text-delta')).toBe(true)
     expect(failures).toEqual([])
+  })
+
+  it('fails image requests with UNSUPPORTED_CONTENT and no fetch when the attachment service is absent', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ messages: [imageMessage()] }))) void _
+    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('fails image requests with UNSUPPORTED_CONTENT when the attachment cannot be read', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      resolveAttachments: () => ({
+        readImage: async () => { throw new Error('attachment storage offline') },
+      }),
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ messages: [imageMessage()] }))) void _
+    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
   })
 
   it('reports and throws QUOTA (terminal) on daily quota exhaustion', async () => {

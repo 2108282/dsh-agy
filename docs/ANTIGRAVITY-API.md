@@ -44,6 +44,16 @@ The backend parses tool `parameters` as a strict protobuf `Schema`: unknown keys
 - **Tool names** — `functionDeclarations[].name` accepts only `[a-zA-Z0-9_]` and ≤64 chars (MCP tool names are arbitrary; sanitized, overlong/duplicate names get a sha256 tail). Builtin Gemini tool names (`google_search`, `web_search`, `search_web`, `googleSearch`) are excluded entirely (upstream treats them as native tools).
 - **Tests** — `tests/adapter.test.ts` `assertUpstreamContract` recursively asserts every keyword and value shape of the sanitized output, so any future unknown key or invalid value shape fails CI before a user hits upstream; each known rejection shape is pinned as a fixture. Real-world MCP schemas (GitHub MCP `issue_write` was the trigger: boolean enum + union type) belong in the corpus to surface shapes hand-written tests miss.
 
+### 3.2 Image Input Contract (verified via OmniRoute production traffic)
+
+Image input rides in `contents[].parts[]` as a Gemini-style inline part; both model families share it:
+
+- **Part shape** — `{inlineData: {mimeType, data}}` (camelCase; `data` is pure base64 with no `data:` prefix). Accepted media types match the harness attachment vocabulary: `image/png`, `image/jpeg`, `image/webp`, `image/gif`.
+- **Claude parity** — Claude-branded models use the same `streamGenerateContent` schema; the request-side contents pass through unchanged (no Claude-specific image handling).
+- **Executor filter safety** — the upstream-side parts normalization only drops empty `text`, nameless `functionCall`, and non-replayable `thought` parts; `inlineData` parts are never touched.
+- **Plugin behavior** — user-message image blocks are resolved from the durable attachment store and pre-converted to base64 before translation (`src/adapter/adapter.ts`); a missing store or failed read hard-fails with `UNSUPPORTED_CONTENT` (terminal) instead of silently sending text-only. Tool-result-nested images are not translated.
+- Evidence source: OmniRoute's OPENAI→ANTIGRAVITY translator emits this exact part shape on the same endpoints (its Claude path whitelist passes contents verbatim); self-recorded fixture pending — verify once against a live account before release.
+
 ## 4. OAuth Details
 
 - client_id `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com` (Antigravity desktop client, public credential; secret handled via OmniRoute `resolvePublicCred` mode).
