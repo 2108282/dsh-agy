@@ -34,6 +34,7 @@ OAuth endpoints (fixed): authorize `https://accounts.google.com/o/oauth2/v2/auth
 - `Client-Metadata` actually only sends `{ideType:"ANTIGRAVITY"}` in code (freely-added `platform`/`pluginType` get rejected by backend enum validation).
 - Dual style (antigravity vs gemini-cli) **not done**.
 - **Request envelope (OmniRoute active format)**: top level `{project, requestId, model, userAgent:"antigravity", requestType:"agent", request:{contents, tools?, toolConfig:{functionCallingConfig:{mode:"VALIDATED"}}, generationConfig?, sessionId}}`. Claude models strip the trailing model turn; tool schemas are reduced to an upstream allowlist with normalized keyword values (backend rejects ANY unknown keyword AND any non-protobuf value shape; see §3.1).
+- **generationConfig.thinkingConfig** (level-thinking models only): `{thinkingLevel:"low"|"medium"|"high", includeThoughts:true}`. Only emitted when `catalog thinking==='level'` and `GenerateOptions.reasoningEffort` is one of the three; otherwise absent. Id-bound models (e.g. `gemini-3.6-flash-high`, `claude-*`) never carry it; upstream rejects a level on an id-bound model with 400. Example (current `gemini-3.7-flash-tiered`; future `gemini-4-flash` without `-tiered` suffix behaves identically when marked `thinking:'level'`): `{"model":"gemini-3.7-flash-tiered","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"medium","includeThoughts":true}}}}`.
 
 ### 3.1 Tool Schema Contract (verified; whack-a-mole defense)
 

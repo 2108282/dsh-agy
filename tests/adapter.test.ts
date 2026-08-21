@@ -601,6 +601,35 @@ describe('models', () => {
     expect(unknown.name).toBe('brand-new-model')
     expect(unknown.defaultMaxTokens).toBeUndefined()
   })
+
+  it('exposes reasoning efforts for tiered models', () => {
+    const resolved = resolveAgyModel('agy', 'gemini-3.7-flash-tiered')
+    expect(resolved.reasoning).toBeDefined()
+    expect(resolved.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+    expect(String(resolved.reasoning!.defaultEffort)).toBe('medium')
+    // legacy id-bound models and non-tiered discovered ids must not expose reasoning
+    for (const id of ['gemini-3.6-flash-high', 'gemini-3.6-flash-tiered', 'gemini-2.5-flash']) {
+      expect(resolveAgyModel('agy', id).reasoning).toBeUndefined()
+    }
+  })
+
+  it('maps reasoningEffort to thinkingConfig for tiered models only', () => {
+    const low = toAgyRequestBody(generateOptions({ model: 'gemini-3.7-flash-tiered', reasoningEffort: 'low' as any }), {})
+    expect(low.request.generationConfig).toMatchObject({ thinkingConfig: { thinkingLevel: 'low', includeThoughts: true } })
+    const medium = toAgyRequestBody(generateOptions({ model: 'gemini-3.7-flash-tiered', reasoningEffort: 'medium' as any }), {})
+    expect(medium.request.generationConfig).toMatchObject({ thinkingConfig: { thinkingLevel: 'medium', includeThoughts: true } })
+    const high = toAgyRequestBody(generateOptions({ model: 'gemini-3.7-flash-tiered', reasoningEffort: 'high' as any }), {})
+    expect(high.request.generationConfig).toMatchObject({ thinkingConfig: { thinkingLevel: 'high', includeThoughts: true } })
+
+    const noEffort = toAgyRequestBody(generateOptions({ model: 'gemini-3.7-flash-tiered' }), {})
+    expect(noEffort.request.generationConfig?.thinkingConfig).toBeUndefined()
+
+    const fixedModel = toAgyRequestBody(generateOptions({ model: 'gemini-3.6-flash-high', reasoningEffort: 'high' as any }), {})
+    expect(fixedModel.request.generationConfig?.thinkingConfig).toBeUndefined()
+
+    const invalid = toAgyRequestBody(generateOptions({ model: 'gemini-3.7-flash-tiered', reasoningEffort: 'ultra' as any }), {})
+    expect(invalid.request.generationConfig?.thinkingConfig).toBeUndefined()
+  })
 })
 
 describe('AgyAdapter', () => {
