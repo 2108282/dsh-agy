@@ -11,6 +11,14 @@ import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId } from './catalo
 
 export const AGY_PROVIDER = 'agy'
 
+/**
+ * Every chat-callable agy model accepts image input (verified upstream wire
+ * contract: Gemini-style inlineData parts, shared by the Gemini and Claude
+ * backends). Declared explicitly so the harness image-admission preflight
+ * and model selectors treat the route as vision-capable.
+ */
+const AGY_INPUT_MODALITIES = ['text', 'image'] as const
+
 export interface DiscoveredModelEntry {
   quotaInfo?: {
     remainingFraction?: number
@@ -64,6 +72,7 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
       provider: AGY_PROVIDER,
       id,
       name: entry.displayName ?? meta?.name ?? entry.modelName ?? id,
+      inputModalities: [...AGY_INPUT_MODALITIES],
       ...(meta ? { context: { contextWindow: meta.contextLength } } : {}),
     })
   }
@@ -76,6 +85,7 @@ export function catalogModelList(): LlmModelInfo[] {
     provider: AGY_PROVIDER,
     id: model.id,
     name: model.name,
+    inputModalities: [...AGY_INPUT_MODALITIES],
     context: { contextWindow: model.contextLength },
   }))
 }
@@ -103,6 +113,7 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
     provider,
     id: model,
     name: meta?.name ?? model,
+    inputModalities: [...AGY_INPUT_MODALITIES],
     ...(meta ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: meta.maxOutputTokens } : {}),
   }
 }

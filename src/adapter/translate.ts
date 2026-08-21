@@ -24,6 +24,14 @@ export type AgyPart =
   | { thought: true; text: string }
   | { thoughtSignature: string; functionCall: { id: string; name: string; args: unknown } }
   | { functionResponse: { name: string; response: unknown } }
+  | { inlineData: { mimeType: string; data: string } }
+
+/** Image bytes pre-resolved from the durable attachment store, keyed by attachment id. */
+export interface AgyResolvedImage {
+  mediaType: string
+  /** Pure base64 (no data: prefix). */
+  data: string
+}
 
 export interface AgyContent {
   role: 'user' | 'model'
@@ -149,7 +157,11 @@ function buildToolNameIndex(messages: readonly Message[]): Map<string, string> {
   return index
 }
 
-function blockToParts(block: ContentBlock, toolNames: Map<string, string>): AgyPart[] {
+function blockToParts(
+  block: ContentBlock,
+  toolNames: Map<string, string>,
+  images: Map<string, AgyResolvedImage>,
+): AgyPart[] {
   switch (block.type) {
     case 'text':
       return [{ text: block.text }]
@@ -196,13 +208,26 @@ function blockToParts(block: ContentBlock, toolNames: Map<string, string>): AgyP
         },
       }]
     }
+    case 'image': {
+      // Bytes are pre-resolved by the adapter before translation; a missing
+      // entry breaks that invariant and must fail loudly, never silently drop.
+      const resolved = images.get(block.attachment.attachmentId)
+      if (!resolved) {
+        throw new Error(`agy translate: unresolved image attachment "${block.attachment.attachmentId}"`)
+      }
+      return [{ inlineData: { mimeType: resolved.mediaType, data: resolved.data } }]
+    }
     default:
       return [] // unknown block types (merge-extensible) are skipped
   }
 }
 
-function messageToContent(message: Message, toolNames: Map<string, string>): AgyContent | null {
-  const parts = message.content.flatMap((block) => blockToParts(block, toolNames))
+function messageToContent(
+  message: Message,
+  toolNames: Map<string, string>,
+  images: Map<string, AgyResolvedImage>,
+): AgyContent | null {
+  const parts = message.content.flatMap((block) => blockToParts(block, toolNames, images))
   if (parts.length === 0) return null
   const role = message.role === 'assistant' ? 'model' : 'user'
   return { role, parts }
@@ -250,11 +275,12 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
 /** Build the wrapped Antigravity request body for one call. */
 export function toAgyRequestBody(
   options: GenerateOptions,
-  context: { projectId?: string; sessionId?: string },
+  context: { projectId?: string; sessionId?: string; images?: Map<string, AgyResolvedImage> },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
+  const images = context.images ?? new Map<string, AgyResolvedImage>()
   let contents = options.messages
-    .map((message) => messageToContent(message, toolNames))
+    .map((message) => messageToContent(message, toolNames, images))
     .filter((c): c is AgyContent => c !== null)
   if (isClaudeModel(options.model)) {
     contents = stripTrailingModelTurn(contents)

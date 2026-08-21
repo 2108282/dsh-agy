@@ -45,6 +45,16 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 - **工具名** — `functionDeclarations[].name` 只接受 `[a-zA-Z0-9_]` 且 ≤64 字符（MCP 工具名任意；清洗，超长/重名追加 sha256 尾）。内置 Gemini 工具名（`google_search`、`web_search`、`search_web`、`googleSearch`）整体剔除（上游将其视为原生工具）。
 - **测试** — `tests/adapter.test.ts` 的 `assertUpstreamContract` 递归断言清洗后输出的每个关键字与值形状均合规，任何新未知关键字或非法值形状都会在 CI 失败（不必等用户撞 400）；每个已知的 400 形状都以 fixture 钉住。真实 MCP schema（GitHub MCP `issue_write` 正是 #4 触发源：boolean enum + union type）应进入语料，以暴露手写测试看不到的形状。
 
+### 3.2 图片输入契约（经 OmniRoute 生产流量验证）
+
+图片输入以 Gemini 风格 inline part 随 `contents[].parts[]` 发送；两类模型族共用同一契约：
+
+- **Part 形状** — `{inlineData: {mimeType, data}}`（camelCase；`data` 为纯 base64，不带 `data:` 前缀）。接受的媒体类型与 harness 附件词汇表一致：`image/png`、`image/jpeg`、`image/webp`、`image/gif`。
+- **Claude 对等** — Claude 系模型使用相同的 `streamGenerateContent` schema；请求侧 contents 原样通过（无需 Claude 特有的图片处理）。
+- **executor 过滤安全** — 上游侧的 parts 归一化只丢弃空 `text`、无名 `functionCall` 与不可回放的 `thought` parts；`inlineData` parts 不受影响。
+- **插件行为** — 用户消息中的 image block 由持久附件服务解析出字节，在翻译前预转换为 base64（`src/adapter/adapter.ts`）；服务缺失或读取失败以 `UNSUPPORTED_CONTENT`（终态）硬失败，绝不静默降级为纯文本。tool-result 内嵌图片不做翻译。
+- 证据来源：OmniRoute 的 OPENAI→ANTIGRAVITY 翻译器在同一端点上产出该形状（其 Claude 路径白名单对 contents 原样放行）；自录 fixture 待补——发版前用真实账号实测一次。
+
 ## 4. OAuth 细节
 
 - client_id `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com`（Antigravity 桌面客户端，公开凭据；secret 经 OmniRoute `resolvePublicCred` 模式处理）。
