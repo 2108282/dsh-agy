@@ -4,12 +4,22 @@
  * capability metadata, and catalog fallback when the endpoint is unreachable.
  */
 
-import type { LlmModelInfo, LlmResolvedModelInfo, ModelModality } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
-import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId } from './catalog.ts'
+import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId, isLevelThinkingModel } from './catalog.ts'
 
 export const AGY_PROVIDER = 'agy'
+
+/** Level-thinking: single id + selectable low/medium/high via thinkingLevel. Default is UI hint, not wire default. */
+const LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
+  efforts: Object.freeze([
+    { id: ReasoningEffortId('low'), name: 'Low' },
+    { id: ReasoningEffortId('medium'), name: 'Medium' },
+    { id: ReasoningEffortId('high'), name: 'High' },
+  ] as const),
+  defaultEffort: ReasoningEffortId('medium'),
+} as const)
 
 /**
  * Input modalities per model. Image support follows the catalog's own
@@ -115,6 +125,17 @@ export async function listAgyModels(
 /** Resolve one exact model's metadata (catalog-backed; dynamic ids pass through). */
 export function resolveAgyModel(provider: string, model: string): LlmResolvedModelInfo {
   const meta = catalogModel(model)
+  if (isLevelThinkingModel(model)) {
+    return {
+      provider,
+      id: model,
+      name: meta?.name ?? model,
+      context: { contextWindow: meta?.contextLength ?? 1048576 },
+      defaultMaxTokens: meta?.maxOutputTokens ?? 65536,
+      // Return a shallow copy so callers cannot mutate the frozen singleton.
+      reasoning: { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] },
+    }
+  }
   return {
     provider,
     id: model,

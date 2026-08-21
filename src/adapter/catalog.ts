@@ -16,12 +16,15 @@ export interface CatalogModel {
   supportsReasoning?: boolean
   supportsVision?: boolean
   toolCalling?: boolean
+  /** Level-thinking: 'level' means single id + selectable low/medium/high via thinkingLevel. Omit = level bound to id. */
+  thinking?: 'level'
 }
 
 export const AGY_PUBLIC_MODELS: readonly CatalogModel[] = [
   { id: 'gemini-3.6-flash-high', name: 'Gemini 3.6 Flash (High)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.6-flash-medium', name: 'Gemini 3.6 Flash (Medium)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
+  { id: 'gemini-3.7-flash-tiered', name: 'Gemini 3.7 Flash', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
   { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-pro-agent', name: 'Gemini 3.1 Pro (High)', contextLength: 1048576, maxOutputTokens: 65535, supportsReasoning: true, supportsVision: true, toolCalling: true },
@@ -45,4 +48,9 @@ export function isChatCallableModelId(modelId: string): boolean {
 
 export function catalogModel(modelId: string): CatalogModel | undefined {
   return CATALOG_BY_ID.get(modelId)
+}
+
+/** Level-thinking models: single id + selectable low/medium/high via thinkingLevel. */
+export function isLevelThinkingModel(modelId: string): boolean {
+  return catalogModel(modelId)?.thinking === 'level'
 }

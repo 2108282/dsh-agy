@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto'
 import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
+import { catalogModel, isLevelThinkingModel } from './catalog.ts'
 
 export type AgyPart =
   | { text: string }
@@ -53,6 +54,7 @@ export interface AgyRequestBody {
       temperature?: number
       maxOutputTokens?: number
       stopSequences?: string[]
+      thinkingConfig?: { thinkingLevel: string; includeThoughts: boolean }
     }
     sessionId?: string
   }
@@ -246,6 +248,9 @@ function messageToContent(
  */
 const AGY_BUILTIN_TOOL_NAMES = new Set(['google_search', 'web_search', 'search_web', 'googleSearch'])
 
+/** Level-thinking: single id + selectable low/medium/high via thinkingLevel (catalog thinking:'level'). */
+const LEVEL_THINKING_LEVELS = new Set(['low', 'medium', 'high'])
+
 /** Upstream functionDeclarations names are `[a-zA-Z0-9_]` and ≤64 chars (OmniRoute-verified). */
 const AGY_TOOL_NAME_MAX_LENGTH = 64
 
@@ -298,6 +303,12 @@ export function toAgyRequestBody(
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
+  // Level-thinking: map the DSH reasoning effort to thinkingConfig.
+  // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.
+  const effort = options.reasoningEffort?.toLowerCase()
+  if (effort && isLevelThinkingModel(options.model) && LEVEL_THINKING_LEVELS.has(effort)) {
+    generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+  }
 
   return {
     project: context.projectId || undefined,
