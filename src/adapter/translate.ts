@@ -227,7 +227,14 @@ function messageToContent(
   toolNames: Map<string, string>,
   images: Map<string, AgyResolvedImage>,
 ): AgyContent | null {
-  const parts = message.content.flatMap((block) => blockToParts(block, toolNames, images))
+  const parts = message.content.flatMap((block) =>
+    // Non-user images are out of scope by policy (docs ANTIGRAVITY-API §3.2):
+    // skip them like any other untranslatable block instead of tripping the
+    // unresolved-map guard, which protects only the user-image invariant.
+    block.type === 'image' && message.role !== 'user'
+      ? []
+      : blockToParts(block, toolNames, images),
+  )
   if (parts.length === 0) return null
   const role = message.role === 'assistant' ? 'model' : 'user'
   return { role, parts }

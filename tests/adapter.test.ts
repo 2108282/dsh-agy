@@ -89,6 +89,17 @@ describe('translate', () => {
     ])
   })
 
+  it('skips non-user image blocks instead of crashing on the unresolved-map guard', () => {
+    const messages = [
+      { id: 'a', role: 'assistant' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'att-assistant', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+        { type: 'text' as const, text: 'answer' },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages }), {})
+    expect(body.request.contents[0]!.parts).toEqual([{ text: 'answer' }])
+  })
+
   it('throws instead of silently dropping an image missing from the resolved map', () => {
     const messages = [
       { id: 'a', role: 'user' as const, content: [
@@ -571,12 +582,15 @@ describe('models', () => {
     expect(models.length).toBeGreaterThan(0)
   })
 
-  it('declares text+image input modalities on every catalog surface', () => {
+  it('declares input modalities per catalog vision metadata (unknown ids default to image)', () => {
     const merged = mergeModelCatalog({ models: { 'gemini-3.6-flash-high': {}, 'some-new-model': {} } })
-    expect(merged.every((m) => m.inputModalities?.includes('image'))).toBe(true)
-    expect(catalogModelList().every((m) => m.inputModalities?.includes('image'))).toBe(true)
-    const resolved = resolveAgyModel('agy', 'brand-new-model')
-    expect(resolved.inputModalities).toEqual(['text', 'image'])
+    expect(merged.find((m) => m.id === 'gemini-3.6-flash-high')?.inputModalities).toEqual(['text', 'image'])
+    expect(merged.find((m) => m.id === 'some-new-model')?.inputModalities).toEqual(['text', 'image'])
+    const byId = new Map(catalogModelList().map((m) => [m.id, m.inputModalities]))
+    expect(byId.get('gemini-3.6-flash-high')).toEqual(['text', 'image'])
+    expect(byId.get('gpt-oss-120b-medium')).toEqual(['text'])
+    expect(resolveAgyModel('agy', 'brand-new-model').inputModalities).toEqual(['text', 'image'])
+    expect(resolveAgyModel('agy', 'gemini-2.5-flash').inputModalities).toEqual(['text'])
   })
 
   it('resolves exact-model metadata from the catalog', () => {

@@ -4,7 +4,7 @@
  * capability metadata, and catalog fallback when the endpoint is unreachable.
  */
 
-import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
+import type { LlmModelInfo, LlmResolvedModelInfo, ModelModality } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
 import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId } from './catalog.ts'
@@ -12,12 +12,18 @@ import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId } from './catalo
 export const AGY_PROVIDER = 'agy'
 
 /**
- * Every chat-callable agy model accepts image input (verified upstream wire
- * contract: Gemini-style inlineData parts, shared by the Gemini and Claude
- * backends). Declared explicitly so the harness image-admission preflight
- * and model selectors treat the route as vision-capable.
+ * Input modalities per model. Image support follows the catalog's own
+ * `supportsVision` metadata for known models (gpt-oss-120b-medium and
+ * gemini-2.5-flash are text-only there); unknown dynamic ids default to
+ * vision-capable — the upstream schema accepts inlineData across the board,
+ * and a wrong guess surfaces as a clear upstream 400 instead of a silent drop.
  */
 const AGY_INPUT_MODALITIES = ['text', 'image'] as const
+const AGY_TEXT_ONLY_MODALITIES = ['text'] as const
+
+function inputModalitiesFor(meta: { supportsVision?: boolean } | undefined): ModelModality[] {
+  return [...(meta ? meta.supportsVision === true : true) ? AGY_INPUT_MODALITIES : AGY_TEXT_ONLY_MODALITIES]
+}
 
 export interface DiscoveredModelEntry {
   quotaInfo?: {
@@ -72,7 +78,7 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
       provider: AGY_PROVIDER,
       id,
       name: entry.displayName ?? meta?.name ?? entry.modelName ?? id,
-      inputModalities: [...AGY_INPUT_MODALITIES],
+      inputModalities: inputModalitiesFor(meta),
       ...(meta ? { context: { contextWindow: meta.contextLength } } : {}),
     })
   }
@@ -85,7 +91,7 @@ export function catalogModelList(): LlmModelInfo[] {
     provider: AGY_PROVIDER,
     id: model.id,
     name: model.name,
-    inputModalities: [...AGY_INPUT_MODALITIES],
+    inputModalities: inputModalitiesFor(model),
     context: { contextWindow: model.contextLength },
   }))
 }
@@ -113,7 +119,7 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
     provider,
     id: model,
     name: meta?.name ?? model,
-    inputModalities: [...AGY_INPUT_MODALITIES],
+    inputModalities: inputModalitiesFor(meta),
     ...(meta ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: meta.maxOutputTokens } : {}),
   }
 }
