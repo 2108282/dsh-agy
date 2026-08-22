@@ -23,10 +23,10 @@ const LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
 
 /**
  * Input modalities per model. Image support follows the catalog's own
- * `supportsVision` metadata for known models (gpt-oss-120b-medium and
- * gemini-2.5-flash are text-only there); unknown dynamic ids default to
- * vision-capable — the upstream schema accepts inlineData across the board,
- * and a wrong guess surfaces as a clear upstream 400 instead of a silent drop.
+ * `supportsVision` metadata for known models (gpt-oss-120b-medium is text-only
+ * there); unknown dynamic ids default to vision-capable — the upstream schema
+ * accepts inlineData across the board, and a wrong guess surfaces as a clear
+ * upstream 400 instead of a silent drop.
  */
 const AGY_INPUT_MODALITIES = ['text', 'image'] as const
 const AGY_TEXT_ONLY_MODALITIES = ['text'] as const
@@ -130,6 +130,7 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
       provider,
       id: model,
       name: meta?.name ?? model,
+      inputModalities: inputModalitiesFor(meta),
       context: { contextWindow: meta?.contextLength ?? 1048576 },
       defaultMaxTokens: meta?.maxOutputTokens ?? 65536,
       // Return a shallow copy so callers cannot mutate the frozen singleton.

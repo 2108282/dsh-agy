@@ -588,9 +588,11 @@ describe('models', () => {
     expect(merged.find((m) => m.id === 'some-new-model')?.inputModalities).toEqual(['text', 'image'])
     const byId = new Map(catalogModelList().map((m) => [m.id, m.inputModalities]))
     expect(byId.get('gemini-3.6-flash-high')).toEqual(['text', 'image'])
+    expect(byId.get('gemini-2.5-flash')).toEqual(['text', 'image'])
     expect(byId.get('gpt-oss-120b-medium')).toEqual(['text'])
     expect(resolveAgyModel('agy', 'brand-new-model').inputModalities).toEqual(['text', 'image'])
-    expect(resolveAgyModel('agy', 'gemini-2.5-flash').inputModalities).toEqual(['text'])
+    expect(resolveAgyModel('agy', 'gemini-2.5-flash').inputModalities).toEqual(['text', 'image'])
+    expect(resolveAgyModel('agy', 'gemini-3.7-flash-tiered').inputModalities).toEqual(['text', 'image'])
   })
 
   it('resolves exact-model metadata from the catalog', () => {
@@ -607,8 +609,15 @@ describe('models', () => {
     expect(resolved.reasoning).toBeDefined()
     expect(resolved.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
     expect(String(resolved.reasoning!.defaultEffort)).toBe('medium')
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
+
+    const tiered36 = resolveAgyModel('agy', 'gemini-3.6-flash-tiered')
+    expect(tiered36.reasoning).toBeDefined()
+    expect(tiered36.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+    expect(tiered36.inputModalities).toEqual(['text', 'image'])
+
     // legacy id-bound models and non-tiered discovered ids must not expose reasoning
-    for (const id of ['gemini-3.6-flash-high', 'gemini-3.6-flash-tiered', 'gemini-2.5-flash']) {
+    for (const id of ['gemini-3.6-flash-high', 'gemini-2.5-flash']) {
       expect(resolveAgyModel('agy', id).reasoning).toBeUndefined()
     }
   })
