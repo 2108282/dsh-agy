@@ -37,6 +37,8 @@ jobs:
         run: |
           pnpm pack --pack-destination .
           PKG=$(ls dsh-agy-*.tgz | head -n 1)
+          tar -tf "$PKG" | grep -Fx 'package/lib/client.js'
+          tar -tf "$PKG" | grep -Fx 'package/lib/client.d.ts'
           TARBALL_PATH="$(pwd)/$PKG"
           mkdir -p /tmp/dsh-agy-smoke && cd /tmp/dsh-agy-smoke
           npm init -y -s
@@ -50,4 +52,5 @@ jobs:
             "@deepseek-ai/cordis@$(node -p "require('$GITHUB_WORKSPACE/package.json').peerDependencies['@deepseek-ai/cordis']")"
           node -e "import('dsh-agy').then(m=>{if(!m.apply)process.exit(1)})"
           node -e "import('dsh-agy/web').then(m=>{if(!m.apply)process.exit(1)})"
+          node -e "const p=require('dsh-agy/package.json');if(p.exports['./client']?.default!=='./lib/client.js')process.exit(1)"
         shell: bash

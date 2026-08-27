@@ -50,6 +50,8 @@ dsh web
 # Click "Login with Google", complete OAuth authorization, and start using the agy provider
 ```
 
+Open **Settings → Plugins → Antigravity → Open Antigravity dashboard**; the button opens `/agy` in a new tab.
+
 ### Path B: Headless / Terminal Only (Standalone CLI)
 
 For Linux VPS, SSH remote servers, or headless CI environments:
