@@ -32,8 +32,13 @@ DSH Web 内的 `/agy` 仪表盘——账号卡片、每模型配额条、单模�
 
 ```sh
 # 1. 向 DSH web profile 添加插件（支持 dsh 命令行，若未全局安装可用 pnpx/npx）
+# 从 npm 安装：
 dsh plugin --profile web add dsh-agy
-# 或：npx @deepseek-ai/dsh plugin --profile web add dsh-agy
+# 或直接从本 GitHub 仓库安装（已打 DSH rc.8+ 适配补丁 & 放行 0.0.0.0 容器监听）：
+dsh plugin --profile web add github:2108282/dsh-agy
+
+# 或通过 npx 执行：
+# npx @deepseek-ai/dsh plugin --profile web add github:2108282/dsh-agy
 
 # 2. 启动 DSH Web
 dsh web

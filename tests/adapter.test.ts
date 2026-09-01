@@ -658,6 +658,16 @@ describe('AgyAdapter', () => {
     }
   }
 
+  it('implements prepareCall returning resolved model and stream delegate', async () => {
+    const adapter = new AgyAdapter({
+      getSession: async () => undefined,
+      reportFailure: async () => {},
+    })
+    const prep = await adapter.prepareCall('agy', 'gemini-3.6-flash-high')
+    expect(prep.model.id).toBe('gemini-3.6-flash-high')
+    expect(typeof prep.stream).toBe('function')
+  })
+
   it('throws a guidance error when no account is configured', async () => {
     const adapter = new AgyAdapter({
       getSession: async () => undefined,

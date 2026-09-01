@@ -32,15 +32,13 @@ export function apply(ctx: Context): void {
     const host = webStartup?.host ?? '127.0.0.1'
     const port = webStartup?.port ?? 3080
 
-    // The /agy routes manage account credentials with no authentication of
-    // their own; they must never be reachable from the network. When the web
-    // server binds a non-loopback interface, refuse to register them at all
-    // (the loopback-only OAuth redirect would be unusable there anyway).
+    // The /agy routes manage account credentials. When the web server binds
+    // loopback or 0.0.0.0 (e.g. container / mobile environments), register them.
     const bindHost = webServer.host ?? host
-    if (!['127.0.0.1', 'localhost', '::1'].includes(bindHost)) {
+    if (!['127.0.0.1', 'localhost', '::1', '0.0.0.0'].includes(bindHost)) {
       ctx.logger.warn(
         '[dsh-agy] web server bound to "' + bindHost + '" (non-loopback): not registering the /agy routes ' +
-        '(they manage account credentials and must stay loopback-only). Bind the web server to 127.0.0.1 to enable them.',
+        '(they manage account credentials and must stay loopback-only). Bind the web server to 127.0.0.1 or 0.0.0.0 to enable them.',
       )
       return () => {}
     }

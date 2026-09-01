@@ -40,8 +40,13 @@ For users using DeepSeek Harness browser workspace / Web GUI:
 
 ```sh
 # 1. Install plugin into DSH web profile (via dsh CLI, or pnpx/npx if dsh is not in PATH)
+# From npm:
 dsh plugin --profile web add dsh-agy
-# or: npx @deepseek-ai/dsh plugin --profile web add dsh-agy
+# Or from this patched GitHub fork (compatible with DSH rc.8+ & 0.0.0.0 container binding):
+dsh plugin --profile web add github:2108282/dsh-agy
+
+# or via npx:
+# npx @deepseek-ai/dsh plugin --profile web add github:2108282/dsh-agy
 
 # 2. Launch DSH Web
 dsh web

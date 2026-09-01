@@ -20,6 +20,11 @@ import type {
   StreamChunk,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
+
+export interface PreparedAdapterCall {
+  model: LlmResolvedModelInfo
+  stream: (options: GenerateOptions) => AsyncIterable<StreamChunk>
+}
 import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
@@ -122,6 +127,13 @@ export class AgyAdapter extends LlmAdapter {
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return resolveAgyModel(provider, model)
+  }
+
+  async prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    return {
+      model: await this.resolveModel(provider, model),
+      stream: (options: GenerateOptions) => this.stream(options),
+    }
   }
 
   /**
