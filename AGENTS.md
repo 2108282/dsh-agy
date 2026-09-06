@@ -50,7 +50,7 @@ share the same store/session/adapter instances via `createAgyRuntime` (`plugin-c
 pnpm install                 # Development install; CI uses --frozen-lockfile
 pnpm test                    # Vitest: fixture-driven, zero network
 pnpm run typecheck           # tsc --noEmit
-pnpm run build               # tsdown -> lib/ (three entrypoints: index / cli / web)
+pnpm run build               # tsdown -> lib/ (four entrypoints: index / cli / web / client)
 npm pack --dry-run           # Verify packaged files before release (npm ships with Node)
 ```
 
@@ -75,7 +75,7 @@ npm pack --dry-run           # Verify packaged files before release (npm ships w
 - `AGY_CLIENT_ID` and `AGY_CLIENT_SECRET` are **public client credentials** embedded in the Antigravity desktop application; they are not project secrets — do not "fix" them by deletion or obfuscation.
 - Upstream tool-schema 400s are fixed by extending the contract (`sanitizeToolSchema` + a fixture test), never by one-off keyword patches — contract, values, and corpus are pinned in `docs/ANTIGRAVITY-API.md` §3.1.
 - **Session affinity**: `AgySessionManager` pins requests to the last-used account for `SESSION_AFFINITY_WINDOW_MS` (upstream prefix-cache + sessionId continuity; DSH exposes no conversation id, so the window is the proxy). Rotation clears the pin.
-- **Model catalog (AGY)**: `src/adapter/catalog.ts` is the capability source; `v1internal:fetchAvailableModels` is the liveness source. For a new model with selectable thinking (single id + `low/medium/high`), add one `AGY_PUBLIC_MODELS` entry with `thinking:'level'` (omit = id-bound). `src/adapter/models.ts` (`isLevelThinkingModel`) and `src/adapter/translate.ts` then auto-expose `reasoning` and `generationConfig.thinkingConfig.thinkingLevel` — no logic change. Legacy id-bound ids stay without `thinking`.
+- **Model catalog (AGY)**: `src/adapter/catalog.ts` is the capability source; `v1internal:fetchAvailableModels` is the liveness source. For tiered selectable-thinking models (`*-tiered` → `low/medium/high`) dynamic inference is allowed: `catalogModel()` synthesizes a `thinking:'level'` entry (1M context, vision, `formatTieredModelName()` for display) and `isLevelThinkingModel()` returns true for any `*-tiered` so `translate.ts` auto-exposes `reasoning`/`generationConfig.thinkingConfig` without per-model logic change; still pin one `AGY_PUBLIC_MODELS` entry per released tiered model for offline fallback (e.g. `gemini-3.8-flash-tiered`). Legacy id-bound ids stay without `thinking`.
 - Commit messages follow Conventional Commits (`fix(scope): ...`, `feat(scope): ...`).
 - `docs/` is not bundled with npm: links from `README.md` to `docs/` must resolve properly on GitHub.
 - Docs are maintained as EN + zh mirrors (`docs/*_zh.md`); any update to one must update the other in the same commit.
