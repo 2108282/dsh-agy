@@ -42,6 +42,8 @@ dsh web
 # 点击【Google 账号登录】，完成授权后即刻在 DSH 中直接调用 agy provider
 ```
 
+打开 **设置 → 插件 → Antigravity → 打开 Antigravity 仪表盘**；该按钮会在新标签页打开 `/agy`。
+
 
 ### 路径 B：无桌面 / 纯终端环境（CLI 独立使用）
 
