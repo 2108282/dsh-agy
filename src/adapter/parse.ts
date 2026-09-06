@@ -9,7 +9,12 @@
  */
 
 import type { FinishReason, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import * as DshLlm from '@deepseek-ai/dsh-llm'
+
+// ponytail: DSH 0.0.1-rc.1 exports CallId, 0.1.x renames to ToolCallId — pick whichever exists at runtime
+const CallId = ((DshLlm as unknown as { ToolCallId?: (id: string) => unknown }).ToolCallId
+  ?? (DshLlm as unknown as { CallId?: (id: string) => unknown }).CallId) as (id: string) => never
+if (!CallId) throw new Error('dsh-llm: neither ToolCallId nor CallId found')
 
 export interface SsePart {
   text?: string

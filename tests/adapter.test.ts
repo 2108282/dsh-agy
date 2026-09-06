@@ -854,6 +854,23 @@ describe('AgyAdapter', () => {
       code: 'QUOTA',
     })
   })
+
+  it('prepareCall binds model and stream to one generation (DSH rc.8+ compat)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    const prepared = await adapter.prepareCall('agy', 'gemini-2.5-flash')
+    expect(prepared.model.id).toBe('gemini-2.5-flash')
+    expect(prepared.model.provider).toBe('agy')
+    const chunks: unknown[] = []
+    for await (const chunk of prepared.stream(generateOptions({ model: 'gemini-2.5-flash' }))) chunks.push(chunk)
+    expect(chunks.some((c) => (c as { type: string }).type === 'text-delta')).toBe(true)
+  })
 })
 
 describe('parseAgySse inbound shape contract', () => {
