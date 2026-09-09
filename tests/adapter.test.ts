@@ -589,6 +589,159 @@ describe('models', () => {
     expect(merged.find((m) => m.id === 'gemini-3.9-flash-tiered')?.context?.contextWindow).toBe(1048576)
   })
 
+  it('hides ids upstream assigns to a non-chat role, including ids without a tab_ prefix', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-3.6-flash-high': {},
+        'chat_20706': {},
+        'gemini-3.1-flash-image': { displayName: 'Gemini 3.1 Flash Image' },
+        'models/proactive-observer-v10': {},
+      },
+      tabModelIds: ['chat_20706'],
+      imageGenerationModelIds: ['gemini-3.1-flash-image'],
+      audioTranscriptionModelIds: ['models/proactive-observer-v10'],
+    })
+    expect(merged.map((m) => m.id)).toEqual(['gemini-3.6-flash-high'])
+  })
+
+  it('hides a deprecated id only when its replacement is present, chat-callable and visible', () => {
+    const withReplacement = mergeModelCatalog({
+      models: { 'gemini-3.1-pro-high': {}, 'gemini-pro-agent': {} },
+      deprecatedModelIds: { 'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' } },
+    })
+    expect(withReplacement.map((m) => m.id)).toEqual(['gemini-pro-agent'])
+
+    // Replacement absent from this account's tier: keep the retired id, or the
+    // capability becomes unreachable.
+    const withoutReplacement = mergeModelCatalog({
+      models: { 'gemini-3.1-pro-high': {} },
+      deprecatedModelIds: { 'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' } },
+    })
+    expect(withoutReplacement.map((m) => m.id)).toEqual(['gemini-3.1-pro-high'])
+
+    // Replacement itself hidden by a role: same reasoning.
+    const replacementHidden = mergeModelCatalog({
+      models: { 'old-model': {}, 'new-model': {} },
+      deprecatedModelIds: { 'old-model': { newModelId: 'new-model' } },
+      imageGenerationModelIds: ['new-model'],
+    })
+    expect(replacementHidden.map((m) => m.id)).toEqual(['old-model'])
+
+    // Replacement present but never listed anyway (tab_ rule): same reasoning.
+    const replacementNotCallable = mergeModelCatalog({
+      models: { 'old-model': {}, 'tab_new_model': {} },
+      deprecatedModelIds: { 'old-model': { newModelId: 'tab_new_model' } },
+    })
+    expect(replacementNotCallable.map((m) => m.id)).toEqual(['old-model'])
+  })
+
+  it('resolves a deprecation chain the same way whatever order the payload lists it in', () => {
+    const models = { 'model-a': {}, 'model-b': {}, 'model-c': {} }
+    const forwards = mergeModelCatalog({
+      models,
+      deprecatedModelIds: { 'model-a': { newModelId: 'model-b' }, 'model-b': { newModelId: 'model-c' } },
+    })
+    const backwards = mergeModelCatalog({
+      models,
+      deprecatedModelIds: { 'model-b': { newModelId: 'model-c' }, 'model-a': { newModelId: 'model-b' } },
+    })
+    expect(forwards.map((m) => m.id)).toEqual(['model-c'])
+    expect(backwards.map((m) => m.id)).toEqual(['model-c'])
+
+    // Chain truncated by the account's tier: only the link with a present
+    // replacement is hidden.
+    const truncated = mergeModelCatalog({
+      models: { 'model-a': {}, 'model-b': {} },
+      deprecatedModelIds: { 'model-a': { newModelId: 'model-b' }, 'model-b': { newModelId: 'model-c' } },
+    })
+    expect(truncated.map((m) => m.id)).toEqual(['model-b'])
+  })
+
+  it('never hides an id the payload also advertises', () => {
+    const merged = mergeModelCatalog({
+      models: { 'gemini-3.6-flash-high': {}, 'gemini-3.8-flash-tiered': {}, 'sorted-model': {} },
+      // upstream contradicting itself: these ids also sit in a non-chat role
+      imageGenerationModelIds: ['gemini-3.8-flash-tiered'],
+      tabModelIds: ['sorted-model'],
+      deprecatedModelIds: { 'gemini-3.6-flash-high': { newModelId: 'gemini-3.8-flash-tiered' } },
+      defaultAgentModelId: 'gemini-3.6-flash-high',
+      agentModelSorts: [{ displayName: 'Recommended', groups: [{ modelIds: ['sorted-model'] }] }],
+      tieredModelIds: { flash: ['gemini-3.8-flash-tiered'] },
+    })
+    expect(merged.map((m) => m.id).sort()).toEqual(['gemini-3.6-flash-high', 'gemini-3.8-flash-tiered', 'sorted-model'])
+
+    // defaultAgentModelId alone must beat a deprecation whose replacement is
+    // present and perfectly visible.
+    const defaultWins = mergeModelCatalog({
+      models: { 'gemini-3.1-pro-high': {}, 'gemini-pro-agent': {} },
+      deprecatedModelIds: { 'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' } },
+      defaultAgentModelId: 'gemini-3.1-pro-high',
+    })
+    expect(defaultWins.map((m) => m.id).sort()).toEqual(['gemini-3.1-pro-high', 'gemini-pro-agent'])
+  })
+
+  it('leaves a payload without role keys exactly as before', () => {
+    const models = { 'gemini-3.6-flash-high': {}, 'tab_flash_lite_preview': {}, 'some-new-model': {} }
+    expect(mergeModelCatalog({ models }).map((m) => m.id)).toEqual(['gemini-3.6-flash-high', 'some-new-model'])
+    expect(mergeModelCatalog({}).map((m) => m.id)).toEqual([])
+  })
+
+  it('tolerates malformed role values instead of throwing', () => {
+    const merged = mergeModelCatalog({
+      models: { 'gemini-3.6-flash-high': {}, 'keep-me': {} },
+      tabModelIds: 'not-an-array' as unknown as string[],
+      imageGenerationModelIds: [null, 42, ''] as unknown as string[],
+      deprecatedModelIds: {
+        'keep-me': null as unknown as { newModelId?: string },
+        'gemini-3.6-flash-high': { newModelId: '' },
+      },
+      agentModelSorts: [{ groups: undefined }, null as unknown as { groups?: { modelIds?: string[] }[] }],
+      tieredModelIds: { flash: null as unknown as string[] },
+    })
+    expect(merged.map((m) => m.id).sort()).toEqual(['gemini-3.6-flash-high', 'keep-me'])
+
+    const arrayShapedDeprecations = mergeModelCatalog({
+      models: { 'keep-me': {} },
+      deprecatedModelIds: ['not-an-object'] as unknown as Record<string, { newModelId?: string }>,
+    })
+    expect(arrayShapedDeprecations.map((m) => m.id)).toEqual(['keep-me'])
+  })
+
+  it('matches a live account payload: drops the non-tab_ tab id, the image id and the retired pro id', () => {
+    // Role keys copied from a real Google AI Pro discovery response (ids only).
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-3.8-flash-tiered': {}, 'gemini-3.7-flash-tiered': {}, 'gemini-pro-agent': {},
+        'claude-sonnet-4-6': {}, 'claude-opus-4-6-thinking': {}, 'gpt-oss-120b-medium': {},
+        'gemini-3.1-flash-lite': {}, 'gemini-3-flash': {}, 'gemini-3.1-pro-low': {},
+        'gemini-3.1-pro-high': {}, 'gemini-3.1-flash-image': {},
+        'chat_20706': {}, 'chat_23310': {}, 'tab_flash_lite_preview': {},
+      },
+      tabModelIds: ['chat_20706', 'chat_23310'],
+      commandModelIds: ['gemini-3-flash'],
+      imageGenerationModelIds: ['gemini-3.1-flash-image'],
+      mqueryModelIds: ['gemini-3.1-flash-lite'],
+      webSearchModelIds: ['gemini-3.1-flash-lite'],
+      commitMessageModelIds: ['gemini-3.1-flash-lite'],
+      audioTranscriptionModelIds: ['models/proactive-observer-v10'],
+      deprecatedModelIds: { 'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' } },
+      defaultAgentModelId: 'gemini-3.6-flash-high',
+      agentModelSorts: [{ displayName: 'Recommended', groups: [{ modelIds: ['gemini-pro-agent', 'gemini-3.1-pro-low', 'claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium'] }] }],
+      tieredModelIds: { flashLite: ['gemini-3.1-flash-lite'], flash: ['gemini-3.8-flash-tiered'], pro: ['gemini-3.1-pro-low'] },
+    } as Parameters<typeof mergeModelCatalog>[0])
+    const ids = merged.map((m) => m.id)
+    expect(ids).not.toContain('chat_20706')
+    expect(ids).not.toContain('chat_23310')
+    expect(ids).not.toContain('tab_flash_lite_preview')
+    expect(ids).not.toContain('gemini-3.1-flash-image')
+    expect(ids).not.toContain('gemini-3.1-pro-high')
+    // utility roles are not a hiding signal: this one is a pinned chat model
+    expect(ids).toContain('gemini-3.1-flash-lite')
+    expect(ids).toContain('gemini-3-flash')
+    expect(ids).toContain('gemini-pro-agent')
+    expect(ids).toHaveLength(9)
+  })
+
   it('falls back to catalog when the endpoint fails', async () => {
     const fetchImpl = vi.fn(async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch
     const models = await listAgyModels('at', 'p', fetchImpl)
