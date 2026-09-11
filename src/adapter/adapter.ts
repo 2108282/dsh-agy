@@ -129,6 +129,7 @@ export class AgyAdapter extends LlmAdapter {
     return resolveAgyModel(provider, model)
   }
 
+  // ponytail: DSH 0.1.1-rc.2+ calls prepareCall instead of stream directly — keep compatible with old base without override
   async prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
     return {
       model: await this.resolveModel(provider, model),

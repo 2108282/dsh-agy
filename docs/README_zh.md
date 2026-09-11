@@ -32,13 +32,8 @@ DSH Web 内的 `/agy` 仪表盘——账号卡片、每模型配额条、单模�
 
 ```sh
 # 1. 向 DSH web profile 添加插件（支持 dsh 命令行，若未全局安装可用 pnpx/npx）
-# 从 npm 安装：
 dsh plugin --profile web add dsh-agy
-# 或直接从本 GitHub 仓库安装（已打 DSH rc.8+ 适配补丁 & 放行 0.0.0.0 容器监听）：
-dsh plugin --profile web add github:2108282/dsh-agy
-
-# 或通过 npx 执行：
-# npx @deepseek-ai/dsh plugin --profile web add github:2108282/dsh-agy
+# 或：npx @deepseek-ai/dsh plugin --profile web add dsh-agy
 
 # 2. 启动 DSH Web
 dsh web
@@ -46,6 +41,8 @@ dsh web
 # 3. 浏览器访问仪表盘：http://127.0.0.1:3080/agy
 # 点击【Google 账号登录】，完成授权后即刻在 DSH 中直接调用 agy provider
 ```
+
+打开 **设置 → 插件 → Antigravity → 打开 Antigravity 仪表盘**；该按钮会在新标签页打开 `/agy`。
 
 
 ### 路径 B：无桌面 / 纯终端环境（CLI 独立使用）

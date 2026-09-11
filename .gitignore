@@ -1,4 +1,5 @@
 node_modules/
+# lib/ (tracked for DSHA release)
 dist/
 *.tsbuildinfo
 .DS_Store
