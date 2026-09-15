@@ -56,7 +56,7 @@ export const AGY_DEFAULT_REDIRECT_URI = 'http://localhost:51121/oauth-callback'
  * Antigravity API endpoints. The daily runtime host (no .sandbox suffix) is the
  * live endpoint for consumer OAuth accounts — cloudcode-pa.googleapis.com
  * answers RESOURCE_EXHAUSTED for them (verified by live probe), while the
- * daily host answers 200. Order matters: first reachable non-429/403 wins.
+ * daily host answers 200. Order matters: first reachable non-429/403/503 wins.
  */
 export const AGY_ENDPOINT_DAILY = 'https://daily-cloudcode-pa.googleapis.com'
 export const AGY_ENDPOINT_PROD = 'https://cloudcode-pa.googleapis.com'
@@ -71,14 +71,21 @@ export const AGY_ENDPOINT_FALLBACKS: readonly string[] = [
   AGY_ENDPOINT_AUTOPUSH,
 ]
 
-/** Statuses that mean "this endpoint is not usable for this account"; skip to the next. */
-export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403])
+/**
+ * Statuses that mean "this endpoint is not usable for this attempt"; skip to the
+ * next one in the chain. 429/403 = rate/quota/entitlement wall, 503 = capacity
+ * rejection (e.g. "No capacity available for model ..."). A 503 skipped here
+ * still reaches the caller when every endpoint fails, where the classifier marks
+ * it transient and the adapter surfaces it as a retryable SERVER error.
+ */
+export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403, 503])
 
 /**
- * Try each runtime endpoint in order, skipping unusable ones (429/403/network).
+ * Try each runtime endpoint in order, skipping unusable ones (429/403/503/network).
  * Returns the first other response (2xx or a real error like 400/401); when
  * every endpoint is unusable, returns the last skipped response so the caller's
- * classifier can still produce a meaningful error.
+ * classifier can still produce a meaningful error (a returned 503 becomes a
+ * retryable SERVER failure rather than being swallowed here).
  */
 export async function fetchAgyFirstOk(
   urlPath: string,
