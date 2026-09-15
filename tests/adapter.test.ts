@@ -22,6 +22,17 @@ function imageMessage(): Message {
   } as Message
 }
 
+function twoImageMessage(): Message {
+  return {
+    id: 'm-img-2',
+    role: 'user',
+    content: [
+      { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      { type: 'image', attachment: { attachmentId: 'att-2', mediaType: 'image/jpeg', bytes: 4, width: 1, height: 1 } },
+    ],
+  } as Message
+}
+
 function generateOptions(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
   return {
     provider: 'agy',
@@ -731,7 +742,7 @@ describe('AgyAdapter', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
-  it('fails image requests with UNSUPPORTED_CONTENT when the attachment cannot be read', async () => {
+  it('fails image requests with UNSUPPORTED_CONTENT naming the attachment when the read fails', async () => {
     vi.stubGlobal('fetch', vi.fn())
     const adapter = new AgyAdapter({
       getSession: async () => session(),
@@ -742,7 +753,72 @@ describe('AgyAdapter', () => {
     })
     await expect(async () => {
       for await (const _ of adapter.stream(generateOptions({ messages: [imageMessage()] }))) void _
-    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+    }).rejects.toMatchObject({
+      code: 'UNSUPPORTED_CONTENT',
+      message: expect.stringContaining('agy image attachment "att-1" could not be loaded: attachment storage offline'),
+    })
+  })
+
+  it('resolves image attachments concurrently and returns a complete map', async () => {
+    const bodies: Array<{ request: { contents: Array<{ parts: unknown[] }> } }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+    let inFlight = 0
+    let maxInFlight = 0
+    const settlementOrder: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      resolveAttachments: () => ({
+        readImage: async (ref: { attachmentId: string }) => {
+          inFlight += 1
+          maxInFlight = Math.max(maxInFlight, inFlight)
+          // att-1 is the slow read; a sequential loop would settle att-1 before
+          // att-2 and never exceed one in-flight read.
+          await new Promise((resolve) => setTimeout(resolve, ref.attachmentId === 'att-1' ? 20 : 0))
+          inFlight -= 1
+          settlementOrder.push(ref.attachmentId)
+          return {
+            ref: { mediaType: ref.attachmentId === 'att-1' ? 'image/png' : 'image/jpeg' },
+            data: new Uint8Array([ref.attachmentId === 'att-1' ? 1 : 2]),
+          }
+        },
+      }),
+    })
+    for await (const _ of adapter.stream(generateOptions({ messages: [twoImageMessage()] }))) void _
+    expect(maxInFlight).toBe(2)
+    expect(settlementOrder).toEqual(['att-2', 'att-1'])
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]!.request.contents[0]!.parts).toEqual([
+      { inlineData: { mimeType: 'image/png', data: 'AQ==' } },
+      { inlineData: { mimeType: 'image/jpeg', data: 'Ag==' } },
+    ])
+  })
+
+  it('reports the first failing attachment in ref order when concurrent reads fail', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      resolveAttachments: () => ({
+        // att-2 rejects immediately while att-1 rejects later: a bare Promise.all
+        // would surface att-2 (whichever raced first), but the contract is
+        // deterministic ref order.
+        readImage: async (ref: { attachmentId: string }) => {
+          if (ref.attachmentId === 'att-2') throw new Error('att-2 exploded')
+          await new Promise((resolve) => setTimeout(resolve, 15))
+          throw new Error('att-1 exploded')
+        },
+      }),
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ messages: [twoImageMessage()] }))) void _
+    }).rejects.toMatchObject({
+      code: 'UNSUPPORTED_CONTENT',
+      message: expect.stringContaining('agy image attachment "att-1" could not be loaded: att-1 exploded'),
+    })
   })
 
   it('reports and throws QUOTA (terminal) on daily quota exhaustion', async () => {
