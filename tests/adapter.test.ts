@@ -770,6 +770,66 @@ describe('AgyAdapter', () => {
     }).rejects.toMatchObject({ code: 'RATE_LIMIT', failure: { providerRetryAfterMs: 2000 } })
   })
 
+  it('maps upstream 5xx to retryable SERVER with the retry-after hint', async () => {
+    // Real Google 503 body: capacity rejection for one model.
+    const body = JSON.stringify({
+      error: {
+        code: 503,
+        message: 'No capacity available for model gemini-3.8-flash-tiered on the server',
+        status: 'UNAVAILABLE',
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 503, headers: { 'retry-after': '3' } })))
+    const failures: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({
+      code: 'SERVER',
+      failure: { providerRetryAfterMs: 3000 },
+      message: expect.stringContaining('agy upstream error (503)'),
+    })
+    expect(failures).toEqual(['transient'])
+  })
+
+  it('maps upstream 5xx without a retry-after header to SERVER without a delay hint', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"code":500}}', { status: 500 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    let thrown: unknown
+    try {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toMatchObject({ code: 'SERVER' })
+    // No retry-after header: the failure carries no delay hint (LlmFailure drops
+    // undefined fields), so the harness falls back to its own backoff.
+    const failure = (thrown as { failure?: { providerRetryAfterMs?: number } }).failure
+    expect(failure?.providerRetryAfterMs).toBeUndefined()
+  })
+
+  it('keeps non-5xx upstream errors terminal as UPSTREAM', async () => {
+    for (const [status, body] of [
+      [404, '{"error":{"message":"model not found"}}'],
+      [400, '{"error":{"message":"malformed payload"}}'],
+    ] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status })))
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+      })
+      await expect(async () => {
+        for await (const _ of adapter.stream(generateOptions())) void _
+      }, `status ${status}`).rejects.toMatchObject({ code: 'UPSTREAM' })
+    }
+  })
+
   it('converts retryable pool blockage into RATE_LIMIT with a positive integer delay', async () => {
     const resetAt = Date.now() + 5000
     const adapter = new AgyAdapter({
