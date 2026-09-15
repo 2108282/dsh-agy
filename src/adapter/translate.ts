@@ -255,6 +255,12 @@ const LEVEL_THINKING_LEVELS = new Set(['low', 'medium', 'high'])
 const AGY_TOOL_NAME_MAX_LENGTH = 64
 
 /** Sanitize a tool name to the upstream charset/length; dedupe via a short hash. */
+export const AGY_BEHAVIOR_INSTRUCTION = `【Antigravity 协作交互规范】
+1. 思考与推理（Thinking）：你的思考过程（thought / reasoning）必须与用户使用的语言保持一致（默认使用中文），请一律使用中文进行深度思考和问题拆解。
+2. 边对话边执行（Crucial）：在执行任何工具操作（如 bash、edit、write 等）之前，必须先用简短自然的一两句话（中文）向用户说明你正在排查什么、发现的问题或接下来计划执行的操作，然后再调用工具。切勿在没有向用户说明的情况下默默连续调用工具！实现一边与用户对话沟通、一边高效推进任务的协作体验。
+3. 持续思考：在收到工具执行结果后，若需要进一步分析或多步排查，请继续进行思考并向用户简述发现，再调用下一个工具。
+4. 对话语言：与用户的所有对话交互一律使用中文。`
+
 function sanitizeToolName(name: string, seen: Set<string>): string {
   let candidate = name.replace(/[^a-zA-Z0-9_]/g, '_') || 'tool'
   if (candidate.length > AGY_TOOL_NAME_MAX_LENGTH || seen.has(candidate)) {
@@ -287,7 +293,12 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
 /** Build the wrapped Antigravity request body for one call. */
 export function toAgyRequestBody(
   options: GenerateOptions,
-  context: { projectId?: string; sessionId?: string; images?: Map<string, AgyResolvedImage> },
+  context: {
+    projectId?: string
+    sessionId?: string
+    images?: Map<string, AgyResolvedImage>
+    appendBehaviorInstruction?: boolean
+  },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
@@ -310,6 +321,13 @@ export function toAgyRequestBody(
     generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
   }
 
+  let systemText = options.system
+  if (context.appendBehaviorInstruction) {
+    systemText = systemText
+      ? `${systemText}\n\n${AGY_BEHAVIOR_INSTRUCTION}`
+      : AGY_BEHAVIOR_INSTRUCTION
+  }
+
   return {
     project: context.projectId || undefined,
     requestId: generateAntigravityRequestId(),
@@ -318,7 +336,7 @@ export function toAgyRequestBody(
     requestType: 'agent',
     request: {
       contents,
-      ...(options.system ? { systemInstruction: { parts: [{ text: options.system }] } } : {}),
+      ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
       ...(tools ? { tools } : {}),
       ...(tools ? { toolConfig: { functionCallingConfig: { mode: 'VALIDATED' } } } : {}),
       ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),

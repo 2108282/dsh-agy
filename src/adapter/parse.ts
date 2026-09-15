@@ -180,6 +180,9 @@ export async function* parseAgySse(
           }
           for (const part of candidate.content?.parts ?? []) {
             if (part.text !== undefined && part.thought !== true) {
+              if (part.text.length === 0 && (!open || open.kind !== 'text')) {
+                continue
+              }
               for (const chunk of ensureBlock('text')) yield chunk
               open!.text += part.text
               yield { type: 'text-delta', index: blockIndex, text: part.text }

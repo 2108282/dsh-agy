@@ -215,6 +215,7 @@ export class AgyAdapter extends LlmAdapter {
     const body = toAgyRequestBody(options, {
       projectId: session.account.projectId,
       sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
+      appendBehaviorInstruction: true,
       ...(images.size > 0 ? { images } : {}),
     })
     const headers = buildRequestHeaders(session)
