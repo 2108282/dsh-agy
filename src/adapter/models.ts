@@ -44,8 +44,114 @@ export interface DiscoveredModelEntry {
   modelName?: string
 }
 
+export interface DeprecatedModelInfo {
+  newModelId?: string
+  oldModelEnum?: string
+  newModelEnum?: string
+}
+
 export interface DiscoveredModels {
   models?: Record<string, DiscoveredModelEntry>
+  /**
+   * Role assignments the endpoint returns alongside `models`. Upstream uses
+   * them to decide which id drives which IDE feature; only the ones that mean
+   * "this is not an agent chat model" are consumed here, plus the three
+   * positive signals below.
+   */
+  tabModelIds?: string[]
+  imageGenerationModelIds?: string[]
+  audioTranscriptionModelIds?: string[]
+  /** Keyed by the RETIRED id; an object, not an array. */
+  deprecatedModelIds?: Record<string, DeprecatedModelInfo>
+  defaultAgentModelId?: string
+  agentModelSorts?: { displayName?: string; groups?: { modelIds?: string[] }[] }[]
+  /** Selectable-thinking families, e.g. `{flash: ['gemini-3.8-flash-tiered']}`. */
+  tieredModelIds?: Record<string, string[]>
+}
+
+/** Role keys whose members are not agent chat models. */
+const NON_CHAT_ROLE_KEYS = ['tabModelIds', 'imageGenerationModelIds', 'audioTranscriptionModelIds'] as const
+
+/** The payload arrives via an unvalidated cast, so every shape is re-checked. */
+function stringsFrom(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+}
+
+/**
+ * Ids the payload itself advertises: the default agent model, anything in an
+ * `agentModelSorts` group, and every tiered family member. These are never
+ * hidden. If upstream both recommends an id and files it under a non-chat
+ * role, the recommendation is the more recent statement of intent, and this
+ * keeps a labelling mistake from removing a working model.
+ */
+function advertisedModelIds(dynamic: DiscoveredModels): Set<string> {
+  const advertised = new Set<string>()
+  if (typeof dynamic.defaultAgentModelId === 'string' && dynamic.defaultAgentModelId.length > 0) {
+    advertised.add(dynamic.defaultAgentModelId)
+  }
+  for (const sort of Array.isArray(dynamic.agentModelSorts) ? dynamic.agentModelSorts : []) {
+    for (const group of Array.isArray(sort?.groups) ? sort.groups : []) {
+      for (const id of stringsFrom(group?.modelIds)) advertised.add(id)
+    }
+  }
+  const tiered = dynamic.tieredModelIds
+  if (tiered && typeof tiered === 'object' && !Array.isArray(tiered)) {
+    for (const family of Object.values(tiered)) {
+      for (const id of stringsFrom(family)) advertised.add(id)
+    }
+  }
+  return advertised
+}
+
+/**
+ * Discovered ids that should not appear in a chat model list, according to the
+ * payload's own role assignments.
+ *
+ * This is the judgement `isChatCallableModelId` already makes with the `tab_`
+ * prefix, but taken from upstream's list instead of a name guess. That matters:
+ * `tabModelIds` members are not required to start with `tab_` (live accounts
+ * return ids such as `chat_20706`), so those ids would otherwise reach the
+ * model list, where they render as a raw id with no metadata.
+ *
+ * Only roles that mean "different output modality" or "superseded" are
+ * consumed. The utility roles (`commandModelIds`, `mqueryModelIds`,
+ * `webSearchModelIds`, `commitMessageModelIds`) name ordinary chat models doing
+ * a side job - on a live account all three of the latter name
+ * `gemini-3.1-flash-lite`, which is a pinned catalog model.
+ *
+ * A deprecated id is hidden only when its `newModelId` is present in `models`,
+ * chat-callable, and not role-hidden; otherwise hiding it would remove the only
+ * route to that capability on an account whose tier does not carry the
+ * replacement. Replacement availability is judged against role hiding alone and
+ * never against other deprecations, so a chain A -> B -> C resolves the same
+ * way whatever order the payload happens to serialize its keys in.
+ *
+ * Not the complete hiding rule: the `tab_` prefix check stays in
+ * `mergeModelCatalog`, because the catalog-only fallback has no payload.
+ */
+function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
+  const models = dynamic.models ?? {}
+  const advertised = advertisedModelIds(dynamic)
+  const hidden = new Set<string>()
+  for (const key of NON_CHAT_ROLE_KEYS) {
+    for (const id of stringsFrom(dynamic[key])) {
+      if (!advertised.has(id)) hidden.add(id)
+    }
+  }
+  const roleHidden = new Set(hidden)
+  const deprecated = dynamic.deprecatedModelIds
+  if (deprecated && typeof deprecated === 'object' && !Array.isArray(deprecated)) {
+    for (const [retiredId, info] of Object.entries(deprecated)) {
+      if (advertised.has(retiredId)) continue
+      const replacement = info?.newModelId
+      if (typeof replacement !== 'string' || replacement.length === 0 || replacement === retiredId) continue
+      if (!Object.hasOwn(models, replacement)) continue
+      if (!isChatCallableModelId(replacement) || roleHidden.has(replacement)) continue
+      hidden.add(retiredId)
+    }
+  }
+  return hidden
 }
 
 /** Fetch the account's available models from the first reachable endpoint. */
@@ -78,11 +184,12 @@ export async function fetchAvailableModels(
   throw lastError instanceof Error ? lastError : new Error('fetchAvailableModels: all endpoints failed')
 }
 
-/** Merge dynamic ids with catalog metadata; non-chat models and unknowns keep minimal info. */
+/** Merge dynamic ids with catalog metadata; non-chat and superseded ids are dropped, unknown ids keep minimal info. */
 export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   const entries: LlmModelInfo[] = []
+  const hidden = hiddenDiscoveredIds(dynamic)
   for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
-    if (!isChatCallableModelId(id)) continue
+    if (!isChatCallableModelId(id) || hidden.has(id)) continue
     const meta = catalogModel(id)
     const rawDisplayName = entry.displayName && entry.displayName !== id ? entry.displayName : undefined
     const displayName = rawDisplayName ?? meta?.name ?? entry.displayName ?? entry.modelName ?? id
