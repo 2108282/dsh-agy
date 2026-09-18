@@ -1,3 +1,6 @@
+import os from 'node:os'
+import path from 'node:path'
+import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
@@ -972,6 +975,52 @@ describe('AgyAdapter', () => {
       code: 'UNSUPPORTED_CONTENT',
       message: expect.stringContaining('agy image attachment "att-1" could not be loaded: att-1 exploded'),
     })
+  })
+
+  it('resolves multimodal file handles and includes inlineData in request body for Gemini', async () => {
+    let capturedBody: any
+    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: any) => {
+      capturedBody = JSON.parse(init.body as string)
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const tmpDir = os.tmpdir()
+    const tmpFile = path.join(tmpDir, 'test-adapter-doc.pdf')
+    await fs.promises.writeFile(tmpFile, 'PDF dummy content')
+
+    const fileText = `[File "test-adapter-doc.pdf" (18 bytes, sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef): verbatim read-only copy saved at "${tmpFile}".]`
+    const messages = [
+      {
+        id: 'msg-1',
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: fileText }],
+      },
+    ]
+
+    try {
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+      })
+      for await (const _ of adapter.stream(generateOptions({ model: 'gemini-3.8-flash-tiered', messages }))) {
+        void _
+      }
+      expect(capturedBody).toBeDefined()
+      const parts = capturedBody.request.contents[0].parts
+      expect(parts).toHaveLength(2)
+      expect(parts[0]).toEqual({ text: fileText })
+      expect(parts[1]).toEqual({
+        inlineData: {
+          mimeType: 'application/pdf',
+          data: Buffer.from('PDF dummy content').toString('base64'),
+        },
+      })
+    } finally {
+      await fs.promises.unlink(tmpFile).catch(() => {})
+    }
   })
 
   it('reports and throws QUOTA (terminal) on daily quota exhaustion', async () => {

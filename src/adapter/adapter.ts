@@ -34,6 +34,7 @@ import { deriveAntigravitySessionId, generateAntigravityRequestId } from '../run
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
 import type { AgyResolvedImage } from './translate.ts'
+import { resolveMultimodalFiles } from './multimodal.ts'
 import { parseAgySse } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
 
@@ -231,10 +232,12 @@ export class AgyAdapter extends LlmAdapter {
       )
     }
 
+    const multimodalFiles = await resolveMultimodalFiles(options)
     const body = toAgyRequestBody(options, {
       projectId: session.account.projectId,
       sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
       ...(images.size > 0 ? { images } : {}),
+      ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
     })
     const headers = buildRequestHeaders(session)
 

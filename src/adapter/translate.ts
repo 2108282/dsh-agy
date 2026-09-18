@@ -19,6 +19,10 @@ import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepse
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
 import { catalogModel, isLevelThinkingModel } from './catalog.ts'
+import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
+
+export { isClaudeModel, supportsMultimodalFiles }
+export type { AgyResolvedMultimodalFile }
 
 export type AgyPart =
   | { text: string }
@@ -60,10 +64,7 @@ export interface AgyRequestBody {
   }
 }
 
-/** Whether a model id belongs to a Claude-branded model (Vertex-hosted). */
-export function isClaudeModel(model: string): boolean {
-  return model.startsWith('claude-') || model.includes('/claude')
-}
+// isClaudeModel is imported from ./multimodal.ts and re-exported above
 
 /**
  * Vertex (the Antigravity Claude backend) rejects conversations ending on an
@@ -228,6 +229,8 @@ function messageToContent(
   message: Message,
   toolNames: Map<string, string>,
   images: Map<string, AgyResolvedImage>,
+  multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>,
+  messageIndex?: number,
 ): AgyContent | null {
   const parts = message.content.flatMap((block) =>
     // Non-user images are out of scope by policy (docs ANTIGRAVITY-API §3.2):
@@ -237,6 +240,21 @@ function messageToContent(
       ? []
       : blockToParts(block, toolNames, images),
   )
+
+  if (message.role === 'user' && multimodalFiles) {
+    const files =
+      (message.id ? multimodalFiles.get(message.id) : undefined) ??
+      (multimodalFiles as Map<unknown, AgyResolvedMultimodalFile[]>).get(message) ??
+      (messageIndex !== undefined ? multimodalFiles.get(`msg-${messageIndex}`) : undefined) ??
+      (messageIndex !== undefined ? multimodalFiles.get(String(messageIndex)) : undefined)
+
+    if (files) {
+      for (const file of files) {
+        parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } })
+      }
+    }
+  }
+
   if (parts.length === 0) return null
   const role = message.role === 'assistant' ? 'model' : 'user'
   return { role, parts }
@@ -287,12 +305,18 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
 /** Build the wrapped Antigravity request body for one call. */
 export function toAgyRequestBody(
   options: GenerateOptions,
-  context: { projectId?: string; sessionId?: string; images?: Map<string, AgyResolvedImage> },
+  context: {
+    projectId?: string
+    sessionId?: string
+    images?: Map<string, AgyResolvedImage>
+    multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>
+  },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
+  const multimodalFiles = supportsMultimodalFiles(options.model) ? context.multimodalFiles : undefined
   let contents = options.messages
-    .map((message) => messageToContent(message, toolNames, images))
+    .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index))
     .filter((c): c is AgyContent => c !== null)
   if (isClaudeModel(options.model)) {
     contents = stripTrailingModelTurn(contents)
