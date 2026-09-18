@@ -20,7 +20,8 @@ import { catalogModel } from './catalog.ts'
 /**
  * MIME type mapping for Gemini supported multimodal formats.
  *
- * Verified working formats on Gemini:
+ * Covered formats (PDF observed live end-to-end; the rest follow Gemini's
+ * documented multimodal support and are not yet live-verified):
  * - Document: .pdf -> 'application/pdf'
  * - Audio: .mp3 -> 'audio/mp3', .wav -> 'audio/wav', .m4a -> 'audio/m4a', .aac -> 'audio/aac', .ogg -> 'audio/ogg', .flac -> 'audio/flac'
  * - Video: .mp4 -> 'video/mp4', .mov -> 'video/quicktime', .webm -> 'video/webm'
@@ -108,14 +109,16 @@ export function isClaudeModel(model: string): boolean {
 
 /**
  * Check whether a model supports Gemini multimodal file inlineData.
- * Excludes Claude models (Vertex 500 error on non-image inlineData)
- * and known text-only models (e.g. gpt-oss-120b-medium).
+ * Deny-by-default: Claude models are always excluded (Vertex 500 on
+ * non-image inlineData), catalog models must be vision-capable, and ids
+ * unknown to the catalog are only allowed when they carry the `gemini-`
+ * prefix (so future tiered ids keep working without a catalog bump).
  */
 export function supportsMultimodalFiles(model: string): boolean {
   if (isClaudeModel(model)) return false
   const meta = catalogModel(model)
-  if (meta && meta.supportsVision !== true) return false
-  return true
+  if (meta) return meta.supportsVision === true
+  return model.startsWith('gemini-')
 }
 
 export const isMultimodalSupported = supportsMultimodalFiles

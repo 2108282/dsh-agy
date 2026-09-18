@@ -143,8 +143,16 @@ describe('supportsMultimodalFiles guardrails', () => {
     expect(supportsMultimodalFiles('gpt-oss-120b-medium')).toBe(false)
   })
 
-  it('defaults unknown models to enabled unless they match Claude', () => {
-    expect(supportsMultimodalFiles('some-new-gemini')).toBe(true)
+  it('denies non-Gemini unknown models (deny-by-default)', () => {
+    expect(supportsMultimodalFiles('some-new-gemini')).toBe(false)
+    expect(supportsMultimodalFiles('unknown-model-xyz')).toBe(false)
+    expect(supportsMultimodalFiles('gpt-5-turbo')).toBe(false)
+  })
+
+  it('still enables unknown gemini-prefixed ids (dynamic tiered ids)', () => {
+    expect(supportsMultimodalFiles('gemini-3.9-flash-tiered')).toBe(true)
+    expect(supportsMultimodalFiles('gemini-4.0-flash-tiered')).toBe(true)
+    expect(supportsMultimodalFiles('gemini-5-pro-agent')).toBe(true)
   })
 })
 
