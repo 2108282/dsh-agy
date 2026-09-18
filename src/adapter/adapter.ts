@@ -89,6 +89,8 @@ export interface AgyAdapterOptions {
 }
 
 const UPSTREAM_ERROR_CODE = 'UPSTREAM'
+/** First-class DSH retryable code: the default retry policy honors SERVER (5xx), not UPSTREAM. */
+const SERVER_ERROR_CODE = 'SERVER'
 
 /** Build the impersonation headers for one request (per-request randomization applied by the shell). */
 export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
@@ -155,19 +157,36 @@ export class AgyAdapter extends LlmAdapter {
         'UNSUPPORTED_CONTENT',
       )
     }
-    for (const ref of refs) {
-      try {
+    // Read every attachment concurrently (N images cost one round-trip, not N).
+    // allSettled rather than all: more than one read may reject, and the
+    // surfaced error must be deterministic (first failure in ref order) instead
+    // of whichever concurrent read happened to reject first — and no rejection
+    // may escape as unhandled.
+    const settled = await Promise.allSettled(
+      refs.map(async (ref) => {
         const stored = await store.readImage(ref)
-        images.set(ref.attachmentId, {
-          mediaType: stored.ref.mediaType,
-          data: Buffer.from(stored.data).toString('base64'),
-        })
-      } catch (cause) {
-        throw new LlmError(
-          `agy image attachment "${ref.attachmentId}" could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`,
-          'UNSUPPORTED_CONTENT',
-          { cause: cause instanceof Error ? cause : undefined },
-        )
+        return {
+          attachmentId: ref.attachmentId,
+          image: {
+            mediaType: stored.ref.mediaType,
+            data: Buffer.from(stored.data).toString('base64'),
+          },
+        }
+      }),
+    )
+    const failedIndex = settled.findIndex((outcome) => outcome.status === 'rejected')
+    if (failedIndex !== -1) {
+      const ref = refs[failedIndex]!
+      const cause: unknown = (settled[failedIndex] as PromiseRejectedResult).reason
+      throw new LlmError(
+        `agy image attachment "${ref.attachmentId}" could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`,
+        'UNSUPPORTED_CONTENT',
+        { cause: cause instanceof Error ? cause : undefined },
+      )
+    }
+    for (const outcome of settled) {
+      if (outcome.status === 'fulfilled') {
+        images.set(outcome.value.attachmentId, outcome.value.image)
       }
     }
     return images
@@ -268,6 +287,20 @@ export class AgyAdapter extends LlmAdapter {
         throw new LlmError(
           `agy authentication failed (${response.status}) — run \`dsh-agy login\``,
           'INVALID_CREDENTIAL',
+        )
+      }
+      // 5xx upstream failures (e.g. 503 "No capacity available") are transient:
+      // the DSH retry policy honors SERVER but treats UPSTREAM as terminal, so
+      // classifying 5xx as UPSTREAM kills the turn with zero retries. Non-5xx
+      // transient/request errors (404, generic 400, other 4xx) stay terminal.
+      if (classified.status !== undefined && classified.status >= 500) {
+        throw new LlmError(
+          `agy upstream error (${response.status}): ${classified.message ?? ''}`,
+          SERVER_ERROR_CODE,
+          {
+            providerRetryAfterMs: classified.retryAfterMs ?? undefined,
+            requestId: ProviderRequestId(generateAntigravityRequestId()),
+          },
         )
       }
       throw new LlmError(

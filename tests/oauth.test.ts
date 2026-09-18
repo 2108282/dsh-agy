@@ -18,6 +18,12 @@ import {
   decodeCredentialBlob,
   encodeCredentialBlob,
 } from '../src/oauth/blob.ts'
+import {
+  AGY_ENDPOINT_DAILY,
+  AGY_ENDPOINT_PROD,
+  AGY_ENDPOINT_SKIP_STATUSES,
+  fetchAgyFirstOk,
+} from '../src/oauth/constants.ts'
 
 describe('pkce', () => {
   it('generates a verifier and matching S256 challenge', async () => {
@@ -304,5 +310,41 @@ describe('bootstrapAccount', () => {
     })
     const result = await bootstrapAccount('at', { maxAttempts: 1, retryDelayMs: 10 })
     expect(result.projectId).toBe('')
+  })
+})
+
+describe('endpoint fallback (fetchAgyFirstOk)', () => {
+  it('treats 503 as a skip status so a capacity-rejected endpoint falls through', async () => {
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(503)).toBe(true)
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(429)).toBe(true)
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(403)).toBe(true)
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(500)).toBe(false)
+
+    const calls: string[] = []
+    // fetchImpl is injected: no global stub, no real network.
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) {
+        return new Response(
+          JSON.stringify({ error: { code: 503, message: 'No capacity available', status: 'UNAVAILABLE' } }),
+          { status: 503 },
+        )
+      }
+      return new Response('ok', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    expect(response.status).toBe(200)
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
+    expect(calls[1]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
+  })
+
+  it('returns the last skipped 503 when every endpoint rejects on capacity', async () => {
+    const fetchImpl = (async () => new Response('no capacity', { status: 503 })) as unknown as typeof fetch
+    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    // Intended: the caller's classifier sees the 503 and Fix A surfaces SERVER.
+    expect(response.status).toBe(503)
   })
 })
