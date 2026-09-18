@@ -88,6 +88,8 @@ export interface AgyAdapterOptions {
 }
 
 const UPSTREAM_ERROR_CODE = 'UPSTREAM'
+/** First-class DSH retryable code: the default retry policy honors SERVER (5xx), not UPSTREAM. */
+const SERVER_ERROR_CODE = 'SERVER'
 
 /** Build the impersonation headers for one request (per-request randomization applied by the shell). */
 export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
@@ -282,6 +284,20 @@ export class AgyAdapter extends LlmAdapter {
         throw new LlmError(
           `agy authentication failed (${response.status}) — run \`dsh-agy login\``,
           'INVALID_CREDENTIAL',
+        )
+      }
+      // 5xx upstream failures (e.g. 503 "No capacity available") are transient:
+      // the DSH retry policy honors SERVER but treats UPSTREAM as terminal, so
+      // classifying 5xx as UPSTREAM kills the turn with zero retries. Non-5xx
+      // transient/request errors (404, generic 400, other 4xx) stay terminal.
+      if (classified.status !== undefined && classified.status >= 500) {
+        throw new LlmError(
+          `agy upstream error (${response.status}): ${classified.message ?? ''}`,
+          SERVER_ERROR_CODE,
+          {
+            providerRetryAfterMs: classified.retryAfterMs ?? undefined,
+            requestId: ProviderRequestId(generateAntigravityRequestId()),
+          },
         )
       }
       throw new LlmError(
