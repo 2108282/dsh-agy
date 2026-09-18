@@ -156,19 +156,36 @@ export class AgyAdapter extends LlmAdapter {
         'UNSUPPORTED_CONTENT',
       )
     }
-    for (const ref of refs) {
-      try {
+    // Read every attachment concurrently (N images cost one round-trip, not N).
+    // allSettled rather than all: more than one read may reject, and the
+    // surfaced error must be deterministic (first failure in ref order) instead
+    // of whichever concurrent read happened to reject first — and no rejection
+    // may escape as unhandled.
+    const settled = await Promise.allSettled(
+      refs.map(async (ref) => {
         const stored = await store.readImage(ref)
-        images.set(ref.attachmentId, {
-          mediaType: stored.ref.mediaType,
-          data: Buffer.from(stored.data).toString('base64'),
-        })
-      } catch (cause) {
-        throw new LlmError(
-          `agy image attachment "${ref.attachmentId}" could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`,
-          'UNSUPPORTED_CONTENT',
-          { cause: cause instanceof Error ? cause : undefined },
-        )
+        return {
+          attachmentId: ref.attachmentId,
+          image: {
+            mediaType: stored.ref.mediaType,
+            data: Buffer.from(stored.data).toString('base64'),
+          },
+        }
+      }),
+    )
+    const failedIndex = settled.findIndex((outcome) => outcome.status === 'rejected')
+    if (failedIndex !== -1) {
+      const ref = refs[failedIndex]!
+      const cause: unknown = (settled[failedIndex] as PromiseRejectedResult).reason
+      throw new LlmError(
+        `agy image attachment "${ref.attachmentId}" could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`,
+        'UNSUPPORTED_CONTENT',
+        { cause: cause instanceof Error ? cause : undefined },
+      )
+    }
+    for (const outcome of settled) {
+      if (outcome.status === 'fulfilled') {
+        images.set(outcome.value.attachmentId, outcome.value.image)
       }
     }
     return images
