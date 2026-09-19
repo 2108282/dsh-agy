@@ -18,7 +18,9 @@ import { createHash } from 'node:crypto'
 import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
-import { catalogModel, isLevelThinkingModel } from './catalog.ts'
+import { catalogModel, isClaudeModel, isLevelThinkingModel, resolveModelAlias } from './catalog.ts'
+
+export { isClaudeModel }
 
 export type AgyPart =
   | { text: string }
@@ -58,11 +60,6 @@ export interface AgyRequestBody {
     }
     sessionId?: string
   }
-}
-
-/** Whether a model id belongs to a Claude-branded model (Vertex-hosted). */
-export function isClaudeModel(model: string): boolean {
-  return model.startsWith('claude-') || model.includes('/claude')
 }
 
 /**
@@ -302,22 +299,37 @@ export function toAgyRequestBody(
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
+  const resolvedModel = resolveModelAlias(options.model)
+  const isClaude = isClaudeModel(resolvedModel)
   let contents = options.messages
     .map((message) => messageToContent(message, toolNames, images))
     .filter((c): c is AgyContent => c !== null)
-  if (isClaudeModel(options.model)) {
+  if (isClaude) {
     contents = stripTrailingModelTurn(contents)
   }
 
   const tools = toolsToDeclarations(options.tools)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
-  if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
-  if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
+  if (options.maxTokens !== undefined) {
+    // Vertex AI caps Claude at 64,000 output tokens; larger values trigger 400 INVALID_ARGUMENT.
+    generationConfig.maxOutputTokens = isClaude
+      ? Math.min(options.maxTokens, 64000)
+      : options.maxTokens
+  }
+  if (options.stop !== undefined && options.stop.length > 0) {
+    if (isClaude) {
+      // Anthropic on Vertex rejects stop_sequences with no non-whitespace character.
+      const validStops = options.stop.filter((s: string) => /\S/.test(s))
+      if (validStops.length > 0) generationConfig.stopSequences = validStops
+    } else {
+      generationConfig.stopSequences = options.stop
+    }
+  }
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
   // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.
   const effort = options.reasoningEffort?.toLowerCase()
-  if (effort && isLevelThinkingModel(options.model) && LEVEL_THINKING_LEVELS.has(effort)) {
+  if (effort && isLevelThinkingModel(resolvedModel) && LEVEL_THINKING_LEVELS.has(effort)) {
     generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
   }
 
@@ -331,7 +343,7 @@ export function toAgyRequestBody(
   return {
     project: context.projectId || undefined,
     requestId: generateAntigravityRequestId(),
-    model: options.model,
+    model: resolvedModel,
     userAgent: 'antigravity',
     requestType: 'agent',
     request: {

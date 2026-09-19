@@ -7,7 +7,7 @@
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
-import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId, isLevelThinkingModel } from './catalog.ts'
+import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId, isClaudeModel, isLevelThinkingModel, resolveModelAlias } from './catalog.ts'
 
 export const AGY_PROVIDER = 'agy'
 
@@ -42,6 +42,8 @@ export interface DiscoveredModelEntry {
   }
   displayName?: string
   modelName?: string
+  isInternal?: boolean
+  apiProvider?: string
 }
 
 export interface DiscoveredModels {
@@ -81,10 +83,15 @@ export async function fetchAvailableModels(
 /** Merge dynamic ids with catalog metadata; non-chat models and unknowns keep minimal info. */
 export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   const entries: LlmModelInfo[] = []
-  for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
-    if (!isChatCallableModelId(id)) continue
+  const seenIds = new Set<string>()
+  for (const [rawId, entry] of Object.entries(dynamic.models ?? {})) {
+    if (!isChatCallableModelId(rawId)) continue
+    if (entry.isInternal === true || entry.apiProvider === 'API_PROVIDER_INTERNAL') continue
+    const id = resolveModelAlias(rawId)
+    if (seenIds.has(id)) continue
+    seenIds.add(id)
     const meta = catalogModel(id)
-    const rawDisplayName = entry.displayName && entry.displayName !== id ? entry.displayName : undefined
+    const rawDisplayName = entry.displayName && entry.displayName !== rawId ? entry.displayName : undefined
     const displayName = rawDisplayName ?? meta?.name ?? entry.displayName ?? entry.modelName ?? id
     entries.push({
       provider: AGY_PROVIDER,
@@ -139,11 +146,13 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
       reasoning: { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] },
     }
   }
+  const defaultMaxTokens = meta?.maxOutputTokens ?? (isClaudeModel(model) ? 64000 : undefined)
   return {
     provider,
     id: model,
     name: meta?.name ?? model,
     inputModalities: inputModalitiesFor(meta),
-    ...(meta ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: meta.maxOutputTokens } : {}),
+    ...(meta ? { context: { contextWindow: meta.contextLength } } : {}),
+    ...(defaultMaxTokens !== undefined ? { defaultMaxTokens } : {}),
   }
 }

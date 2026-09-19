@@ -573,6 +573,9 @@ describe('models', () => {
       models: {
         'gemini-3.6-flash-high': { displayName: 'Gemini 3.6 Flash (High)' },
         'tab_flash_lite_preview': { displayName: 'Tab Flash' },
+        'chat_20706': { displayName: 'Chat Internal' },
+        'some-internal-model': { displayName: 'Internal Model', isInternal: true },
+        'gemini-3.1-pro-high': { displayName: 'Gemini 3.1 Pro (High)' },
         'some-new-model': { displayName: 'New' },
         'gemini-3.8-flash-tiered': { displayName: 'gemini-3.8-flash-tiered' },
         'gemini-3.9-flash-tiered': { displayName: 'gemini-3.9-flash-tiered' },
@@ -581,12 +584,26 @@ describe('models', () => {
     const ids = merged.map((m) => m.id)
     expect(ids).toContain('gemini-3.6-flash-high')
     expect(ids).not.toContain('tab_flash_lite_preview')
+    expect(ids).not.toContain('chat_20706')
+    expect(ids).not.toContain('some-internal-model')
+    expect(ids).toContain('gemini-pro-agent')
+    expect(ids).not.toContain('gemini-3.1-pro-high')
     expect(merged.find((m) => m.id === 'gemini-3.6-flash-high')?.context?.contextWindow).toBe(1048576)
     expect(merged.find((m) => m.id === 'some-new-model')?.name).toBe('New')
     // tiered model with raw id displayName is prettified from catalog / dynamic fallback
     expect(merged.find((m) => m.id === 'gemini-3.8-flash-tiered')?.name).toBe('Gemini 3.8 Flash')
     expect(merged.find((m) => m.id === 'gemini-3.9-flash-tiered')?.name).toBe('Gemini 3.9 Flash')
     expect(merged.find((m) => m.id === 'gemini-3.9-flash-tiered')?.context?.contextWindow).toBe(1048576)
+  })
+
+  it('clamps Claude maxOutputTokens to 64000 and filters whitespace stop sequences', () => {
+    const body = toAgyRequestBody(generateOptions({
+      model: 'claude-sonnet-4-6',
+      maxTokens: 100000,
+      stop: ['\n', '\n\n', 'HUMAN:', ' '],
+    }), {})
+    expect(body.request.generationConfig?.maxOutputTokens).toBe(64000)
+    expect(body.request.generationConfig?.stopSequences).toEqual(['HUMAN:'])
   })
 
   it('falls back to catalog when the endpoint fails', async () => {
@@ -611,7 +628,7 @@ describe('models', () => {
   it('resolves exact-model metadata from the catalog', () => {
     const resolved = resolveAgyModel('agy', 'claude-opus-4-6-thinking')
     expect(resolved.name).toContain('Claude Opus')
-    expect(resolved.defaultMaxTokens).toBe(65536)
+    expect(resolved.defaultMaxTokens).toBe(64000)
     const unknown = resolveAgyModel('agy', 'brand-new-model')
     expect(unknown.name).toBe('brand-new-model')
     expect(unknown.defaultMaxTokens).toBeUndefined()

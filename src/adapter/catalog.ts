@@ -27,8 +27,8 @@ export const AGY_PUBLIC_MODELS: readonly CatalogModel[] = [
   { id: 'gemini-3.6-flash-high', name: 'Gemini 3.6 Flash (High)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.6-flash-medium', name: 'Gemini 3.6 Flash (Medium)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
-  { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
+  { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)', contextLength: 1048576, maxOutputTokens: 64000, supportsReasoning: true, supportsVision: true, toolCalling: true },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)', contextLength: 1048576, maxOutputTokens: 64000, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-pro-agent', name: 'Gemini 3.1 Pro (High)', contextLength: 1048576, maxOutputTokens: 65535, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.1-pro-low', name: 'Gemini 3.1 Pro (Low)', contextLength: 1048576, maxOutputTokens: 65535, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3-flash-agent', name: 'Gemini 3.5 Flash (High)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
@@ -55,24 +55,50 @@ export function formatTieredModelName(modelId: string): string {
     .join(' ')
 }
 
-/** Tab-completion models are discoverable but not chat-callable. */
+/** Model aliases: map known unroutable or legacy ids to their live working targets. */
+export const AGY_MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  'gemini-3.1-pro-high': 'gemini-pro-agent',
+})
+
+export function resolveModelAlias(modelId: string): string {
+  return AGY_MODEL_ALIASES[modelId] ?? modelId
+}
+
+/** Tab-completion and internal models are discoverable but not chat-callable. */
 export function isChatCallableModelId(modelId: string): boolean {
-  return !modelId.startsWith('tab_')
+  return !modelId.startsWith('tab_') && !modelId.startsWith('chat_')
+}
+
+/** Whether a model id belongs to a Claude-branded model (Vertex-hosted). */
+export function isClaudeModel(model: string): boolean {
+  return model.startsWith('claude-') || model.includes('/claude')
 }
 
 export function catalogModel(modelId: string): CatalogModel | undefined {
-  const existing = CATALOG_BY_ID.get(modelId)
+  const targetId = resolveModelAlias(modelId)
+  const existing = CATALOG_BY_ID.get(targetId)
   if (existing) return existing
-  if (typeof modelId === 'string' && modelId.endsWith('-tiered')) {
+  if (typeof targetId === 'string' && targetId.endsWith('-tiered')) {
     return {
-      id: modelId,
-      name: formatTieredModelName(modelId),
+      id: targetId,
+      name: formatTieredModelName(targetId),
       contextLength: 1048576,
       maxOutputTokens: 65536,
       supportsReasoning: true,
       supportsVision: true,
       toolCalling: true,
       thinking: 'level',
+    }
+  }
+  if (typeof targetId === 'string' && isClaudeModel(targetId)) {
+    return {
+      id: targetId,
+      name: targetId,
+      contextLength: 1048576,
+      maxOutputTokens: 64000,
+      supportsReasoning: true,
+      supportsVision: true,
+      toolCalling: true,
     }
   }
   return undefined
