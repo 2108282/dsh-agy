@@ -26,7 +26,7 @@ export type AgyPart =
   | { text: string }
   | { thought: true; text: string }
   | { thoughtSignature: string; functionCall: { id: string; name: string; args: unknown } }
-  | { functionResponse: { name: string; response: unknown } }
+  | { functionResponse: { id?: string; name: string; response: unknown } }
   | { inlineData: { mimeType: string; data: string } }
 
 /** Image bytes pre-resolved from the durable attachment store, keyed by attachment id. */
@@ -202,6 +202,7 @@ function blockToParts(
         .join('\n')
       return [{
         functionResponse: {
+          id: block.toolCallId,
           name,
           response: { result: text, is_error: block.isError === true },
         },

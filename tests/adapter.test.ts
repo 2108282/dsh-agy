@@ -124,7 +124,24 @@ describe('translate', () => {
       { thoughtSignature: 'skip_thought_signature_validator', functionCall: { id: 'call-1', name: 'web_search', args: { q: 'x' } } },
     ])
     expect(body.request.contents[1]!.parts).toEqual([
-      { functionResponse: { name: 'web_search', response: { result: 'result!', is_error: false } } },
+      { functionResponse: { id: 'call-1', name: 'web_search', response: { result: 'result!', is_error: false } } },
+    ])
+  })
+
+  it('preserves functionResponse id for Claude model downstream tool_use_id matching', () => {
+    const messages = [
+      { id: 'm1', role: 'user' as const, content: [{ type: 'text' as const, text: 'read file' }] },
+      { id: 'm2', role: 'assistant' as const, content: [
+        { type: 'tool-call' as const, id: 'toolu_01Abc', name: 'read', arguments: '{"path":"a.txt"}' },
+      ]},
+      { id: 'm3', role: 'user' as const, content: [
+        { type: 'tool-result' as const, toolCallId: 'toolu_01Abc', content: [{ type: 'text' as const, text: 'file content' }] },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ model: 'claude-opus-4-6-thinking', messages }), {})
+    expect(body.request.contents).toHaveLength(3)
+    expect(body.request.contents[2]!.parts).toEqual([
+      { functionResponse: { id: 'toolu_01Abc', name: 'read', response: { result: 'file content', is_error: false } } },
     ])
   })
 

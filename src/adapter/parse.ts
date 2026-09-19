@@ -180,7 +180,7 @@ export async function* parseAgySse(
           }
           for (const part of candidate.content?.parts ?? []) {
             if (part.text !== undefined && part.thought !== true) {
-              if (part.text.length === 0 && (!open || open.kind !== 'text')) {
+              if (part.text.length === 0 && (!open || (open as any).kind !== 'text')) {
                 continue
               }
               for (const chunk of ensureBlock('text')) yield chunk
