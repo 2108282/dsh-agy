@@ -50,10 +50,11 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 
 图片输入以 Gemini 风格 inline part 随 `contents[].parts[]` 发送；两类模型族共用同一契约：
 
-- **Part 形状** — `{inlineData: {mimeType, data}}`（camelCase；`data` 为纯 base64，不带 `data:` 前缀）。接受的媒体类型与 harness 附件词汇表一致：`image/png`、`image/jpeg`、`image/webp`、`image/gif`。
-- **Claude 对等** — Claude 系模型使用相同的 `streamGenerateContent` schema；请求侧 contents 原样通过（无需 Claude 特有的图片处理）。
+- **Part 形状** — `{inlineData: {mimeType, data}}`（camelCase；`data` 为纯 base64，不带 `data:` 前缀）。图片媒体类型与 harness 附件词汇表一致：`image/png`、`image/jpeg`、`image/webp`、`image/gif`；非图片媒体类型仅对 Gemini 模型支持（见下）。
+- **Claude 对等** — Claude 系模型使用相同的 `streamGenerateContent` schema；请求侧 contents 原样通过（无需 Claude 特有的图片处理）。非图片多模态文件绝不发送给 Claude（见下）。
 - **executor 过滤安全** — 上游侧的 parts 归一化只丢弃空 `text`、无名 `functionCall` 与不可回放的 `thought` parts；`inlineData` parts 不受影响。
-- **插件行为** — 用户消息中的 image block 由持久附件服务解析出字节，在翻译前预转换为 base64（`src/adapter/adapter.ts`）；服务缺失或读取失败以 `UNSUPPORTED_CONTENT`（终态）硬失败，绝不静默降级为纯文本。tool-result 内嵌图片不做翻译。
+- **插件行为——图片** — 用户消息中的 image block 由持久附件服务解析出字节，在翻译前预转换为 base64（`src/adapter/adapter.ts`）；服务缺失或读取失败以 `UNSUPPORTED_CONTENT`（终态）硬失败，绝不静默降级为纯文本。tool-result 内嵌图片不做翻译。
+- **插件行为——非图片多模态文件（仅 Gemini）** — `src/adapter/multimodal.ts` 还会把 DSH 文件句柄文本中的非图片文件解析为同一 `inlineData` part 形状，单文件上限 20MB。覆盖格式：`.pdf` → `application/pdf`（已对 Antigravity 用多页 PDF 实测通过）；音频 `.mp3/.wav/.m4a/.aac/.ogg/.flac`、视频 `.mp4/.mov/.webm` 与图片 `.bmp/.heic/.heif` 遵循 Gemini 公开的多模态支持，尚未实测。门控默认拒绝（`supportsMultimodalFiles`）：Claude 系模型一律排除（Vertex 对非图片 `inlineData` 返回 500）、catalog 模型必须具备视觉能力、catalog 未收录的 id 仅在 `gemini-` 前缀下放行。与图片路径不同，读取失败、超限或格式不受支持时静默回退：原文件句柄文本保留在 prompt 中，模型仍可用文件工具读取。
 - 证据来源：OmniRoute 的 OPENAI→ANTIGRAVITY 翻译器在同一端点上产出该形状（其 Claude 路径白名单对 contents 原样放行）；自录 fixture 待补——发版前用真实账号实测一次。
 
 ## 4. OAuth 细节
@@ -70,6 +71,8 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 - **工具调用签名（协议硬性要求，实测确认）**：出站 `functionCall` part 必须带平级 `thoughtSignature`（缺则 400 "Function call is missing a thought_signature in functionCall parts"）；响应侧 functionCall part 携带该签名（`{thoughtSignature, functionCall:{id,name,args}}`），须按 `functionCall.id` 捕获并在下一轮重放；无缓存时以 `skip_thought_signature_validator` sentinel 兜底（两个参考实现均默认）。并行 functionCall 的签名语义见 OmniRoute openai-to-gemini.ts。
 - **思考内容不下发（实测确认）**：`usageMetadata.thoughtsTokenCount` 报告思考 token 数，但所有模型（gemini-3.6-flash-high / gemini-3-flash-agent / claude-opus-4-6-thinking / gemini-2.5-flash-thinking，含显式 `thinkingConfig`）的流式响应**均无 `{thought:true}` part**——思考要么蒸馏进最终 `text`（3.5 Flash 系把推理写进回答），要么完全隐藏（Claude 系直接输出答案）。DSH 前端因此不会有 reasoning 块；parse 保留 thought part 支持仅为防御性。
 - `fetchAvailableModels`：`{models: Record<id, {quotaInfo?: {remainingFraction, resetTime}, displayName, modelName}>}`；**无能力元数据**（contextLength 等需本地目录补齐）；含不可聊天模型需过滤。
+- **`models` 之外的角色列表（真实账号实测确认）**：`tabModelIds`、`commandModelIds`、`imageGenerationModelIds`、`mqueryModelIds`、`webSearchModelIds`、`commitMessageModelIds`、`audioTranscriptionModelIds`（均为 id 数组）；`deprecatedModelIds`（以被弃用 id 为键的对象，不是数组：`{oldId: {newModelId, oldModelEnum, newModelEnum}}`）；以及三个正向信号 `defaultAgentModelId`、`agentModelSorts`（`[{displayName, groups:[{modelIds}]}]`）、`tieredModelIds`（`{flash|pro|flashLite: [id]}`）。角色列表里的 id 不遵循任何命名规律：`tabModelIds` 含 `chat_20706`，`tab_` 前缀判断抓不到；`mqueryModelIds`、`webSearchModelIds`、`commitMessageModelIds` 三者都指向 `gemini-3.1-flash-lite`，即目录里已 pin 的聊天模型。两个 id 可以共用同一个 `displayName`：`gemini-3.1-pro-high` 与其 `newModelId` `gemini-pro-agent` 都叫 "Gemini 3.1 Pro (High)"。
+- **插件行为**：`mergeModelCatalog` 隐藏 `tabModelIds` / `imageGenerationModelIds` / `audioTranscriptionModelIds` 的成员，以及 `newModelId` 已存在、可聊天且未被角色隐藏的弃用 id（账号未携带替代模型时，被弃用 id 保留；替代模型是否可用只对照角色隐藏判断，因此弃用链的结果与键序无关）。工具类角色（command、mquery、webSearch、commitMessage）不参与过滤，因为它们指向的就是普通聊天模型。三个正向信号可否决隐藏，上游误标不会让可用模型消失。过滤只作用于 `listModels`：`resolveModel` 仍接受任意 id，配额视图（`dsh-agy status`、`/agy` 面板）仍统计 `models` 的全部条目。
 - 配额语义：`loadCodeAssist`/`fetchAvailableModels` 的 `quotaInfo` 为单一配额源（不做 retrieveUserQuota/GeminiCLI UA 路径）。
 - **隐式缓存上报（实测确认）**：`usageMetadata.cachedContentTokenCount` 并非总是出现——只有缓存已预热且前缀足够大时才上报（gemini 系 ~16k+ 前缀、约第 3 个请求起命中；claude 系预热更快、可第 2 个请求即命中且命中率 ~99%）。单轮/小前缀请求一律缺失该字段，不代表模型不支持缓存。实测脚本 `scripts/probe-cache-context.mts`（三模型均复现：gemini-3.7-flash-tiered / gemini-3-flash-agent / claude-opus-4-6-thinking）。
 - **缓存键 = 前缀内容，与 sessionId 无关（实测确认）**：`scripts/probe-cache-loss.mts` 用与先前 probe 逐字节相同的 20.5k system 前缀 + 全新 sessionId，第一轮即命中 20447 tokens——缓存按前缀哈希跨 session 共享。DSH 新对话首轮 0% 的真实原因是 system 前缀 ~13.5k < 16k 阈值（从未被缓存）且各对话历史不同，不是 sessionId 隔离。

@@ -11,6 +11,9 @@ tests/fixtures/recorded/
 # npm lockfile is not used — pnpm-lock.yaml is the source of truth
 package-lock.json
 
+# accidental in-tree pnpm store (the real store lives under ~/Library/pnpm)
+.pnpm-store/
+
 # editor/agent tooling
 .serena/
 .rtk/
