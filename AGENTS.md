@@ -31,7 +31,9 @@ share the same store/session/adapter instances via `createAgyRuntime` (`plugin-c
   - The `/agy` route has no authentication and is ONLY allowed to register on loopback host bindings (`web/plugin.ts` gate).
   - OAuth exchanges MUST bind to the exact PKCE verifier issued for that authorization attempt (`pendingAuth` Map in web, local verifier in CLI); relaxing this verification is a security regression.
   - No request field or telemetry payload may ever transmit a raw refresh token — `sessionId` must be a derived identifier.
-  - `~/.dsh/.credentials.yaml` can ONLY be modified via **append + atomic replacement** (`persistMasterKey`); rewriting the entire file wipes other credentials stored by DSH services.
+  - `~/.dsh/.credentials.yaml` is a version-1 (`refs:` / `records:`) YAML document owned by DSH's credentials provider, and `AGY_MASTER_KEY` MUST nest under `refs` — the provider rejects any other top-level key, which makes every credential in the file unreadable.
+  - The credentials document may ONLY be rewritten by parsing + editing + atomic replacement (`persistMasterKey`); rebuilding it from a partial view wipes other services' credentials.
+  - Reading it MUST go through a real YAML parse (`readCredentialsDocument`), because values are folded across physical lines and a `records` payload can otherwise shadow a top-level name.
   - Read-only CLI commands (`status`, `verify`, `logout`) must NEVER create a master key or credential document if one does not exist.
 - **Classification Semantics**:
   - HTTP 403 responses containing quota / `RESOURCE_EXHAUSTED` phrasing MUST be classified as rate-limit (cooldown). Treating all 403s as auth-failures would permanently disable healthy accounts. Only true auth failures trigger account revocation, and a successful `verify` automatically re-enables the account.
@@ -62,7 +64,7 @@ npm pack --dry-run           # Verify packaged files before release (npm ships w
 
 ## Scripts and CI/CD
 
-- `scripts/` contains developer tools (`record:fixtures`, `e2e`, `debug:request`, `verify:tools`, `verify:blocks`), **all requiring real accounts or network access**. They are not part of routine dev loops, are not packaged into npm, and are not run in CI.
+- `scripts/` contains developer tools (`record:fixtures`, `e2e`, `debug:request`, `verify:tools`, `verify:blocks`), **all requiring real accounts or network access**. They are not part of routine dev loops, are not packaged into npm, and are not run in CI. `scripts/unfold-credentials.mjs` is the exception: a standalone stopgap for the published 0.2.7 reader, run directly with node.
 - `ci.yml` (runs on every PR and push to `main`): 3 OS (Ubuntu / Windows / macOS) × 2 Node versions (22 / 24; pnpm 11 requires 22.13+) -> pnpm install -> test -> typecheck -> build -> `npm pack --dry-run` -> **tarball smoke test** (installs into a clean temp directory and verifies CLI `--help`, `import('dsh-agy')`, and `import('dsh-agy/web')`).
 - Package contents gate: `package.json` `files` only contains `lib/`, `bin/`, `cordis.patch.yml`, `README.md`, `LICENSE`. Adding a new entrypoint requires updating `tsdown.config.ts`, `exports`, and `files` simultaneously.
 - `publish.yml` (triggered on `v*` tag push or manual dispatch): test -> build -> `npm publish` (requires `NPM_TOKEN` secret) -> GitHub Release. **Releases are made via `npm version patch|minor|major` + git tag push; do not run manual `npm publish`**.
@@ -77,6 +79,8 @@ npm pack --dry-run           # Verify packaged files before release (npm ships w
 - **Session affinity**: `AgySessionManager` pins requests to the last-used account for `SESSION_AFFINITY_WINDOW_MS` (upstream prefix-cache + sessionId continuity; DSH exposes no conversation id, so the window is the proxy). Rotation clears the pin.
 - **Model catalog (AGY)**: `src/adapter/catalog.ts` is the capability source; `v1internal:fetchAvailableModels` is the liveness source. For tiered selectable-thinking models (`*-tiered` → `low/medium/high`) dynamic inference is allowed: `catalogModel()` synthesizes a `thinking:'level'` entry (1M context, vision, `formatTieredModelName()` for display) and `isLevelThinkingModel()` returns true for any `*-tiered` so `translate.ts` auto-exposes `reasoning`/`generationConfig.thinkingConfig` without per-model logic change; still pin one `AGY_PUBLIC_MODELS` entry per released tiered model for offline fallback (e.g. `gemini-3.8-flash-tiered`). Legacy id-bound ids stay without `thinking`.
 - Commit messages follow Conventional Commits (`fix(scope): ...`, `feat(scope): ...`).
+- The `@deepseek-ai/dsh-llm` peer range is what the *published* package declares for consumers, not what any local host provides: the Desktop app bundles `0.1.5-rc.1`, which the current `^0.0.1-rc.1` range does not satisfy.
+- `prepareCall` must stay free of the `override` keyword while the declared peer range predates it — `override` is a hard error against `0.0.1-rc.1` and required by `0.1.5-rc.1`, so the two versions cannot both typecheck.
 - `docs/` is not bundled with npm: links from `README.md` to `docs/` must resolve properly on GitHub.
 - Docs are maintained as EN + zh mirrors (`docs/*_zh.md`); any update to one must update the other in the same commit.
 - Windows skips POSIX owner-only file permission checks by design (see `keyring.ts`); `$DSH_HOME` relocates all stored paths.
