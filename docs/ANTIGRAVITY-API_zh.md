@@ -35,7 +35,7 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 - `Client-Metadata` 代码实际只发 `{ideType:"ANTIGRAVITY"}`（凭空多发的 `platform`/`pluginType` 会被后端枚举校验拒绝）。
 - 双风格（antigravity vs gemini-cli）**不做**。
 - **请求 envelope（OmniRoute 活跃格式）**：顶层 `{project, requestId, model, userAgent:"antigravity", requestType:"agent", request:{contents, tools?, toolConfig:{functionCallingConfig:{mode:"VALIDATED"}}, generationConfig?, sessionId}}`。Claude 模型剥离尾部 model 轮；工具 schema 被裁剪到上游 allowlist 并归一化关键字值（后端拒绝任何未知关键字**以及**任何不符合 protobuf 形状的值；见 §3.1）。
-- **generationConfig.thinkingConfig**（仅 level-thinking 模型，单 id + 可选档）：`{thinkingLevel:"low"|"medium"|"high", includeThoughts:true}`。仅当 `catalog thinking==='level'` 且 `GenerateOptions.reasoningEffort` 为三档之一时发送；其余不带。Id 绑定模型（如 `gemini-3.6-flash-high`、`claude-*`）永不携带，误带上游 400。示例（当前 `gemini-3.7-flash-tiered`；未来 `gemini-4-flash` 无 `-tiered` 后缀但标 `thinking:'level'` 时行为一致）：`{"model":"gemini-3.7-flash-tiered","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"medium","includeThoughts":true}}}}`。
+- **generationConfig.thinkingConfig**（仅 level-thinking 模型，三种形态）：`catalog thinking!=='level'`、或既无 `reasoningEffort` 且 purpose 非 `session-title` 时**不带**。当 `GenerateOptions.purpose==='session-title'` 或 `reasoningEffort` 为 `none`/`off` 时发 **`{thinkingBudget:0}`**——用于抑制默认思考，避免其吃掉紧张的 `maxTokens` 上限（会话标题的 cap 很小）。当 `reasoningEffort` 为三档之一时发 **`{thinkingLevel:"low"|"medium"|"high", includeThoughts:true}`**。Id 绑定模型（如 `gemini-3.6-flash-high`、`claude-*`）永不携带，误带上游 400。示例（当前 `gemini-3.7-flash-tiered`；未来 `gemini-4-flash` 无 `-tiered` 后缀但标 `thinking:'level'` 时行为一致）：`{"model":"gemini-3.7-flash-tiered","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"medium","includeThoughts":true}}}}`。
 
 ### 3.1 工具 Schema 契约（实测确认；防打地鼠防线）
 
