@@ -1203,7 +1203,7 @@ describe('AgyAdapter', () => {
     })
   })
 
-  it('prepareCall binds model and stream to one generation (DSH rc.8+ compat)', async () => {
+  it('prepareCall binds model and stream to one generation (inherited from LlmAdapter)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
       'data: [DONE]',
