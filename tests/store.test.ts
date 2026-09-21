@@ -11,7 +11,7 @@ import {
   noopFileLock,
   resolveActiveAccount,
 } from '../src/store/accounts.ts'
-import { createAesGcmCodec, deriveKey, loadMasterKey, persistMasterKey, type SecretCodec } from '../src/store/keyring.ts'
+import { createAesGcmCodec, deriveKey, loadMasterKey, persistMasterKey, readCredentialsDocument, type SecretCodec } from '../src/store/keyring.ts'
 import type { ManagedAccount } from '../src/types.ts'
 
 const codec: SecretCodec = createAesGcmCodec(deriveKey('test-master-key-000000000000000000000000'))
@@ -127,7 +127,7 @@ describe('encryption round trip', () => {
 })
 
 describe('keyring persistMasterKey', () => {
-  it('appends the key without touching existing content', () => {
+  it('adds the key to a pre-release flat document without touching existing content', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
     const file = join(dir, '.credentials.yaml')
     writeFileSync(file, '# a comment\nSOME_KEY: "existing-value"\n', { mode: 0o600 })
@@ -135,22 +135,112 @@ describe('keyring persistMasterKey', () => {
     const text = readFileSync(file, 'utf8')
     expect(text).toContain('# a comment')
     expect(text).toContain('SOME_KEY: "existing-value"')
-    expect(text).toContain('AGY_MASTER_KEY: "mast3r"')
+    expect(text).toContain('AGY_MASTER_KEY: mast3r')
     expect(loadMasterKey(dir)).toBe('mast3r')
     // refuses to overwrite an existing key
     expect(() => persistMasterKey(dir, 'other')).toThrow(/already exists/)
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('preserves YAML the minimal reader cannot parse (append-only)', () => {
+  it('never rewrites a version stamp it does not implement', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
     const file = join(dir, '.credentials.yaml')
-    writeFileSync(file, 'NESTED:\n  inner: value\n', { mode: 0o600 })
+    writeFileSync(file, 'version: 2\nrefs:\n  K: "v"\n', { mode: 0o600 })
+    const before = readFileSync(file, 'utf8')
+    // Downgrading the stamp would silently corrupt a document this build does
+    // not understand, so the write must refuse and leave the file untouched.
+    expect(() => persistMasterKey(dir, 'm')).toThrow(/declares version 2/)
+    expect(readFileSync(file, 'utf8')).toBe(before)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reads but never overwrites a top-level master key left by 0.2.7', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    // 0.2.7 appended the key at the top level, which the provider rejects. The
+    // key still decrypts an existing store, so it must remain readable rather
+    // than being replaced by a fresh one (which would strand those accounts).
+    writeFileSync(file, 'version: 1\nrefs:\n  K: "v"\nAGY_MASTER_KEY: "legacy"\n', { mode: 0o600 })
+    expect(loadMasterKey(dir)).toBe('legacy')
+    expect(() => persistMasterKey(dir, 'fresh')).toThrow(/already exists/)
+    expect(loadMasterKey(dir)).toBe('legacy')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('creates a refs section in a version-1 document that has only records', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(file, 'version: 1\nrecords:\n  a/b:\n    kind: grant\n    payload:\n      x: 1\n', { mode: 0o600 })
     persistMasterKey(dir, 'm')
     const text = readFileSync(file, 'utf8')
-    expect(text).toContain('NESTED:')
-    expect(text).toContain('  inner: value')
+    expect(text).toContain('records:')
+    expect(text).toContain('kind: grant')
+    expect(text).toMatch(/^refs:\n {2}AGY_MASTER_KEY: m$/m)
     expect(loadMasterKey(dir)).toBe('m')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('populates an empty refs section in place', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(file, 'version: 1\nrefs:\n', { mode: 0o600 })
+    persistMasterKey(dir, 'm')
+    const text = readFileSync(file, 'utf8')
+    expect(text).toContain('version: 1')
+    expect(loadMasterKey(dir)).toBe('m')
+    expect(readCredentialsDocument(file).get('AGY_MASTER_KEY')).toBe('m')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('nests the master key under refs in a version-1 document', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(file, 'version: 1\nrefs:\n  SOME_KEY: "existing-value"\nrecords:\n  a/b:\n    kind: grant\n    payload:\n      version: 1\n', { mode: 0o600 })
+    persistMasterKey(dir, 'm')
+    const text = readFileSync(file, 'utf8')
+    // The host rejects any top-level key other than version/refs/records, and a
+    // rejected document loses every credential in it — so the key must nest.
+    expect(text).toMatch(/^refs:\n(?:.*\n)*? {2}AGY_MASTER_KEY: m$/m)
+    expect(text).toContain('records:')
+    expect(text).toContain('kind: grant')
+    expect(loadMasterKey(dir)).toBe('m')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('preserves comments and untouched entries', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(file, '# top comment\nversion: 1\nrefs:\n  K: "v" # trailing\n  L: plain\n', { mode: 0o600 })
+    persistMasterKey(dir, 'm')
+    const text = readFileSync(file, 'utf8')
+    expect(text).toContain('# top comment')
+    expect(text).toContain('# trailing')
+    expect(text).toContain('K: "v"')
+    expect(text).toContain('L: plain')
+    expect(loadMasterKey(dir)).toBe('m')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('nests a pre-release flat document under refs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(file, 'SOME_KEY: "existing-value"\n', { mode: 0o600 })
+    persistMasterKey(dir, 'm')
+    const text = readFileSync(file, 'utf8')
+    expect(text).toContain('version: 1')
+    expect(text).toMatch(/^refs:\n {2}SOME_KEY: "existing-value"/m)
+    expect(loadMasterKey(dir)).toBe('m')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('refuses to rewrite a document it cannot prove it understands', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(file, 'version: 1\nrefs:\n  K: "v"\nUNKNOWN_TOP: "x"\n', { mode: 0o600 })
+    const before = readFileSync(file, 'utf8')
+    expect(() => persistMasterKey(dir, 'm')).toThrow(/unknown top-level key/)
+    // A refused write must leave the document byte-identical.
+    expect(readFileSync(file, 'utf8')).toBe(before)
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -162,6 +252,75 @@ describe('keyring persistMasterKey', () => {
       const mode = (await import('node:fs')).statSync(join(dir, '.credentials.yaml')).mode & 0o777
       expect(mode).toBe(0o600)
     }
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('keyring readCredentialsDocument', () => {
+  it('reads refs in a version-1 document with folded multi-line scalars', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    // The host's `yaml` serializer folds a long scalar at whitespace; the
+    // reader must fold it back (line break -> space), not treat it as the end.
+    const scope = 'openid profile offline_access email'
+    const payload = JSON.stringify({ access_token: 'a'.repeat(200), scope })
+    const folded = payload.replace(/'/g, "''").replace(/,/g, ',\n    ')
+    writeFileSync(
+      file,
+      `version: 1\nrefs:\n  AGY_MASTER_KEY: "mk"\n  FOLDED_ACCOUNT: '${folded}'\n`,
+      { mode: 0o600 },
+    )
+    const entries = readCredentialsDocument(file)
+    expect(entries.get('AGY_MASTER_KEY')).toBe('mk')
+    expect(JSON.parse(entries.get('FOLDED_ACCOUNT') ?? '').scope).toBe(scope)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('ignores nested keys so a records payload cannot shadow a real reference', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(
+      file,
+      [
+        'version: 1',
+        'refs:',
+        '  AGY_MASTER_KEY: "real-key"',
+        'records:',
+        '  client-connection/browser-session:',
+        '    kind: grant',
+        '    payload:',
+        '      version: 1',
+        '      AGY_MASTER_KEY: "shadow"',
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    )
+    const entries = readCredentialsDocument(file)
+    expect(entries.get('AGY_MASTER_KEY')).toBe('real-key')
+    expect(entries.has('records')).toBe(false)
+    expect(entries.has('version')).toBe(false)
+    expect(loadMasterKey(dir)).toBe('real-key')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reads a pre-release flat document', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(file, 'AGY_MASTER_KEY: "flat-key"\n', { mode: 0o600 })
+    expect(readCredentialsDocument(file).get('AGY_MASTER_KEY')).toBe('flat-key')
+    expect(loadMasterKey(dir)).toBe('flat-key')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('returns empty for an absent or blank document', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    expect(readCredentialsDocument(join(dir, '.credentials.yaml')).size).toBe(0)
+    const file = join(dir, '.credentials.yaml')
+    writeFileSync(file, '   \n', { mode: 0o600 })
+    expect(readCredentialsDocument(file).size).toBe(0)
+    // A null section reads as empty, matching the provider.
+    writeFileSync(file, 'version: 1\nrefs:\nrecords:\n', { mode: 0o600 })
+    expect(readCredentialsDocument(file).size).toBe(0)
     rmSync(dir, { recursive: true, force: true })
   })
 })
