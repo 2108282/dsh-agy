@@ -21,10 +21,6 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 
-export interface PreparedAdapterCall {
-  model: LlmResolvedModelInfo
-  stream: (options: GenerateOptions) => AsyncIterable<StreamChunk>
-}
 import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
@@ -132,13 +128,12 @@ export class AgyAdapter extends LlmAdapter {
     return resolveAgyModel(provider, model)
   }
 
-  // ponytail: DSH 0.1.1-rc.2+ calls prepareCall instead of stream directly — keep compatible with old base without override
-  async prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
-    return {
-      model: await this.resolveModel(provider, model),
-      stream: (options: GenerateOptions) => this.stream(options),
-    }
-  }
+  // `prepareCall` is deliberately NOT overridden: the LlmAdapter base class
+  // (dsh-llm 0.1.1-rc.2+) already binds the resolved model to the stream, which
+  // is exactly what this adapter would do. The base implementation also
+  // forwards the cancellation signal, which the previous hand-written copy
+  // dropped. Only dynamic adapters — those needing different capabilities per
+  // generation — should override it.
 
   /**
    * Pre-resolve every image attachment into base64 bytes before translation.
