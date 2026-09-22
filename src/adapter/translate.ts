@@ -18,9 +18,13 @@ import { createHash } from 'node:crypto'
 import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
-import { catalogModel, isClaudeModel, isLevelThinkingModel, resolveModelAlias } from './catalog.ts'
+import { catalogModel, isLevelThinkingModel, resolveModelAlias } from './catalog.ts'
+import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 
-export { isClaudeModel }
+export { isClaudeModel, supportsMultimodalFiles }
+export type { AgyResolvedMultimodalFile }
+
+export const AGY_CLAUDE_MAX_OUTPUT_TOKENS = 64_000
 
 export type AgyPart =
   | { text: string }
@@ -226,6 +230,8 @@ function messageToContent(
   message: Message,
   toolNames: Map<string, string>,
   images: Map<string, AgyResolvedImage>,
+  multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>,
+  messageIndex?: number,
 ): AgyContent | null {
   const parts = message.content.flatMap((block) =>
     // Non-user images are out of scope by policy (docs ANTIGRAVITY-API §3.2):
@@ -235,6 +241,21 @@ function messageToContent(
       ? []
       : blockToParts(block, toolNames, images),
   )
+
+  if (message.role === 'user' && multimodalFiles) {
+    const files =
+      (message.id ? multimodalFiles.get(message.id) : undefined) ??
+      (multimodalFiles as Map<unknown, AgyResolvedMultimodalFile[]>).get(message) ??
+      (messageIndex !== undefined ? multimodalFiles.get(`msg-${messageIndex}`) : undefined) ??
+      (messageIndex !== undefined ? multimodalFiles.get(String(messageIndex)) : undefined)
+
+    if (files) {
+      for (const file of files) {
+        parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } })
+      }
+    }
+  }
+
   if (parts.length === 0) return null
   const role = message.role === 'assistant' ? 'model' : 'user'
   return { role, parts }
@@ -296,14 +317,16 @@ export function toAgyRequestBody(
     sessionId?: string
     images?: Map<string, AgyResolvedImage>
     appendBehaviorInstruction?: boolean
+    multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>
   },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
   const resolvedModel = resolveModelAlias(options.model)
   const isClaude = isClaudeModel(resolvedModel)
+  const multimodalFiles = supportsMultimodalFiles(resolvedModel) ? context.multimodalFiles : undefined
   let contents = options.messages
-    .map((message) => messageToContent(message, toolNames, images))
+    .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index))
     .filter((c): c is AgyContent => c !== null)
   if (isClaude) {
     contents = stripTrailingModelTurn(contents)
@@ -330,8 +353,12 @@ export function toAgyRequestBody(
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
   // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.
   const effort = options.reasoningEffort?.toLowerCase()
-  if (effort && isLevelThinkingModel(resolvedModel) && LEVEL_THINKING_LEVELS.has(effort)) {
-    generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+  if (isLevelThinkingModel(resolvedModel)) {
+    if (options.purpose === "session-title" || effort === "none" || effort === "off") {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 }
+    } else if (effort && LEVEL_THINKING_LEVELS.has(effort)) {
+      generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+    }
   }
 
   let systemText = options.system

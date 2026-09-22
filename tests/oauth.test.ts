@@ -18,6 +18,12 @@ import {
   decodeCredentialBlob,
   encodeCredentialBlob,
 } from '../src/oauth/blob.ts'
+import {
+  AGY_ENDPOINT_DAILY,
+  AGY_ENDPOINT_PROD,
+  AGY_ENDPOINT_SKIP_STATUSES,
+  fetchAgyFirstOk,
+} from '../src/oauth/constants.ts'
 
 describe('pkce', () => {
   it('generates a verifier and matching S256 challenge', async () => {
@@ -105,6 +111,40 @@ describe('exchangeAntigravity', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('routes the whole exchange (token, userinfo, bootstrap) over the account proxy', async () => {
+    // Issue #29 class: `login --proxy` stored a proxy while the exchange itself
+    // still went direct, leaking the host's real IP during login.
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    const seen: Array<{ url: string; dispatcher: unknown }> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      seen.push({ url, dispatcher: (init as { dispatcher?: unknown } | undefined)?.dispatcher })
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('userinfo')) {
+        return new Response(JSON.stringify({ email: 'user@example.com' }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ cloudaicompanionProject: { id: 'proj-1' } }), { status: 200 })
+    }))
+
+    const { verifier } = generatePkcePair()
+    const state = encodeState({ verifier, projectId: '' })
+
+    await withProxyFixture(async (proxyUrl) => {
+      const result = await exchangeAntigravity('code123', state, redirectUri, verifier, { proxyUrl })
+      expect(result.type).toBe('success')
+
+      // Every request the exchange issued must carry the account dispatcher.
+      expect(seen.length).toBeGreaterThanOrEqual(3)
+      const expected = await dispatcherForAsync(proxyUrl)
+      for (const call of seen) {
+        expect(call.dispatcher, `not proxied: ${call.url}`).toBe(expected)
+      }
+    })
   })
 
   it('exchanges code, resolves email and project id', async () => {
@@ -304,5 +344,94 @@ describe('bootstrapAccount', () => {
     })
     const result = await bootstrapAccount('at', { maxAttempts: 1, retryDelayMs: 10 })
     expect(result.projectId).toBe('')
+  })
+})
+
+describe('endpoint fallback (fetchAgyFirstOk)', () => {
+  it('treats 503 as a skip status so a capacity-rejected endpoint falls through', async () => {
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(503)).toBe(true)
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(429)).toBe(true)
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(403)).toBe(true)
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(500)).toBe(false)
+
+    const calls: string[] = []
+    // fetchImpl is injected: no global stub, no real network.
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) {
+        return new Response(
+          JSON.stringify({ error: { code: 503, message: 'No capacity available', status: 'UNAVAILABLE' } }),
+          { status: 503 },
+        )
+      }
+      return new Response('ok', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    expect(response.status).toBe(200)
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
+    expect(calls[1]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
+  })
+
+  it('returns the last skipped 503 when every endpoint rejects on capacity', async () => {
+    const fetchImpl = (async () => new Response('no capacity', { status: 503 })) as unknown as typeof fetch
+    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    // Intended: the caller's classifier sees the 503 and Fix A surfaces SERVER.
+    expect(response.status).toBe(503)
+  })
+
+  // Issue #29 (2): with no explicit proxy, a transient socket failure on one
+  // endpoint must fall through to the next instead of aborting the whole chain.
+  it('falls through to the next endpoint on a direct transient socket failure', async () => {
+    const calls: string[] = []
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) {
+        const error = new TypeError('fetch failed')
+        ;(error as { cause?: unknown }).cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+        throw error
+      }
+      return new Response('ok', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    expect(response.status).toBe(200)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
+  })
+
+  it('surfaces the last endpoint failure instead of a generic message', async () => {
+    const fetchImpl = (async () => {
+      const error = new TypeError('fetch failed')
+      ;(error as { cause?: unknown }).cause = Object.assign(new Error('getaddrinfo ENOTFOUND x'), { code: 'ENOTFOUND' })
+      throw error
+    }) as unknown as typeof fetch
+
+    await expect(
+      fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl),
+    ).rejects.toThrow(/ENOTFOUND|fetch failed/)
+  })
+
+  it('still fails closed when an explicit account proxy is active', async () => {
+    const calls: string[] = []
+    const unreachable = Object.assign(new Error('[Proxy Fast-Fail] Proxy unreachable: http://127.0.0.1:1'), {
+      code: 'PROXY_UNREACHABLE',
+      errorCode: 'proxy_unreachable',
+      statusCode: 503,
+    })
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      throw unreachable
+    }) as unknown as typeof fetch
+
+    await expect(
+      fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl, { proxyUrl: 'http://127.0.0.1:9' }),
+    ).rejects.toThrow(/unreachable/i)
+    // Fail-closed: never fall back to another endpoint (that would risk a
+    // direct connection leaking the account's real IP).
+    expect(calls).toHaveLength(1)
   })
 })

@@ -39,7 +39,10 @@ describe('live verification & contract invariants', () => {
         'gemini-3.1-pro-high': { displayName: 'Gemini 3.1 Pro (High)' },
         'gemini-pro-agent': { displayName: 'Gemini 3.1 Pro (High)' },
         'claude-sonnet-4-6': { displayName: 'Claude Sonnet 4.6' },
-      }
+      },
+      deprecatedModelIds: {
+        'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' },
+      },
     })
     const ids = merged.map(m => m.id)
     expect(ids).not.toContain('chat_20706')

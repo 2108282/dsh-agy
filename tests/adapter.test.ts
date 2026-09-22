@@ -1,9 +1,12 @@
+import os from 'node:os'
+import path from 'node:path'
+import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
-import { formatTieredModelName } from '../src/adapter/catalog.ts'
+import { AGY_PUBLIC_MODELS, formatTieredModelName } from '../src/adapter/catalog.ts'
 import { AgyAdapter } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
@@ -18,6 +21,17 @@ function imageMessage(): Message {
     content: [
       { type: 'text', text: '看图' },
       { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+    ],
+  } as Message
+}
+
+function twoImageMessage(): Message {
+  return {
+    id: 'm-img-2',
+    role: 'user',
+    content: [
+      { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      { type: 'image', attachment: { attachmentId: 'att-2', mediaType: 'image/jpeg', bytes: 4, width: 1, height: 1 } },
     ],
   } as Message
 }
@@ -421,6 +435,37 @@ describe('translate', () => {
     const gemini = toAgyRequestBody(generateOptions({ model: 'gemini-2.5-flash', messages }), {})
     expect(gemini.request.contents.map((c) => c.role)).toEqual(['model', 'user', 'model'])
   })
+
+  // Claude-family ceiling is 64000, not the Gemini 65536 the catalog pinned:
+  // 64001+ answers 400 INVALID_ARGUMENT ("Request contains an invalid
+  // argument"), so the default the harness injects must stay under it.
+  it('clamps maxOutputTokens to the Claude ceiling on the wire', () => {
+    const overCap = toAgyRequestBody(
+      generateOptions({ model: 'claude-opus-4-6-thinking', maxTokens: 65536 }),
+      {},
+    )
+    expect(overCap.request.generationConfig?.maxOutputTokens).toBe(AGY_CLAUDE_MAX_OUTPUT_TOKENS)
+    expect(AGY_CLAUDE_MAX_OUTPUT_TOKENS).toBe(64000)
+
+    // At or under the ceiling passes through untouched (no silent shrink).
+    const atCap = toAgyRequestBody(
+      generateOptions({ model: 'claude-sonnet-4-6', maxTokens: 64000 }),
+      {},
+    )
+    expect(atCap.request.generationConfig?.maxOutputTokens).toBe(64000)
+    const underCap = toAgyRequestBody(
+      generateOptions({ model: 'claude-sonnet-4-6', maxTokens: 8192 }),
+      {},
+    )
+    expect(underCap.request.generationConfig?.maxOutputTokens).toBe(8192)
+
+    // Gemini keeps the larger ceiling: the clamp is Claude-specific.
+    const gemini = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3-flash-agent', maxTokens: 65536 }),
+      {},
+    )
+    expect(gemini.request.generationConfig?.maxOutputTokens).toBe(65536)
+  })
 })
 
 describe('parseSseDataLine', () => {
@@ -590,9 +635,6 @@ describe('models', () => {
       models: {
         'gemini-3.6-flash-high': { displayName: 'Gemini 3.6 Flash (High)' },
         'tab_flash_lite_preview': { displayName: 'Tab Flash' },
-        'chat_20706': { displayName: 'Chat Internal' },
-        'some-internal-model': { displayName: 'Internal Model', isInternal: true },
-        'gemini-3.1-pro-high': { displayName: 'Gemini 3.1 Pro (High)' },
         'some-new-model': { displayName: 'New' },
         'gemini-3.8-flash-tiered': { displayName: 'gemini-3.8-flash-tiered' },
         'gemini-3.9-flash-tiered': { displayName: 'gemini-3.9-flash-tiered' },
@@ -601,10 +643,6 @@ describe('models', () => {
     const ids = merged.map((m) => m.id)
     expect(ids).toContain('gemini-3.6-flash-high')
     expect(ids).not.toContain('tab_flash_lite_preview')
-    expect(ids).not.toContain('chat_20706')
-    expect(ids).not.toContain('some-internal-model')
-    expect(ids).toContain('gemini-pro-agent')
-    expect(ids).not.toContain('gemini-3.1-pro-high')
     expect(merged.find((m) => m.id === 'gemini-3.6-flash-high')?.context?.contextWindow).toBe(1048576)
     expect(merged.find((m) => m.id === 'some-new-model')?.name).toBe('New')
     // tiered model with raw id displayName is prettified from catalog / dynamic fallback
@@ -613,14 +651,157 @@ describe('models', () => {
     expect(merged.find((m) => m.id === 'gemini-3.9-flash-tiered')?.context?.contextWindow).toBe(1048576)
   })
 
-  it('clamps Claude maxOutputTokens to 64000 and filters whitespace stop sequences', () => {
-    const body = toAgyRequestBody(generateOptions({
-      model: 'claude-sonnet-4-6',
-      maxTokens: 100000,
-      stop: ['\n', '\n\n', 'HUMAN:', ' '],
-    }), {})
-    expect(body.request.generationConfig?.maxOutputTokens).toBe(64000)
-    expect(body.request.generationConfig?.stopSequences).toEqual(['HUMAN:'])
+  it('hides ids upstream assigns to a non-chat role, including ids without a tab_ prefix', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-3.6-flash-high': {},
+        'chat_20706': {},
+        'gemini-3.1-flash-image': { displayName: 'Gemini 3.1 Flash Image' },
+        'models/proactive-observer-v10': {},
+      },
+      tabModelIds: ['chat_20706'],
+      imageGenerationModelIds: ['gemini-3.1-flash-image'],
+      audioTranscriptionModelIds: ['models/proactive-observer-v10'],
+    })
+    expect(merged.map((m) => m.id)).toEqual(['gemini-3.6-flash-high'])
+  })
+
+  it('hides a deprecated id only when its replacement is present, chat-callable and visible', () => {
+    const withReplacement = mergeModelCatalog({
+      models: { 'gemini-3.1-pro-high': {}, 'gemini-pro-agent': {} },
+      deprecatedModelIds: { 'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' } },
+    })
+    expect(withReplacement.map((m) => m.id)).toEqual(['gemini-pro-agent'])
+
+    // Replacement absent from this account's tier: keep the retired id, or the
+    // capability becomes unreachable.
+    const withoutReplacement = mergeModelCatalog({
+      models: { 'gemini-3.1-pro-high': {} },
+      deprecatedModelIds: { 'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' } },
+    })
+    expect(withoutReplacement.map((m) => m.id)).toEqual(['gemini-3.1-pro-high'])
+
+    // Replacement itself hidden by a role: same reasoning.
+    const replacementHidden = mergeModelCatalog({
+      models: { 'old-model': {}, 'new-model': {} },
+      deprecatedModelIds: { 'old-model': { newModelId: 'new-model' } },
+      imageGenerationModelIds: ['new-model'],
+    })
+    expect(replacementHidden.map((m) => m.id)).toEqual(['old-model'])
+
+    // Replacement present but never listed anyway (tab_ rule): same reasoning.
+    const replacementNotCallable = mergeModelCatalog({
+      models: { 'old-model': {}, 'tab_new_model': {} },
+      deprecatedModelIds: { 'old-model': { newModelId: 'tab_new_model' } },
+    })
+    expect(replacementNotCallable.map((m) => m.id)).toEqual(['old-model'])
+  })
+
+  it('resolves a deprecation chain the same way whatever order the payload lists it in', () => {
+    const models = { 'model-a': {}, 'model-b': {}, 'model-c': {} }
+    const forwards = mergeModelCatalog({
+      models,
+      deprecatedModelIds: { 'model-a': { newModelId: 'model-b' }, 'model-b': { newModelId: 'model-c' } },
+    })
+    const backwards = mergeModelCatalog({
+      models,
+      deprecatedModelIds: { 'model-b': { newModelId: 'model-c' }, 'model-a': { newModelId: 'model-b' } },
+    })
+    expect(forwards.map((m) => m.id)).toEqual(['model-c'])
+    expect(backwards.map((m) => m.id)).toEqual(['model-c'])
+
+    // Chain truncated by the account's tier: only the link with a present
+    // replacement is hidden.
+    const truncated = mergeModelCatalog({
+      models: { 'model-a': {}, 'model-b': {} },
+      deprecatedModelIds: { 'model-a': { newModelId: 'model-b' }, 'model-b': { newModelId: 'model-c' } },
+    })
+    expect(truncated.map((m) => m.id)).toEqual(['model-b'])
+  })
+
+  it('never hides an id the payload also advertises', () => {
+    const merged = mergeModelCatalog({
+      models: { 'gemini-3.6-flash-high': {}, 'gemini-3.8-flash-tiered': {}, 'sorted-model': {} },
+      // upstream contradicting itself: these ids also sit in a non-chat role
+      imageGenerationModelIds: ['gemini-3.8-flash-tiered'],
+      tabModelIds: ['sorted-model'],
+      deprecatedModelIds: { 'gemini-3.6-flash-high': { newModelId: 'gemini-3.8-flash-tiered' } },
+      defaultAgentModelId: 'gemini-3.6-flash-high',
+      agentModelSorts: [{ displayName: 'Recommended', groups: [{ modelIds: ['sorted-model'] }] }],
+      tieredModelIds: { flash: ['gemini-3.8-flash-tiered'] },
+    })
+    expect(merged.map((m) => m.id).sort()).toEqual(['gemini-3.6-flash-high', 'gemini-3.8-flash-tiered', 'sorted-model'])
+
+    // defaultAgentModelId alone must beat a deprecation whose replacement is
+    // present and perfectly visible.
+    const defaultWins = mergeModelCatalog({
+      models: { 'gemini-3.1-pro-high': {}, 'gemini-pro-agent': {} },
+      deprecatedModelIds: { 'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' } },
+      defaultAgentModelId: 'gemini-3.1-pro-high',
+    })
+    expect(defaultWins.map((m) => m.id).sort()).toEqual(['gemini-3.1-pro-high', 'gemini-pro-agent'])
+  })
+
+  it('leaves a payload without role keys exactly as before', () => {
+    const models = { 'gemini-3.6-flash-high': {}, 'tab_flash_lite_preview': {}, 'some-new-model': {} }
+    expect(mergeModelCatalog({ models }).map((m) => m.id)).toEqual(['gemini-3.6-flash-high', 'some-new-model'])
+    expect(mergeModelCatalog({}).map((m) => m.id)).toEqual([])
+  })
+
+  it('tolerates malformed role values instead of throwing', () => {
+    const merged = mergeModelCatalog({
+      models: { 'gemini-3.6-flash-high': {}, 'keep-me': {} },
+      tabModelIds: 'not-an-array' as unknown as string[],
+      imageGenerationModelIds: [null, 42, ''] as unknown as string[],
+      deprecatedModelIds: {
+        'keep-me': null as unknown as { newModelId?: string },
+        'gemini-3.6-flash-high': { newModelId: '' },
+      },
+      agentModelSorts: [{ groups: undefined }, null as unknown as { groups?: { modelIds?: string[] }[] }],
+      tieredModelIds: { flash: null as unknown as string[] },
+    })
+    expect(merged.map((m) => m.id).sort()).toEqual(['gemini-3.6-flash-high', 'keep-me'])
+
+    const arrayShapedDeprecations = mergeModelCatalog({
+      models: { 'keep-me': {} },
+      deprecatedModelIds: ['not-an-object'] as unknown as Record<string, { newModelId?: string }>,
+    })
+    expect(arrayShapedDeprecations.map((m) => m.id)).toEqual(['keep-me'])
+  })
+
+  it('matches a live account payload: drops the non-tab_ tab id, the image id and the retired pro id', () => {
+    // Role keys copied from a real Google AI Pro discovery response (ids only).
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-3.8-flash-tiered': {}, 'gemini-3.7-flash-tiered': {}, 'gemini-pro-agent': {},
+        'claude-sonnet-4-6': {}, 'claude-opus-4-6-thinking': {}, 'gpt-oss-120b-medium': {},
+        'gemini-3.1-flash-lite': {}, 'gemini-3-flash': {}, 'gemini-3.1-pro-low': {},
+        'gemini-3.1-pro-high': {}, 'gemini-3.1-flash-image': {},
+        'chat_20706': {}, 'chat_23310': {}, 'tab_flash_lite_preview': {},
+      },
+      tabModelIds: ['chat_20706', 'chat_23310'],
+      commandModelIds: ['gemini-3-flash'],
+      imageGenerationModelIds: ['gemini-3.1-flash-image'],
+      mqueryModelIds: ['gemini-3.1-flash-lite'],
+      webSearchModelIds: ['gemini-3.1-flash-lite'],
+      commitMessageModelIds: ['gemini-3.1-flash-lite'],
+      audioTranscriptionModelIds: ['models/proactive-observer-v10'],
+      deprecatedModelIds: { 'gemini-3.1-pro-high': { newModelId: 'gemini-pro-agent' } },
+      defaultAgentModelId: 'gemini-3.6-flash-high',
+      agentModelSorts: [{ displayName: 'Recommended', groups: [{ modelIds: ['gemini-pro-agent', 'gemini-3.1-pro-low', 'claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium'] }] }],
+      tieredModelIds: { flashLite: ['gemini-3.1-flash-lite'], flash: ['gemini-3.8-flash-tiered'], pro: ['gemini-3.1-pro-low'] },
+    } as Parameters<typeof mergeModelCatalog>[0])
+    const ids = merged.map((m) => m.id)
+    expect(ids).not.toContain('chat_20706')
+    expect(ids).not.toContain('chat_23310')
+    expect(ids).not.toContain('tab_flash_lite_preview')
+    expect(ids).not.toContain('gemini-3.1-flash-image')
+    expect(ids).not.toContain('gemini-3.1-pro-high')
+    // utility roles are not a hiding signal: this one is a pinned chat model
+    expect(ids).toContain('gemini-3.1-flash-lite')
+    expect(ids).toContain('gemini-3-flash')
+    expect(ids).toContain('gemini-pro-agent')
+    expect(ids).toHaveLength(9)
   })
 
   it('falls back to catalog when the endpoint fails', async () => {
@@ -645,10 +826,21 @@ describe('models', () => {
   it('resolves exact-model metadata from the catalog', () => {
     const resolved = resolveAgyModel('agy', 'claude-opus-4-6-thinking')
     expect(resolved.name).toContain('Claude Opus')
-    expect(resolved.defaultMaxTokens).toBe(64000)
+    // The harness injects this as maxTokens, and Antigravity rejects >64000 on
+    // the Claude family with 400, so the catalog default must not exceed it.
+    expect(resolved.defaultMaxTokens).toBe(AGY_CLAUDE_MAX_OUTPUT_TOKENS)
+    expect(resolveAgyModel('agy', 'claude-sonnet-4-6').defaultMaxTokens).toBe(AGY_CLAUDE_MAX_OUTPUT_TOKENS)
     const unknown = resolveAgyModel('agy', 'brand-new-model')
     expect(unknown.name).toBe('brand-new-model')
     expect(unknown.defaultMaxTokens).toBeUndefined()
+  })
+
+  it('keeps every catalog default maxTokens within what upstream accepts', () => {
+    // Live-verified ceiling: 64000 for the Claude family, 65536 for Gemini.
+    for (const model of AGY_PUBLIC_MODELS) {
+      const cap = model.id.startsWith('claude-') ? AGY_CLAUDE_MAX_OUTPUT_TOKENS : 65536
+      expect(model.maxOutputTokens, `${model.id} exceeds its upstream ceiling`).toBeLessThanOrEqual(cap)
+    }
   })
 
   it('exposes reasoning efforts for tiered models (both catalog and dynamic)', () => {
@@ -701,6 +893,16 @@ describe('models', () => {
     const noEffort = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered' }), {})
     expect(noEffort.request.generationConfig?.thinkingConfig).toBeUndefined()
 
+    // purpose: 'session-title' disables thinking to protect tight maxTokens budgets
+    const titleReq = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', purpose: 'session-title' as any }), {})
+    expect(titleReq.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+
+    // reasoningEffort 'none' or 'off' also sets thinkingBudget: 0
+    const noneEffort = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'none' as any }), {})
+    expect(noneEffort.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+    const offEffort = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'off' as any }), {})
+    expect(offEffort.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+
     const fixedModel = toAgyRequestBody(generateOptions({ model: 'gemini-3.6-flash-high', reasoningEffort: 'high' as any }), {})
     expect(fixedModel.request.generationConfig?.thinkingConfig).toBeUndefined()
 
@@ -736,6 +938,52 @@ describe('AgyAdapter', () => {
     }).rejects.toThrow(/dsh-agy login/)
   })
 
+  it('routes the generation stream through the account proxy', async () => {
+    // Issue #29 (1): the stream used to omit session.account.proxy, so a
+    // proxied account silently generated from the host's real IP.
+    const { dispatcherForAsync, proxyAgent } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    const fetchSpy = vi.fn(async () => new Response(sseStream(['data: [DONE]']), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (accountProxy) => {
+      const adapter = new AgyAdapter({
+        getSession: async () => session({
+          account: { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0, proxy: accountProxy },
+        }),
+        reportFailure: async () => {},
+      })
+      for await (const _ of adapter.stream(generateOptions())) void _
+
+      const init = fetchSpy.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined
+      // Streaming class: the account dispatcher without the body inactivity timer.
+      expect(init?.dispatcher).toBe(await dispatcherForAsync(accountProxy, { streaming: true }))
+      expect(init?.dispatcher).not.toBe(proxyAgent)
+    }, { credentials: 'user:sup3rs3cret' })
+  })
+
+  it('routes model listing through the account proxy', async () => {
+    // Same defect class as the stream: discovery is account-scoped, so it must
+    // not reveal the host's real IP for a proxied account (issue #29).
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ models: {} }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (accountProxy) => {
+      const adapter = new AgyAdapter({
+        getSession: async () => session({
+          account: { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0, proxy: accountProxy },
+        }),
+        reportFailure: async () => {},
+      })
+      await adapter.listModels('agy')
+
+      const init = fetchSpy.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined
+      expect(init?.dispatcher).toBe(await dispatcherForAsync(accountProxy))
+    })
+  })
+
   it('streams a response and reports no failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
@@ -765,7 +1013,7 @@ describe('AgyAdapter', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
-  it('fails image requests with UNSUPPORTED_CONTENT when the attachment cannot be read', async () => {
+  it('fails image requests with UNSUPPORTED_CONTENT naming the attachment when the read fails', async () => {
     vi.stubGlobal('fetch', vi.fn())
     const adapter = new AgyAdapter({
       getSession: async () => session(),
@@ -776,7 +1024,118 @@ describe('AgyAdapter', () => {
     })
     await expect(async () => {
       for await (const _ of adapter.stream(generateOptions({ messages: [imageMessage()] }))) void _
-    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+    }).rejects.toMatchObject({
+      code: 'UNSUPPORTED_CONTENT',
+      message: expect.stringContaining('agy image attachment "att-1" could not be loaded: attachment storage offline'),
+    })
+  })
+
+  it('resolves image attachments concurrently and returns a complete map', async () => {
+    const bodies: Array<{ request: { contents: Array<{ parts: unknown[] }> } }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+    let inFlight = 0
+    let maxInFlight = 0
+    const settlementOrder: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      resolveAttachments: () => ({
+        readImage: async (ref: { attachmentId: string }) => {
+          inFlight += 1
+          maxInFlight = Math.max(maxInFlight, inFlight)
+          // att-1 is the slow read; a sequential loop would settle att-1 before
+          // att-2 and never exceed one in-flight read.
+          await new Promise((resolve) => setTimeout(resolve, ref.attachmentId === 'att-1' ? 20 : 0))
+          inFlight -= 1
+          settlementOrder.push(ref.attachmentId)
+          return {
+            ref: { mediaType: ref.attachmentId === 'att-1' ? 'image/png' : 'image/jpeg' },
+            data: new Uint8Array([ref.attachmentId === 'att-1' ? 1 : 2]),
+          }
+        },
+      }),
+    })
+    for await (const _ of adapter.stream(generateOptions({ messages: [twoImageMessage()] }))) void _
+    expect(maxInFlight).toBe(2)
+    expect(settlementOrder).toEqual(['att-2', 'att-1'])
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]!.request.contents[0]!.parts).toEqual([
+      { inlineData: { mimeType: 'image/png', data: 'AQ==' } },
+      { inlineData: { mimeType: 'image/jpeg', data: 'Ag==' } },
+    ])
+  })
+
+  it('reports the first failing attachment in ref order when concurrent reads fail', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      resolveAttachments: () => ({
+        // att-2 rejects immediately while att-1 rejects later: a bare Promise.all
+        // would surface att-2 (whichever raced first), but the contract is
+        // deterministic ref order.
+        readImage: async (ref: { attachmentId: string }) => {
+          if (ref.attachmentId === 'att-2') throw new Error('att-2 exploded')
+          await new Promise((resolve) => setTimeout(resolve, 15))
+          throw new Error('att-1 exploded')
+        },
+      }),
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ messages: [twoImageMessage()] }))) void _
+    }).rejects.toMatchObject({
+      code: 'UNSUPPORTED_CONTENT',
+      message: expect.stringContaining('agy image attachment "att-1" could not be loaded: att-1 exploded'),
+    })
+  })
+
+  it('resolves multimodal file handles and includes inlineData in request body for Gemini', async () => {
+    let capturedBody: any
+    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: any) => {
+      capturedBody = JSON.parse(init.body as string)
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const tmpDir = os.tmpdir()
+    const tmpFile = path.join(tmpDir, 'test-adapter-doc.pdf')
+    await fs.promises.writeFile(tmpFile, 'PDF dummy content')
+
+    const fileText = `[File "test-adapter-doc.pdf" (18 bytes, sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef): verbatim read-only copy saved at "${tmpFile}".]`
+    const messages = [
+      {
+        id: 'msg-1',
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: fileText }],
+      },
+    ]
+
+    try {
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+      })
+      for await (const _ of adapter.stream(generateOptions({ model: 'gemini-3.8-flash-tiered', messages }))) {
+        void _
+      }
+      expect(capturedBody).toBeDefined()
+      const parts = capturedBody.request.contents[0].parts
+      expect(parts).toHaveLength(2)
+      expect(parts[0]).toEqual({ text: fileText })
+      expect(parts[1]).toEqual({
+        inlineData: {
+          mimeType: 'application/pdf',
+          data: Buffer.from('PDF dummy content').toString('base64'),
+        },
+      })
+    } finally {
+      await fs.promises.unlink(tmpFile).catch(() => {})
+    }
   })
 
   it('reports and throws QUOTA (terminal) on daily quota exhaustion', async () => {
@@ -802,6 +1161,66 @@ describe('AgyAdapter', () => {
     await expect(async () => {
       for await (const _ of adapter.stream(generateOptions())) void _
     }).rejects.toMatchObject({ code: 'RATE_LIMIT', failure: { providerRetryAfterMs: 2000 } })
+  })
+
+  it('maps upstream 5xx to retryable SERVER with the retry-after hint', async () => {
+    // Real Google 503 body: capacity rejection for one model.
+    const body = JSON.stringify({
+      error: {
+        code: 503,
+        message: 'No capacity available for model gemini-3.8-flash-tiered on the server',
+        status: 'UNAVAILABLE',
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 503, headers: { 'retry-after': '3' } })))
+    const failures: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({
+      code: 'SERVER',
+      failure: { providerRetryAfterMs: 3000 },
+      message: expect.stringContaining('agy upstream error (503)'),
+    })
+    expect(failures).toEqual(['transient'])
+  })
+
+  it('maps upstream 5xx without a retry-after header to SERVER without a delay hint', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"code":500}}', { status: 500 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    let thrown: unknown
+    try {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toMatchObject({ code: 'SERVER' })
+    // No retry-after header: the failure carries no delay hint (LlmFailure drops
+    // undefined fields), so the harness falls back to its own backoff.
+    const failure = (thrown as { failure?: { providerRetryAfterMs?: number } }).failure
+    expect(failure?.providerRetryAfterMs).toBeUndefined()
+  })
+
+  it('keeps non-5xx upstream errors terminal as UPSTREAM', async () => {
+    for (const [status, body] of [
+      [404, '{"error":{"message":"model not found"}}'],
+      [400, '{"error":{"message":"malformed payload"}}'],
+    ] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status })))
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+      })
+      await expect(async () => {
+        for await (const _ of adapter.stream(generateOptions())) void _
+      }, `status ${status}`).rejects.toMatchObject({ code: 'UPSTREAM' })
+    }
   })
 
   it('converts retryable pool blockage into RATE_LIMIT with a positive integer delay', async () => {
@@ -889,7 +1308,7 @@ describe('AgyAdapter', () => {
     })
   })
 
-  it('prepareCall binds model and stream to one generation (DSH rc.8+ compat)', async () => {
+  it('prepareCall binds model and stream to one generation (inherited from LlmAdapter)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
       'data: [DONE]',

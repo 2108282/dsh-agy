@@ -8,11 +8,24 @@
 import { EnvHttpProxyAgent, ProxyAgent } from 'undici'
 import { createConnection } from 'node:net'
 import { createRequire } from 'node:module'
+import { isProxyRouted } from './types.ts'
+import type { AccountRouting } from './types.ts'
 
 const envAgent = new EnvHttpProxyAgent()
 
+/**
+ * Streaming variant of the env agent. A generation stream may legitimately stay
+ * silent for minutes mid-turn (reasoning), and undici's `bodyTimeout` is a
+ * per-gap inactivity timer — the 30s control-plane value kills such a turn.
+ * Only generation uses this agent; every other call keeps the short bound.
+ */
+const envStreamingAgent = new EnvHttpProxyAgent({ bodyTimeout: 0 })
+
 /** The env proxy agent (exported for tests). */
 export const proxyAgent = envAgent
+
+/** The streaming env proxy agent (exported for tests). */
+export const proxyStreamingAgent = envStreamingAgent
 
 // ── Dispatcher cache (bounded by MAX_ACCOUNTS=10, no leak concern) ──
 const dispatcherCache = new Map<string, any>()
@@ -63,9 +76,14 @@ export function normalizeProxyUrl(proxyUrl: string): string {
   if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
     throw new Error('[proxy] invalid port')
   }
-  // Build auth with proper encoding (parsed.username/password are decoded)
+  // Build auth from the DECODED credentials. `URL.username`/`password` return the
+  // percent-ENCODED substrings (not decoded, despite what the older comment here
+  // claimed), so encoding them again double-encodes: `p@ss` became `p%2540ss`,
+  // which the proxy decodes to the literal `p%40ss` and rejects. Decoding first
+  // also makes this function idempotent, which matters because a stored proxy URL
+  // is normalized again on every request.
   const auth = parsed.username
-    ? `${encodeURIComponent(parsed.username)}${parsed.password ? `:${encodeURIComponent(parsed.password)}` : ''}@`
+    ? `${encodeURIComponent(decodeURIComponent(parsed.username))}${parsed.password ? `:${encodeURIComponent(decodeURIComponent(parsed.password))}` : ''}@`
     : ''
   const normalizedBase = `${protocol}//${auth}${parsed.hostname}:${port}`
   return familySuffix ? `${normalizedBase}${familySuffix}` : normalizedBase
@@ -224,6 +242,19 @@ function createHttpDispatcher(proxyUrl: string, dispatcherOpts: Record<string, u
   } as any)
 }
 
+/**
+ * Dispatcher options. `bodyTimeout` is undici's per-gap inactivity timer, not a
+ * total transfer budget: it fires when NO bytes arrive for that long. The
+ * control-plane calls want the short bound, but a generation stream may
+ * legitimately stay silent for minutes mid-turn (reasoning), so streaming runs
+ * with the timer disabled — the caller's own AbortSignal bounds it instead.
+ *
+ * `keepAliveTimeout`/`keepAliveMaxTimeout` deliberately stay at 1ms and are NOT
+ * loosened for streaming: undici applies them only when `pipelining` is
+ * non-zero, and `pipelining: 0` forces every connection to reset on completion,
+ * so they are inert here. They are kept at the conservative value spec #8 asks
+ * for rather than being replaced by a setting that would never take effect.
+ */
 const DISPATCHER_OPTS = {
   headersTimeout: 30_000,
   bodyTimeout: 30_000,
@@ -233,10 +264,31 @@ const DISPATCHER_OPTS = {
   pipelining: 0,
 } as const
 
+/** Streaming dispatcher options: same bounds, minus the body inactivity timer. */
+const STREAMING_DISPATCHER_OPTS = { ...DISPATCHER_OPTS, bodyTimeout: 0 } as const
+
+/** Shape shared by both dispatcher option sets. */
+export type DispatcherOpts = { -readonly [K in keyof typeof DISPATCHER_OPTS]: number }
+
+/** Resolved dispatcher options for a call class (exported as the source of truth). */
+export function dispatcherOptsFor(streaming: boolean): DispatcherOpts {
+  return streaming ? STREAMING_DISPATCHER_OPTS : DISPATCHER_OPTS
+}
+
+function dispatcherCacheKey(normalized: string, streaming: boolean): string {
+  return streaming ? `${normalized}|stream` : normalized
+}
+
+/**
+ * Synchronous dispatcher for a proxy URL (control-plane class only).
+ *
+ * Streaming must NOT use this: it needs `bodyTimeout: 0`, and the socks path
+ * already requires the async variant. Kept sync for callers that cannot await.
+ */
 export function dispatcherFor(proxyUrl?: string): any | undefined {
   if (!proxyUrl) return envAgent as any
   const normalized = normalizeProxyUrl(proxyUrl)
-  const cached = dispatcherCache.get(normalized)
+  const cached = dispatcherCache.get(dispatcherCacheKey(normalized, false))
   if (cached) return cached
   const famClean = normalized.replace(/\?family=(ipv4|ipv6)$/, '')
   let dispatcher: any
@@ -257,23 +309,28 @@ export function dispatcherFor(proxyUrl?: string): any | undefined {
   } else {
     dispatcher = createHttpDispatcher(normalized, DISPATCHER_OPTS as any)
   }
-  dispatcherCache.set(normalized, dispatcher)
+  dispatcherCache.set(dispatcherCacheKey(normalized, false), dispatcher)
   return dispatcher
 }
 
-export async function dispatcherForAsync(proxyUrl?: string): Promise<any | undefined> {
-  if (!proxyUrl) return envAgent as any
+export async function dispatcherForAsync(
+  proxyUrl?: string,
+  options: { streaming?: boolean } = {},
+): Promise<any | undefined> {
+  const streaming = options.streaming === true
+  if (!proxyUrl) return (streaming ? envStreamingAgent : envAgent) as any
   const normalized = normalizeProxyUrl(proxyUrl)
-  const cached = dispatcherCache.get(normalized)
+  const key = dispatcherCacheKey(normalized, streaming)
+  const cached = dispatcherCache.get(key)
   if (cached) return cached
   const famClean = normalized.replace(/\?family=(ipv4|ipv6)$/, '')
   let dispatcher: any
   if (famClean.startsWith('socks5:')) {
-    dispatcher = await createSocksDispatcher(normalized, DISPATCHER_OPTS as any)
+    dispatcher = await createSocksDispatcher(normalized, dispatcherOptsFor(streaming) as any)
   } else {
-    dispatcher = createHttpDispatcher(normalized, DISPATCHER_OPTS as any)
+    dispatcher = createHttpDispatcher(normalized, dispatcherOptsFor(streaming) as any)
   }
-  dispatcherCache.set(normalized, dispatcher)
+  dispatcherCache.set(key, dispatcher)
   return dispatcher
 }
 
@@ -292,18 +349,29 @@ function getTargetUrlString(input: Parameters<typeof fetch>[0]): string {
   return ''
 }
 
+/** Options accepted by proxiedFetch; `streaming` selects the long-silence dispatcher. */
+export interface ProxiedFetchOptions {
+  proxyUrl?: string
+  /**
+   * True for a generation stream (long model silences are normal). Selects a
+   * dispatcher without the per-gap body inactivity timer.
+   */
+  streaming?: boolean
+}
+
 /** fetch() that respects per-account proxyUrl (when given) otherwise env. */
 export const proxiedFetch = async (
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1] & { proxyUrl?: string },
-  opts?: { proxyUrl?: string },
+  opts?: ProxiedFetchOptions,
 ): Promise<Response> => {
   const proxyUrl = (opts as any)?.proxyUrl ?? (init as any)?.proxyUrl
+  const streaming = opts?.streaming === true
   // Normalize init without proxyUrl leakage
   const cleanInit = { ...init } as any
   if (cleanInit.proxyUrl) delete cleanInit.proxyUrl
   if (!proxyUrl) {
-    return fetch(input, { ...cleanInit, dispatcher: envAgent as any })
+    return fetch(input, { ...cleanInit, dispatcher: (streaming ? envStreamingAgent : envAgent) as any })
   }
   // Loopback bypass: per-account proxy must never intercept OAuth loopback callback (spec 1)
   const targetStr = getTargetUrlString(input)
@@ -328,7 +396,7 @@ export const proxiedFetch = async (
 
   let dispatcher: any
   try {
-    dispatcher = await dispatcherForAsync(proxyUrl)
+    dispatcher = await dispatcherForAsync(proxyUrl, { streaming })
   } catch (e) {
     throw tagProxyUnreachable(e)
   }
@@ -342,3 +410,23 @@ export const proxiedFetch = async (
 
 // Keep named export for tests that assert instanceof
 export { envAgent as _envAgentForTest }
+
+/**
+ * Bind one account's routing to a fetch implementation.
+ *
+ * The single entry point every account-scoped call uses (generation, test call,
+ * model/quota discovery, project healing, import enrichment). Threading a bare
+ * `proxyUrl` at each site is what let six call sites drift and silently route a
+ * proxied account over the host's real IP, so the invariant is enforced here
+ * instead of by review (AGENTS.md "Proxy Routing").
+ */
+export function accountFetch(routing: AccountRouting | undefined): typeof fetch {
+  return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+    proxiedFetch(input, init, {
+      ...(routing?.proxyUrl ? { proxyUrl: routing.proxyUrl } : {}),
+      ...(routing?.streaming ? { streaming: true } : {}),
+    })) as typeof fetch
+}
+
+/** Whether these requests are pinned to an explicit per-account proxy. */
+export { isProxyRouted }

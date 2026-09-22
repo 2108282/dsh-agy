@@ -8,6 +8,8 @@
  */
 
 import { proxiedFetch } from '../proxy.ts'
+import { isProxyRouted } from '../types.ts'
+import type { AccountRouting } from '../types.ts'
 
 export const AGY_CLIENT_ID =
   '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com'
@@ -56,7 +58,7 @@ export const AGY_DEFAULT_REDIRECT_URI = 'http://localhost:51121/oauth-callback'
  * Antigravity API endpoints. The daily runtime host (no .sandbox suffix) is the
  * live endpoint for consumer OAuth accounts — cloudcode-pa.googleapis.com
  * answers RESOURCE_EXHAUSTED for them (verified by live probe), while the
- * daily host answers 200. Order matters: first reachable non-429/403 wins.
+ * daily host answers 200. Order matters: first reachable non-429/403/503 wins.
  */
 export const AGY_ENDPOINT_DAILY = 'https://daily-cloudcode-pa.googleapis.com'
 export const AGY_ENDPOINT_PROD = 'https://cloudcode-pa.googleapis.com'
@@ -71,34 +73,53 @@ export const AGY_ENDPOINT_FALLBACKS: readonly string[] = [
   AGY_ENDPOINT_AUTOPUSH,
 ]
 
-/** Statuses that mean "this endpoint is not usable for this account"; skip to the next. */
-export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403])
-
 /**
- * Try each runtime endpoint in order, skipping unusable ones (429/403/network).
+ * Statuses that mean "this endpoint is not usable for this attempt"; skip to the
+ * next one in the chain. 429/403 = rate/quota/entitlement wall, 503 = capacity
+ * rejection (e.g. "No capacity available for model ..."). A 503 skipped here
+ * still reaches the caller when every endpoint fails, where the classifier marks
+ * it transient and the adapter surfaces it as a retryable SERVER error.
+ */
+export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403, 503])
+
+/** Routing of the requests being tried (see {@link AccountRouting}). */
+export type AgyFallbackOptions = Pick<AccountRouting, 'proxyUrl'>
+/**
+ * Try each runtime endpoint in order, skipping unusable ones (429/403/503/network).
  * Returns the first other response (2xx or a real error like 400/401); when
  * every endpoint is unusable, returns the last skipped response so the caller's
- * classifier can still produce a meaningful error.
+ * classifier can still produce a meaningful error (a returned 503 becomes a
+ * retryable SERVER failure rather than being swallowed here).
+ *
+ * When every endpoint fails at the network level, the LAST error is rethrown so
+ * its cause survives (a generic "all endpoints failed" hid DNS/TLS/timeout).
  */
 export async function fetchAgyFirstOk(
   urlPath: string,
   init: RequestInit,
   fetchImpl: typeof fetch = proxiedFetch,
+  options: AgyFallbackOptions = {},
 ): Promise<Response> {
   let lastSkipped: Response | null = null
+  let lastNetworkError: unknown
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
       if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
       lastSkipped = response
     } catch (error) {
-      // Fail-closed: per-account proxy unreachable must not be swallowed and retried on next endpoint
-      const { isProxyUnreachableError } = await import('../proxy.ts')
-      if (isProxyUnreachableError(error)) throw error
+      lastNetworkError = error
+      // Fail-closed only while an explicit per-account proxy is in effect: the
+      // request must not be retried on another endpoint or go direct.
+      if (isProxyRouted(options)) {
+        const { isProxyUnreachableError } = await import('../proxy.ts')
+        if (isProxyUnreachableError(error)) throw error
+      }
       // network error — try the next endpoint
     }
   }
   if (lastSkipped) return lastSkipped
+  if (lastNetworkError !== undefined) throw lastNetworkError
   throw new Error('all agy endpoints failed')
 }
 

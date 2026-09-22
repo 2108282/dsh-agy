@@ -21,19 +21,17 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 
-export interface PreparedAdapterCall {
-  model: LlmResolvedModelInfo
-  stream: (options: GenerateOptions) => AsyncIterable<StreamChunk>
-}
 import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
-import { classifyFetchError, classifyHttpError } from '../runtime/classify.ts'
+import { classifyFetchError, classifyHttpError, describeFetchError } from '../runtime/classify.ts'
+import { accountFetch } from '../proxy.ts'
 import { deriveAntigravitySessionId, generateAntigravityRequestId } from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
 import type { AgyResolvedImage } from './translate.ts'
+import { resolveMultimodalFiles } from './multimodal.ts'
 import { parseAgySse } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
 
@@ -81,42 +79,43 @@ export interface AgyAdapterOptions {
       model?: string
     },
   ): Promise<void>
-  /** Report a clean stream completion (resets the failure counter). */
+  /** Notify the shell of a successful request so it can update quota state. */
   markSuccess?(session: AgyAccountSession): Promise<void>
-  /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
+  /** Attachments service accessor — optional so the CLI stays decoupled from @deepseek-ai/dsh-attachment. */
   resolveAttachments?(): AgyAttachmentStore | undefined
 }
 
 const UPSTREAM_ERROR_CODE = 'UPSTREAM'
+/** First-class DSH retryable code: the default retry policy honors SERVER (5xx), not UPSTREAM. */
+const SERVER_ERROR_CODE = 'SERVER'
 
 /** Build the impersonation headers for one request (per-request randomization applied by the shell). */
 export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
   return {
-    authorization: `Bearer ${session.auth.access}`,
-    'content-type': 'application/json',
-    accept: 'text/event-stream',
-    'x-goog-request-id': generateAntigravityRequestId(),
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${session.auth.access}`,
+    Accept: 'text/event-stream',
     ...attributionHeaders(),
     ...session.impersonation,
   }
 }
 
 export class AgyAdapter extends LlmAdapter {
-  private readonly options: AgyAdapterOptions
-
-  constructor(options: AgyAdapterOptions) {
+  constructor(private readonly options: AgyAdapterOptions) {
     super()
-    this.options = options
   }
 
-  override providerInfo(_provider: string): LlmProviderInfo {
-    return { id: AGY_PROVIDER, name: 'Antigravity (agy)' }
+  override async listProviders(): Promise<readonly LlmProviderInfo[]> {
+    return [{ id: AGY_PROVIDER, name: 'Google Antigravity' }]
   }
 
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
     try {
       const session = await this.options.getSession()
-      return await listAgyModels(session?.auth.access, session?.account.projectId)
+      // Model discovery is account-scoped: route it through the account's proxy
+      // (control-plane class, so the standard timeouts apply).
+      const routing = { proxyUrl: session?.account.proxy }
+      return await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
     } catch (error) {
       if (error instanceof AgyPoolBlockedError || error instanceof AgyAuthError) {
         return catalogModelList()
@@ -127,14 +126,6 @@ export class AgyAdapter extends LlmAdapter {
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return resolveAgyModel(provider, model)
-  }
-
-  // ponytail: DSH 0.1.1-rc.2+ calls prepareCall instead of stream directly — keep compatible with old base without override
-  override async prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
-    return {
-      model: await this.resolveModel(provider, model),
-      stream: (options: GenerateOptions) => this.stream(options),
-    }
   }
 
   /**
@@ -154,19 +145,36 @@ export class AgyAdapter extends LlmAdapter {
         'UNSUPPORTED_CONTENT',
       )
     }
-    for (const ref of refs) {
-      try {
+    // Read every attachment concurrently (N images cost one round-trip, not N).
+    // allSettled rather than all: more than one read may reject, and the
+    // surfaced error must be deterministic (first failure in ref order) instead
+    // of whichever concurrent read happened to reject first — and no rejection
+    // may escape as unhandled.
+    const settled = await Promise.allSettled(
+      refs.map(async (ref) => {
         const stored = await store.readImage(ref)
-        images.set(ref.attachmentId, {
-          mediaType: stored.ref.mediaType,
-          data: Buffer.from(stored.data).toString('base64'),
-        })
-      } catch (cause) {
-        throw new LlmError(
-          `agy image attachment "${ref.attachmentId}" could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`,
-          'UNSUPPORTED_CONTENT',
-          { cause: cause instanceof Error ? cause : undefined },
-        )
+        return {
+          attachmentId: ref.attachmentId,
+          image: {
+            mediaType: stored.ref.mediaType,
+            data: Buffer.from(stored.data).toString('base64'),
+          },
+        }
+      }),
+    )
+    const failedIndex = settled.findIndex((outcome) => outcome.status === 'rejected')
+    if (failedIndex !== -1) {
+      const ref = refs[failedIndex]!
+      const cause: unknown = (settled[failedIndex] as PromiseRejectedResult).reason
+      throw new LlmError(
+        `agy image attachment "${ref.attachmentId}" could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`,
+        'UNSUPPORTED_CONTENT',
+        { cause: cause instanceof Error ? cause : undefined },
+      )
+    }
+    for (const outcome of settled) {
+      if (outcome.status === 'fulfilled') {
+        images.set(outcome.value.attachmentId, outcome.value.image)
       }
     }
     return images
@@ -212,24 +220,36 @@ export class AgyAdapter extends LlmAdapter {
       )
     }
 
+    const multimodalFiles = await resolveMultimodalFiles(options)
     const body = toAgyRequestBody(options, {
       projectId: session.account.projectId,
       sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
       appendBehaviorInstruction: true,
       ...(images.size > 0 ? { images } : {}),
+      ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
     })
     const headers = buildRequestHeaders(session)
 
     let response: Response
     try {
-      response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: options.signal,
-      })
+      // Streaming dispatch: the account proxy MUST carry the generation request
+      // (it carried only the control-plane calls before, so a proxied account
+      // silently generated from the host's real IP), and the streaming
+      // dispatcher drops the per-gap body timeout a reasoning pause would trip.
+      const routing = { proxyUrl: session.account.proxy, streaming: true }
+      response = await fetchAgyFirstOk(
+        '/v1internal:streamGenerateContent?alt=sse',
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: options.signal,
+        },
+        accountFetch(routing),
+        routing,
+      )
     } catch (error) {
-      const classified = classifyFetchError(error)
+      const classified = classifyFetchError(error, { proxyUrl: session.account.proxy })
       await this.options.reportFailure(classified.kind, session)
       throw new LlmError(classified.message ?? 'agy fetch failed', 'TRANSPORT', { cause: error })
     }
@@ -268,6 +288,20 @@ export class AgyAdapter extends LlmAdapter {
           'INVALID_CREDENTIAL',
         )
       }
+      // 5xx upstream failures (e.g. 503 "No capacity available") are transient:
+      // the DSH retry policy honors SERVER but treats UPSTREAM as terminal, so
+      // classifying 5xx as UPSTREAM kills the turn with zero retries. Non-5xx
+      // transient/request errors (404, generic 400, other 4xx) stay terminal.
+      if (classified.status !== undefined && classified.status >= 500) {
+        throw new LlmError(
+          `agy upstream error (${response.status}): ${classified.message ?? ''}`,
+          SERVER_ERROR_CODE,
+          {
+            providerRetryAfterMs: classified.retryAfterMs ?? undefined,
+            requestId: ProviderRequestId(generateAntigravityRequestId()),
+          },
+        )
+      }
       throw new LlmError(
         `agy upstream error (${response.status}): ${classified.message ?? ''}`,
         UPSTREAM_ERROR_CODE,
@@ -291,8 +325,13 @@ export class AgyAdapter extends LlmAdapter {
         throw new LlmError('agy stream aborted', 'ABORTED', { cause: error })
       }
       await this.options.reportFailure('network-error', session)
+      // Deliberately UPSTREAM (terminal), not TRANSPORT: content may already
+      // have been emitted, and DSH's retry policy honours TRANSPORT, so retrying
+      // here would replay a partially-delivered turn. The account-level report
+      // above already absorbs the transient case by cooling/rotating. The cause
+      // code is still surfaced so the socket failure is legible in session events.
       throw new LlmError(
-        error instanceof Error ? error.message : 'agy stream parse failed',
+        error instanceof Error ? describeFetchError(error) : 'agy stream parse failed',
         UPSTREAM_ERROR_CODE,
         { cause: error },
       )
