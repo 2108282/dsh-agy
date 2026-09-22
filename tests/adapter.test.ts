@@ -138,7 +138,73 @@ describe('translate', () => {
       { thoughtSignature: 'skip_thought_signature_validator', functionCall: { id: 'call-1', name: 'web_search', args: { q: 'x' } } },
     ])
     expect(body.request.contents[1]!.parts).toEqual([
-      { functionResponse: { name: 'web_search', response: { result: 'result!', is_error: false } } },
+      { functionResponse: { id: 'call-1', name: 'web_search', response: { result: 'result!', is_error: false } } },
+    ])
+  })
+
+  // The Anthropic-backed Claude path requires tool_result.tool_use_id; Gemini
+  // accepts either shape, so the id is always carried (live-verified: Claude
+  // 400s without it, both families answer 200 with it).
+  it('carries the tool-call id on functionResponse for the Claude path', () => {
+    const messages = [
+      { id: 'a', role: 'assistant' as const, content: [
+        { type: 'tool-call' as const, id: 'toolu_vrtx_01Q', name: 'read', arguments: '{"file_path":"/x"}' },
+      ]},
+      { id: 'b', role: 'user' as const, content: [
+        { type: 'tool-result' as const, toolCallId: 'toolu_vrtx_01Q', content: [{ type: 'text' as const, text: 'body' }] },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ model: 'claude-opus-4-6-thinking', messages }), {})
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'toolu_vrtx_01Q', name: 'read', response: { result: 'body', is_error: false } } },
+    ])
+  })
+
+  // Empty text parts 400 the Claude path ("messages.N.content.M.text.text:
+  // Field required"); upstream's own normalization drops them on the Gemini
+  // path, so they are dropped here too. The trailing user turn keeps
+  // stripTrailingModelTurn from removing the assistant message under test.
+  it('drops empty text parts before they reach the wire', () => {
+    const messages = [
+      { id: 'a', role: 'user' as const, content: [
+        { type: 'text' as const, text: 'hi' },
+        { type: 'text' as const, text: '' },
+      ]},
+      { id: 'b', role: 'assistant' as const, content: [
+        { type: 'text' as const, text: 'answer' },
+        { type: 'tool-call' as const, id: 'call-1', name: 'read', arguments: '{}' },
+        { type: 'text' as const, text: '' },
+      ]},
+      { id: 'c', role: 'user' as const, content: [{ type: 'text' as const, text: 'next' }] },
+    ]
+    const body = toAgyRequestBody(generateOptions({ model: 'claude-opus-4-6-thinking', messages }), {})
+    expect(body.request.contents[0]!.parts).toEqual([{ text: 'hi' }])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { text: 'answer' },
+      { thoughtSignature: 'skip_thought_signature_validator', functionCall: { id: 'call-1', name: 'read', args: {} } },
+    ])
+  })
+
+  // A replayed thought cannot be re-signed for the Claude path (the sentinel is
+  // rejected as an invalid signature), so it is dropped there; Gemini accepts
+  // it. Reachable via a mid-session switch from a tiered Gemini model, whose
+  // history carries reasoning blocks.
+  it('drops replayed thought blocks on the Claude path only', () => {
+    const messages = [
+      { id: 'a', role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] },
+      { id: 'b', role: 'assistant' as const, content: [
+        { type: 'reasoning' as const, text: 'a gemini thought' },
+        { type: 'text' as const, text: 'answer' },
+      ]},
+      { id: 'c', role: 'user' as const, content: [{ type: 'text' as const, text: 'next' }] },
+    ]
+    const claude = toAgyRequestBody(generateOptions({ model: 'claude-opus-4-6-thinking', messages }), {})
+    expect(claude.request.contents[1]!.parts).toEqual([{ text: 'answer' }])
+
+    const gemini = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', messages }), {})
+    expect(gemini.request.contents[1]!.parts).toEqual([
+      { thought: true, text: 'a gemini thought' },
+      { text: 'answer' },
     ])
   })
 

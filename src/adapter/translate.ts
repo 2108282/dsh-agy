@@ -9,9 +9,12 @@
  * Claude-path requests strip trailing model turns (Vertex rejects "assistant
  * message prefill").
  *
- * Thinking blocks are carried as-is (Gemini `thought` parts); nothing is
- * stripped or re-signed — that signature dance was an artifact of the
- * reference plugin's interception architecture (see docs/ARCHITECTURE.md).
+ * Thinking blocks are carried as-is on the Gemini path (Gemini `thought`
+ * parts); no thought is ever re-signed — that signature dance was an artifact
+ * of the reference plugin's interception architecture (see
+ * docs/ARCHITECTURE.md). The Claude path is stricter and drops thought parts
+ * entirely, because its validator demands a real thinking signature that only
+ * the originating model can produce (docs/ANTIGRAVITY-API.md §3.3).
  */
 
 import { createHash } from 'node:crypto'
@@ -28,7 +31,7 @@ export type AgyPart =
   | { text: string }
   | { thought: true; text: string }
   | { thoughtSignature: string; functionCall: { id: string; name: string; args: unknown } }
-  | { functionResponse: { name: string; response: unknown } }
+  | { functionResponse: { id: string; name: string; response: unknown } }
   | { inlineData: { mimeType: string; data: string } }
 
 /** Image bytes pre-resolved from the durable attachment store, keyed by attachment id. */
@@ -164,11 +167,30 @@ function blockToParts(
   block: ContentBlock,
   toolNames: Map<string, string>,
   images: Map<string, AgyResolvedImage>,
+  /** Claude path: replayed thought blocks are rejected outright (see below). */
+  dropThoughts = false,
 ): AgyPart[] {
   switch (block.type) {
     case 'text':
-      return [{ text: block.text }]
+      // An empty text part is rejected by the Anthropic-backed Claude path
+      // ("messages.N.content.M.text.text: Field required") while the Gemini
+      // path tolerates it. Upstream's own parts normalization drops empty
+      // text, so drop it here for every family (live-verified). DSH emits
+      // these as trailing zero-length blocks after a tool call.
+      return block.text === '' ? [] : [{ text: block.text }]
     case 'reasoning':
+      // Empty thought: same rejection class as `text` ("thinking.thinking:
+      // Field required").
+      if (block.text === '') return []
+      // A replayed thought block cannot be sent to the Claude path at all: the
+      // backend demands a thinking `signature`, and the
+      // `skip_thought_signature_validator` sentinel that works for functionCall
+      // parts is rejected here as an invalid signature (live-verified). Only
+      // the model that produced the thought could re-sign it, so a thought that
+      // came from another family (e.g. a mid-session switch from a Gemini
+      // tiered model) has no valid form — drop it rather than 400. Gemini
+      // accepts replayed thoughts, so this is Claude-only.
+      if (dropThoughts) return []
       return [{ thought: true, text: block.text }]
     case 'tool-call': {
       // Upstream parses functionCall.args as google.protobuf.Struct and
@@ -206,6 +228,11 @@ function blockToParts(
         .join('\n')
       return [{
         functionResponse: {
+          // The Anthropic-backed Claude path requires tool_result.tool_use_id
+          // and 400s without it ("messages.N.content.M.tool_result.tool_use_id:
+          // Field required"); the Gemini path accepts the id too, so it is
+          // always carried rather than branched per family (live-verified).
+          id: block.toolCallId,
           name,
           response: { result: text, is_error: block.isError === true },
         },
@@ -231,6 +258,7 @@ function messageToContent(
   images: Map<string, AgyResolvedImage>,
   multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>,
   messageIndex?: number,
+  dropThoughts = false,
 ): AgyContent | null {
   const parts = message.content.flatMap((block) =>
     // Non-user images are out of scope by policy (docs ANTIGRAVITY-API §3.2):
@@ -238,7 +266,7 @@ function messageToContent(
     // unresolved-map guard, which protects only the user-image invariant.
     block.type === 'image' && message.role !== 'user'
       ? []
-      : blockToParts(block, toolNames, images),
+      : blockToParts(block, toolNames, images, dropThoughts),
   )
 
   if (message.role === 'user' && multimodalFiles) {
@@ -340,10 +368,11 @@ export function toAgyRequestBody(
   const toolNames = buildToolNameIndex(options.messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
   const multimodalFiles = supportsMultimodalFiles(options.model) ? context.multimodalFiles : undefined
+  const claude = isClaudeModel(options.model)
   let contents = options.messages
-    .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index))
+    .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude))
     .filter((c): c is AgyContent => c !== null)
-  if (isClaudeModel(options.model)) {
+  if (claude) {
     contents = stripTrailingModelTurn(contents)
   }
 

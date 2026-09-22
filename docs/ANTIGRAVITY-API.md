@@ -56,6 +56,22 @@ Image input rides in `contents[].parts[]` as a Gemini-style inline part; both mo
 - **Plugin behavior — non-image multimodal files (Gemini only)** — `src/adapter/multimodal.ts` also resolves DSH file-handle text for non-image files into the same `inlineData` part shape, capped at 20MB per file. Covered formats: `.pdf` → `application/pdf` (observed live end-to-end against Antigravity with multi-page PDFs); audio `.mp3/.wav/.m4a/.aac/.ogg/.flac`, video `.mp4/.mov/.webm`, and images `.bmp/.heic/.heif` follow Gemini's documented multimodal support and are not yet live-verified. Gating is deny-by-default (`supportsMultimodalFiles`): Claude-family models always excluded (Vertex answers 500 to non-image `inlineData`), catalog models must be vision-capable, and ids unknown to the catalog are only allowed with the `gemini-` prefix. Unlike the image path, a failed, oversized, or unsupported read is a silent fallback: the original file-handle text stays in the prompt so the model can still use its file tools.
 - Evidence source: OmniRoute's OPENAI→ANTIGRAVITY translator emits this exact part shape on the same endpoints (its Claude path whitelist passes contents verbatim); self-recorded fixture pending — verify once against a live account before release.
 
+### 3.3 Claude-path `contents[]` part contract (measured)
+
+Claude-branded models are served by an **Anthropic-backed** validator behind the same `streamGenerateContent` envelope: its errors come back in Anthropic's native shape (`{"type":"error","error":{"type":"invalid_request_error","message":"messages.N.content.M..."}}`) nested inside the Gemini-style `error.message` string. Three part shapes that the Gemini path accepts are rejected there with 400 (all live-verified; `pnpm run verify:claude-parts` re-measures every row):
+
+| Rejected shape | Claude | Gemini | Error |
+|---|---|---|---|
+| empty text part (`{text:""}`) | 400 | 200 | `messages.N.content.M.text.text: Field required` |
+| `functionResponse` without an id | 400 | 200 | `messages.N.content.M.tool_result.tool_use_id: Field required` |
+| replayed thought (`{thought:true,text}`) | 400 | 200 | `thinking.signature: Field required`; the `skip_thought_signature_validator` sentinel is then rejected as `Invalid signature in thinking block` |
+
+The validator addresses parts by **index within the translated request** (`messages.N.content.M`), so an error message localizes the offending part exactly — useful when diagnosing a 400 from a long history.
+
+- **Empty text** — DSH emits trailing zero-length text blocks after a tool call; upstream's own parts normalization drops empty `text` too (§3.2), so `translate.ts` drops them for every family.
+- **`tool_use_id`** — the tool-call id is always carried on `functionResponse` (`block.toolCallId`); Gemini accepts the extra field, so this is not branched per family.
+- **Replayed thoughts** — a thought can only be re-signed by the model that produced it, and the functionCall sentinel is not a valid thinking signature, so a thought from another family has **no** valid form. `translate.ts` therefore drops thought parts on the Claude path only. Reachable without any exotic setup: a mid-session switch from a tiered Gemini model (the only agy models that emit `reasoning` blocks) to a Claude model replays that history.
+
 ## 4. OAuth Details
 
 - client_id `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com` (Antigravity desktop client, public credential; secret handled via OmniRoute `resolvePublicCred` mode).
