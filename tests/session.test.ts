@@ -954,3 +954,177 @@ describe('impersonationHeadersFor', () => {
     })
   })
 })
+
+describe('getSession transport context (issue #29)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('reports a transient refresh failure as transport, not proxy_unreachable, without a proxy', async () => {
+    // A bare ECONNRESET with NO proxy configured used to be reported as
+    // `proxy_unreachable`, which made a healthy account look like a dead proxy
+    // and (with several accounts) got it skipped un-cooldowned.
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const error = new TypeError('fetch failed')
+      ;(error as { cause?: unknown }).cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+      throw error
+    }))
+
+    const store = new InMemoryAccountStore(storage([account('a@b.c')]))
+    const sessions = new AgySessionManager({ store })
+
+    await expect(sessions.getSession()).rejects.toMatchObject({
+      name: 'AgyAuthError',
+      kind: 'transport',
+    })
+    // The actionable cause survives into the message.
+    await expect(sessions.getSession()).rejects.toThrow(/ECONNRESET/)
+  })
+
+  it('still fails closed as proxy_unreachable when the account has a proxy', async () => {
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const error = new TypeError('fetch failed')
+      ;(error as { cause?: unknown }).cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+      throw error
+    }))
+
+    await withProxyFixture(async (proxyUrl) => {
+      const proxied: ManagedAccount = { ...account('p@x'), proxy: proxyUrl }
+      const store = new InMemoryAccountStore(storage([proxied]))
+      const sessions = new AgySessionManager({ store })
+
+      await expect(sessions.getSession()).rejects.toMatchObject({
+        name: 'AgyAuthError',
+        kind: 'transport',
+        message: 'proxy_unreachable',
+      })
+    })
+  })
+})
+
+describe('testCall routing (issue #29)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('routes the test-generation stream through the account proxy', async () => {
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      return new Response('data: [{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}]\n\ndata: [DONE]\n', {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (accountProxy) => {
+      const store = new InMemoryAccountStore(storage([{ ...account('a@b.c'), proxy: accountProxy }]))
+      const sessions = new AgySessionManager({ store })
+      await sessions.testCall('gemini-3.6-flash-high')
+
+      const streamCall = fetchSpy.mock.calls.find((call) => String(call[0]).includes('streamGenerateContent'))
+      expect(streamCall, 'testCall must issue a streamGenerateContent request').toBeDefined()
+      const dispatcher = (streamCall![1] as { dispatcher?: unknown } | undefined)?.dispatcher
+      expect(dispatcher).toBe(await dispatcherForAsync(accountProxy, { streaming: true }))
+    })
+  })
+})
+
+describe('project-healing routing (issue #29)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('routes loadCodeAssist through the account proxy', async () => {
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ cloudaicompanionProject: { id: 'proj-healed' } }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ models: {} }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (accountProxy) => {
+      const store = new InMemoryAccountStore(storage([
+        { ...account('a@b.c'), projectId: undefined, proxy: accountProxy },
+      ]))
+      const sessions = new AgySessionManager({ store })
+      const resolved = await sessions.getSession('gemini-3.6-flash-high')
+
+      expect(resolved?.account.projectId).toBe('proj-healed')
+      const healCall = fetchSpy.mock.calls.find((call) => String(call[0]).includes('loadCodeAssist'))
+      expect(healCall, 'project healing must issue a loadCodeAssist request').toBeDefined()
+      const dispatcher = (healCall![1] as { dispatcher?: unknown } | undefined)?.dispatcher
+      expect(dispatcher).toBe(await dispatcherForAsync(accountProxy))
+    })
+  })
+})
+
+describe('proxyless transport failover (issue #29)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  /** Token endpoint resets transiently for accounts whose refresh token starts with a bad prefix. */
+  function resetFor(badPrefixes: string[]) {
+    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        const refreshToken = new URLSearchParams(String(init?.body)).get('refresh_token') ?? ''
+        if (badPrefixes.some((prefix) => refreshToken.startsWith(prefix))) {
+          const error = new TypeError('fetch failed')
+          ;(error as { cause?: unknown }).cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+          throw error
+        }
+        return new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 3600 }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ models: {} }), { status: 200 })
+    })
+  }
+
+  it('falls over to a healthy account when a proxyless account has a transient failure', async () => {
+    // Regression: reporting a bare reset as proxy_unreachable/rethrowing it made a
+    // multi-account DIRECT pool lose failover entirely (issue #29).
+    vi.stubGlobal('fetch', resetFor(['rt-a']))
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('gemini-3.6-flash-high')
+    expect(session, 'must fail over rather than abort on one transient reset').toBeDefined()
+    expect(session!.account.email).toBe('b@x')
+  })
+
+  it('reports the real transport cause when every proxyless account fails', async () => {
+    // Must not degrade into "no account configured" (a bare `undefined` return)
+    // nor mislabel the network error as a proxy failure.
+    vi.stubGlobal('fetch', resetFor(['rt-a', 'rt-b']))
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    await expect(sessions.getSession('gemini-3.6-flash-high')).rejects.toMatchObject({
+      name: 'AgyAuthError',
+      kind: 'transport',
+    })
+    await expect(sessions.getSession('gemini-3.6-flash-high')).rejects.toThrow(/ECONNRESET/)
+  })
+
+  it('does not write a cooldown that would mislabel the pool as rate-limited', async () => {
+    vi.stubGlobal('fetch', resetFor(['rt-a']))
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+    await sessions.getSession('gemini-3.6-flash-high')
+
+    const after = await store.load()
+    // A cooldown here would surface as AgyPoolBlockedError -> RATE_LIMIT for what
+    // is a plain network error, and would block the only account in a solo pool.
+    expect(after.accounts[0]!.coolingDownUntil).toBeUndefined()
+    expect(after.accounts[0]!.cooldownReason).toBeUndefined()
+  })
+})

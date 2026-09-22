@@ -4,7 +4,7 @@
  * fallback, best-effort).
  */
 
-import type { TokenExchangeFailure, TokenExchangeResult } from '../types.ts'
+import type { AccountRouting, TokenExchangeFailure, TokenExchangeResult } from '../types.ts'
 import { calculateTokenExpiry } from './auth.ts'
 import {
   AGY_ENDPOINT_FALLBACKS,
@@ -34,15 +34,23 @@ interface UserInfo {
   email?: string
 }
 
-async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs = FETCH_TIMEOUT_MS,
+  proxyUrl?: string,
+): Promise<Response> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await proxiedFetch(url, { ...options, signal: controller.signal })
+    return await proxiedFetch(url, { ...options, signal: controller.signal }, { proxyUrl })
   } finally {
     clearTimeout(timeout)
   }
 }
+
+/** Bootstrap calls take the same routing as any other account-scoped request. */
+export type AgyBootstrapOptions = AccountRouting
 
 interface LoadCodeAssistData {
   cloudaicompanionProject?: unknown
@@ -101,7 +109,10 @@ export function extractOnboardTierId(subscriptionInfo: unknown): string {
 }
 
 /** Resolve project id + tier id via loadCodeAssist across fallback endpoints. */
-export async function loadCodeAssist(accessToken: string): Promise<{ projectId: string; tierId: string }> {
+export async function loadCodeAssist(
+  accessToken: string,
+  options: AgyBootstrapOptions = {},
+): Promise<{ projectId: string; tierId: string }> {
   const errors: string[] = []
   const loadHeaders: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
@@ -117,7 +128,7 @@ export async function loadCodeAssist(accessToken: string): Promise<{ projectId: 
         method: 'POST',
         headers: loadHeaders,
         body: JSON.stringify({ metadata: bootstrapMetadata() }),
-      })
+      }, FETCH_TIMEOUT_MS, options.proxyUrl)
 
       if (!response.ok) {
         const message = await response.text().catch(() => '')
@@ -149,7 +160,7 @@ export async function loadCodeAssist(accessToken: string): Promise<{ projectId: 
 export async function onboardAndDiscoverProject(
   accessToken: string,
   tierId: string,
-  options: { maxAttempts?: number; retryDelayMs?: number } = {},
+  options: { maxAttempts?: number; retryDelayMs?: number } & AgyBootstrapOptions = {},
 ): Promise<{ projectId: string; tierId: string }> {
   // Bounded onboarding: 3 attempts with jittered delay (3-7s). Fixed-rhythm
   // long retry loops read as scripted automation to the upstream (OmniRoute
@@ -171,11 +182,11 @@ export async function onboardAndDiscoverProject(
           method: 'POST',
           headers,
           body: JSON.stringify({ tier_id: tierId, metadata }),
-        })
+        }, FETCH_TIMEOUT_MS, options.proxyUrl)
         if (!response.ok) continue
         const result = (await response.json()) as { done?: boolean }
         if (result.done === true) {
-          const discovered = await loadCodeAssist(accessToken)
+          const discovered = await loadCodeAssist(accessToken, { proxyUrl: options.proxyUrl })
           if (discovered.projectId) return discovered
         }
       }
@@ -191,16 +202,16 @@ export async function onboardAndDiscoverProject(
 /** Full bootstrap for a fresh account: discover the project, onboarding if needed. */
 export async function bootstrapAccount(
   accessToken: string,
-  options: { maxAttempts?: number; retryDelayMs?: number } = {},
+  options: { maxAttempts?: number; retryDelayMs?: number } & AgyBootstrapOptions = {},
 ): Promise<{ projectId: string; tierId: string }> {
-  const discovered = await loadCodeAssist(accessToken)
+  const discovered = await loadCodeAssist(accessToken, options)
   if (discovered.projectId) return discovered
   return onboardAndDiscoverProject(accessToken, discovered.tierId, options)
 }
 
 /** Resolve the account's Cloud Code project id via loadCodeAssist across fallback endpoints. */
-export async function fetchProjectID(accessToken: string): Promise<string> {
-  return (await loadCodeAssist(accessToken)).projectId
+export async function fetchProjectID(accessToken: string, options: AgyBootstrapOptions = {}): Promise<string> {
+  return (await loadCodeAssist(accessToken, options)).projectId
 }
 
 /**
@@ -215,6 +226,7 @@ export async function exchangeAntigravity(
   state: string,
   redirectUri: string,
   expectedVerifier?: string,
+  routing: AccountRouting = {},
 ): Promise<TokenExchangeResult> {
   try {
     const { verifier, projectId } = decodeState<OAuthState>(state)
@@ -245,7 +257,7 @@ export async function exchangeAntigravity(
         redirect_uri: redirectUri,
         code_verifier: verifier,
       }),
-    })
+    }, routing)
 
     if (!tokenResponse.ok) {
       const errorText = await tokenResponse.text()
@@ -259,7 +271,7 @@ export async function exchangeAntigravity(
         Authorization: `Bearer ${tokenPayload.access_token}`,
         'User-Agent': getAgyBootstrapUserAgent(),
       },
-    })
+    }, routing)
     const userInfo: UserInfo = userInfoResponse.ok
       ? ((await userInfoResponse.json()) as UserInfo)
       : {}
@@ -269,7 +281,7 @@ export async function exchangeAntigravity(
       return { type: 'failed', error: 'Missing refresh token in response' }
     }
 
-    const effectiveProjectId = projectId || (await bootstrapAccount(tokenPayload.access_token)).projectId
+    const effectiveProjectId = projectId || (await bootstrapAccount(tokenPayload.access_token, routing)).projectId
 
     return {
       type: 'success',

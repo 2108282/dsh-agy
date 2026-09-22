@@ -4,7 +4,8 @@
  * else cools, rotates, or retries.
  */
 
-import type { FailureKind } from '../types.ts'
+import { isProxyRouted } from '../types.ts'
+import type { AccountRouting, FailureKind } from '../types.ts'
 import { isProxyUnreachableError } from '../proxy.ts'
 
 export interface ClassifiedError {
@@ -153,13 +154,131 @@ export function classifyHttpError(
   return { kind: 'transient', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
 }
 
-/** Classify a fetch-level failure (DNS, refused, timeout, abort). */
-export function classifyFetchError(error: unknown): ClassifiedError {
-  const message = error instanceof Error ? error.message : String(error)
+/** Codes that carry a socket/syscall `code` worth surfacing in a failure message. */
+const TRANSPORT_CAUSE_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_ABORTED',
+])
+
+/**
+ * Strip proxy credentials from URL-like text so `user:pass` never reaches logs
+ * or the GUI. Splits at the LAST `@` of the authority, which is the real
+ * userinfo delimiter (RFC 3986: a host cannot contain a raw `@`), so a password
+ * that itself contains `@` is redacted whole rather than truncated at the first
+ * one — the failure mode of the character-class regex this replaced.
+ */
+function redactCredentials(text: string): string {
+  return text.replace(/([a-z][a-z0-9+.-]*:\/\/)([^\s/?#]+)/gi, (match, scheme: string, authority: string) => {
+    const at = authority.lastIndexOf('@')
+    if (at === -1) return match
+    return `${scheme}<REDACTED>@${authority.slice(at + 1)}`
+  })
+}
+
+/**
+ * Placeholder messages undici/Node emit while the real reason sits deeper in
+ * the cause chain; they must not shadow a usable code further down.
+ */
+const GENERIC_CAUSE_MESSAGES = new Set(['fetch failed', 'terminated', 'other side closed', 'aborted'])
+
+/**
+ * Walk the error cause chain collecting the actionable `code` and message.
+ * Node/undici reports `TypeError: fetch failed` and stores the real reason in
+ * `error.cause` (verified against live failures): without this, DNS, TLS,
+ * timeout, reset, and proxy failures are indistinguishable in DSH session
+ * events and the GUI.
+ */
+function describeCause(error: unknown): { code?: string; message?: string } {
+  const seen = new Set<unknown>()
+  let current: unknown = (error as { cause?: unknown })?.cause ?? error
+  let fallbackMessage: string | undefined
+  // A recognized `code` anywhere wins over any message: the outer wrappers
+  // (`TypeError: fetch failed`, or a refresh error repeating that text)
+  // otherwise shadow the real reason.
+  for (let depth = 0; current && depth < 6 && !seen.has(current); depth++) {
+    seen.add(current)
+    if (typeof current === 'object') {
+      const code = (current as { code?: unknown }).code
+      const message = (current as { message?: unknown }).message
+      const usableMessage = typeof message === 'string' && message.length > 0 ? message : undefined
+      if (typeof code === 'string' && TRANSPORT_CAUSE_CODES.has(code)) {
+        return { code, message: usableMessage }
+      }
+      if (usableMessage && !GENERIC_CAUSE_MESSAGES.has(usableMessage) && !fallbackMessage) {
+        fallbackMessage = usableMessage
+      }
+      // An AggregateError (Happy Eyeballs) carries its reasons in `errors`.
+      const errors = (current as { errors?: unknown }).errors
+      if (Array.isArray(errors)) {
+        for (const nested of errors) {
+          const described = describeCause({ cause: nested })
+          if (described.code) return described
+          if (described.message && !fallbackMessage) fallbackMessage = described.message
+        }
+      }
+    }
+    current = (current as { cause?: unknown })?.cause
+  }
+  return fallbackMessage ? { message: fallbackMessage } : {}
+}
+
+/**
+ * Human-readable transport failure: `fetch failed (UND_ERR_SOCKET: other side
+ * closed)`. The sanitized cause code/message is what makes a transient socket
+ * error distinguishable from a DNS, TLS, or proxy failure in session records.
+ */
+export function describeFetchError(error: unknown): string {
+  const base = error instanceof Error ? error.message : String(error)
+  const { code, message } = describeCause(error)
+  if (!code && !message) return redactCredentials(base)
+  // Prefer the richer text: a syscall message already carrying the code
+  // ("getaddrinfo ENOTFOUND host") keeps its host, while a bare reason
+  // ("other side closed") is prefixed with the code.
+  const detail = code && message
+    ? (message.includes(code) ? message : `${code}: ${message}`)
+    : (code ?? message)!
+  // Skip a detail that merely repeats the base ("fetch failed (fetch failed)").
+  if (detail === base) return redactCredentials(base)
+  return redactCredentials(`${base} (${detail})`)
+}
+
+/**
+ * Classify a fetch-level failure (DNS, refused, timeout, abort).
+ * @param routing - how the failed request was routed; fail-closed applies only
+ *   when it carried an explicit per-account proxy (see {@link AccountRouting}).
+ */
+export function classifyFetchError(error: unknown, routing?: AccountRouting): ClassifiedError {
+  const message = describeFetchError(error)
   if (error instanceof DOMException && error.name === 'AbortError') {
     return { kind: 'network-error', message }
   }
-  if (isProxyUnreachableError(error)) {
+  // A tagged error is a definite proxy verdict (fast-fail pre-check, or a
+  // dispatcher failure), so it stays authoritative in either context.
+  const tagged = (error as { errorCode?: unknown })?.errorCode === 'proxy_unreachable'
+    || (error as { code?: unknown })?.code === 'PROXY_UNREACHABLE'
+  if (tagged) {
+    return { kind: 'proxy-unreachable', message }
+  }
+  // Otherwise the bare socket codes in PROXY_UNREACHABLE_CODES are ambiguous:
+  // they describe *the connection*, not *which* connection. Reading them as
+  // "proxy unreachable" without a proxy in play skipped healthy accounts
+  // un-cooldowned, so the context decides (issue #29).
+  if (isProxyRouted(routing) && isProxyUnreachableError(error)) {
     return { kind: 'proxy-unreachable', message }
   }
   return { kind: 'network-error', message }

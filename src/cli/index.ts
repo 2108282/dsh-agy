@@ -20,7 +20,7 @@ import { AgySessionManager } from '../session.ts'
 import { isAgyDisabled } from '../runtime/risk.ts'
 import { startCallbackServer, openBrowser } from './callback-server.ts'
 import { importManySources, upsertImportedAccount } from './import.ts'
-import { isProxyReachable, normalizeProxyUrl } from '../proxy.ts'
+import { accountFetch, isProxyReachable, normalizeProxyUrl } from '../proxy.ts'
 
 /** Package version, read from the shipped package.json — never hard-coded twice. */
 const { version: PACKAGE_VERSION } = JSON.parse(
@@ -136,7 +136,12 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
 
   // Bind the exchange to the verifier we issued: a state from any other login
   // (pasted from another session, or fabricated) must be rejected.
-  const result = await exchangeAntigravity(code, state, redirectUri, verifier)
+  // Route the exchange over the proxy being bound: it targets Google (never the
+  // loopback callback, which is forced direct), and leaving it unproxied would
+  // leak the host's real IP at exactly the moment the user asked to isolate it.
+  const result = await exchangeAntigravity(code, state, redirectUri, verifier, {
+    ...(normalizedProxy ? { proxyUrl: normalizedProxy } : {}),
+  })
   if (result.type === 'failed') {
     console.error(`Login failed: ${result.error}`)
     process.exit(1)
@@ -194,7 +199,13 @@ async function statusCommand() {
     if (session && session.index === index) {
       try {
         const { fetchAvailableModels } = await import('../adapter/models.ts')
-        const discovered = await fetchAvailableModels(session.auth.access, session.account.projectId)
+        // Account-scoped: route through the account's proxy so a status check
+        // never reveals the host's real IP for a proxied account.
+        const discovered = await fetchAvailableModels(
+          session.auth.access,
+          session.account.projectId,
+          accountFetch({ proxyUrl: session.account.proxy }),
+        )
         const entries = Object.entries(discovered.models ?? {})
         if (entries.length > 0) {
           const withQuota = entries

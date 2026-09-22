@@ -230,5 +230,6 @@ pnpm run record:fixtures       # re-record real-API fixtures (needs a real accou
 pnpm run e2e                   # real-account end-to-end (needs AGY_REFRESH_TOKEN)
 pnpm run debug:request         # endpoint/header bisection probe
 pnpm run verify:tools          # live two-turn tool-signature check
+pnpm run verify:proxy-routing  # live per-account proxy routing + fail-closed check
 npm pack --dry-run             # verify the publishable artifact
 ```

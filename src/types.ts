@@ -109,6 +109,27 @@ export interface AccountStorageV4 {
 
 export type AccountStorage = AccountStorageV1 | AccountStorageV2 | AccountStorageV3 | AccountStorageV4
 
+/**
+ * How one account-scoped request is routed — and therefore how its transport
+ * failures must be read. `proxyUrl` is the single source of truth: fail-closed
+ * applies exactly when it is set, so routing and failure classification can
+ * never disagree (splitting them into two arguments let them drift).
+ */
+export interface AccountRouting {
+  /** Per-account proxy; unset means the env/direct route. */
+  proxyUrl?: string
+  /**
+   * Generation stream: long model silences are normal, so the per-gap body
+   * inactivity timer must be disabled (AGENTS.md "Proxy Routing").
+   */
+  streaming?: boolean
+}
+
+/** Whether a request ran through an explicit per-account proxy. */
+export function isProxyRouted(routing: AccountRouting | undefined): boolean {
+  return Boolean(routing?.proxyUrl)
+}
+
 /** Parsed halves of the packed refresh string. */
 export interface RefreshParts {
   refreshToken?: string

@@ -45,7 +45,7 @@
 | `oauth/bootstrap` | `bootstrap(token) → {projectId, tier}` | loadCodeAssist / onboardUser、重试、time-box | fixture |
 | `oauth/blob` | `encode/decode(blob)` | 前缀校验、provider 绑定防重放 | 纯单元 |
 | `store/accounts` | `load() / save(acc) / mutate(fn)` | 加密、proper-lockfile、迁移链、去重、0600 | **in-memory fake**（第二个 adapter，正当的 seam） |
-| `runtime/classify` | `classify(error) → Kind` | 429/403/网络错误解析、Retry-After、resetTime | fixture |
+| `runtime/classify` | `classifyHttpError(status, headers, body) → Kind` / `classifyFetchError(error, routing?) → Kind` | 429/403/网络错误解析、Retry-After、resetTime；仅当失败的 `AccountRouting` 带显式代理时才 fail-closed；`describeFetchError()` 遍历 `error.cause` 链取脱敏后的错误码（凭据已抹除） | fixture |
 | `runtime/rotation` | `onFailure(acc, kind) → Action` | 冷却到服务端上报的真实 reset 时间（上限 30min/24h）、backoff 分级、activeIndex 切换、指纹再生触发 | 状态机单元测试 |
 | `runtime/quota` | `rank(accounts, model) → order` | fetchAvailableModels → 按模型族（google/anthropic/openai）聚合配额、drained/hot-window 护栏、required-drain 排名（对齐 OMP） | 纯单元 |
 | `runtime/risk` | `isDisabled() / fingerprintMode()` | 环境开关：总开关 + 固定身份模式（自备客户端凭据在 oauth/constants 解析） | 纯单元 |
@@ -53,7 +53,7 @@
 | `adapter/translate` | `toBody(generateOptions) → RequestBody` | DSH messages/tools → Gemini contents[]，thinking 原样携带 | fixture（录制请求） |
 | `adapter/parse` | `fromSSE(line) → Chunk[]` | SSE 行解析、candidates[] → StreamChunk、usage/错误事件 | fixture（录制响应原文） |
 | `adapter/models` | `listModels() / resolveModel(id)` | fetchAvailableModels 拉取 + 目录元数据合并 + 过滤 + 降级 | fixture |
-| `proxy` | `normalizeProxyUrl(url) / proxyUrlForLogs(url) / isProxyUnreachableError(err) / dispatcherForAsync(url) / isProxyReachable(url) / proxiedFetch(input, init)` | URL 归一化（`socks://`→`socks5://`、`socks5h`→`socks5`、默认端口、`?family=`）、2s TCP fast-fail（健康 30s / 不健康 2s 缓存）、dispatcher 缓存（`ProxyAgent` keepAlive:1、`SocksProxyAgent` 懒加载 via `socks-proxy-agent`）、loopback 强制直连、fail-closed（跳过账号不冷却）、落盘加密 + 脱敏展示（经 `store/accounts`） | 纯单元 + TCP 探测 stub |
+| `proxy` | `normalizeProxyUrl(url) / proxyUrlForLogs(url) / isProxyUnreachableError(err) / dispatcherForAsync(url, {streaming}) / dispatcherOptsFor(streaming) / isProxyReachable(url) / proxiedFetch(input, init, {proxyUrl, streaming})` | URL 归一化（`socks://`→`socks5://`、`socks5h`→`socks5`、默认端口、`?family=`）、2s TCP fast-fail（健康 30s / 不健康 2s 缓存）、dispatcher 按调用类别缓存（`ProxyAgent` keepAlive:1、`SocksProxyAgent` 懒加载 via `socks-proxy-agent`）、loopback 强制直连、fail-closed（跳过账号不冷却）、落盘加密 + 脱敏展示（经 `store/accounts`）。两类调用：控制面（`bodyTimeout` 30s）与流式（`bodyTimeout` 0 —— 生成流在推理期间可合法静默数分钟，而 `bodyTimeout` 是逐*间隔*静默计时器，不是总时长预算） | 纯单元 + TCP 探测 stub |
 
 ## 3. 薄壳（刻意浅，不抽象）
 
