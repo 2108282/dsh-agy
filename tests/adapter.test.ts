@@ -879,6 +879,52 @@ describe('AgyAdapter', () => {
     }).rejects.toThrow(/dsh-agy login/)
   })
 
+  it('routes the generation stream through the account proxy', async () => {
+    // Issue #29 (1): the stream used to omit session.account.proxy, so a
+    // proxied account silently generated from the host's real IP.
+    const { dispatcherForAsync, proxyAgent } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    const fetchSpy = vi.fn(async () => new Response(sseStream(['data: [DONE]']), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (accountProxy) => {
+      const adapter = new AgyAdapter({
+        getSession: async () => session({
+          account: { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0, proxy: accountProxy },
+        }),
+        reportFailure: async () => {},
+      })
+      for await (const _ of adapter.stream(generateOptions())) void _
+
+      const init = fetchSpy.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined
+      // Streaming class: the account dispatcher without the body inactivity timer.
+      expect(init?.dispatcher).toBe(await dispatcherForAsync(accountProxy, { streaming: true }))
+      expect(init?.dispatcher).not.toBe(proxyAgent)
+    }, { credentials: 'user:sup3rs3cret' })
+  })
+
+  it('routes model listing through the account proxy', async () => {
+    // Same defect class as the stream: discovery is account-scoped, so it must
+    // not reveal the host's real IP for a proxied account (issue #29).
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ models: {} }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (accountProxy) => {
+      const adapter = new AgyAdapter({
+        getSession: async () => session({
+          account: { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0, proxy: accountProxy },
+        }),
+        reportFailure: async () => {},
+      })
+      await adapter.listModels('agy')
+
+      const init = fetchSpy.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined
+      expect(init?.dispatcher).toBe(await dispatcherForAsync(accountProxy))
+    })
+  })
+
   it('streams a response and reports no failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',

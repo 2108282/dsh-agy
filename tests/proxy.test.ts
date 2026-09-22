@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EnvHttpProxyAgent } from 'undici'
-import { proxiedFetch, proxyAgent, normalizeProxyUrl } from '../src/proxy.ts'
+import { proxiedFetch, proxyAgent, proxyStreamingAgent, dispatcherForAsync, dispatcherOptsFor, normalizeProxyUrl, _clearDispatcherCacheForTest } from '../src/proxy.ts'
 
 describe('proxy env support', () => {
   afterEach(() => {
@@ -37,6 +37,43 @@ describe('proxy env support', () => {
   })
 })
 
+describe('streaming dispatcher (issue #29 5)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    _clearDispatcherCacheForTest()
+  })
+
+  // A generation stream can legitimately stay silent for minutes mid-turn
+  // (reasoning). undici's bodyTimeout is a per-gap inactivity timer, not a total
+  // transfer budget — measured against a real tunnel: a 150ms drip for 1.5s
+  // survives bodyTimeout:400, while one 1.5s stall trips it, and bodyTimeout:0
+  // survives a 35s stall. So the control-plane 30s value would kill a slow turn
+  // the moment proxy routing works, which is why streaming disables it.
+  it('disables the per-gap body inactivity timer for streams only', () => {
+    expect(dispatcherOptsFor(true).bodyTimeout).toBe(0)
+    expect(dispatcherOptsFor(false).bodyTimeout).toBe(30_000)
+    // Every other bound is unchanged: streaming relaxes silence tolerance only.
+    expect(dispatcherOptsFor(true).headersTimeout).toBe(dispatcherOptsFor(false).headersTimeout)
+    expect(dispatcherOptsFor(true).connectTimeout).toBe(dispatcherOptsFor(false).connectTimeout)
+  })
+
+  it('resolves distinct dispatchers per call class and caches each', async () => {
+    const proxyUrl = 'http://user:sup3rs3cret@127.0.0.1:9'
+    const streaming = await dispatcherForAsync(proxyUrl, { streaming: true })
+    const control = await dispatcherForAsync(proxyUrl, { streaming: false })
+
+    expect(streaming).not.toBe(control)
+    // Cached per class: a stream must not reuse the control dispatcher.
+    expect(await dispatcherForAsync(proxyUrl, { streaming: true })).toBe(streaming)
+    expect(await dispatcherForAsync(proxyUrl, { streaming: false })).toBe(control)
+  })
+
+  it('routes a proxyless stream through the streaming env agent', async () => {
+    expect(await dispatcherForAsync(undefined, { streaming: true })).toBe(proxyStreamingAgent)
+    expect(proxyStreamingAgent).not.toBe(proxyAgent)
+    expect(proxyStreamingAgent).toBeInstanceOf(EnvHttpProxyAgent)
+  })
+})
 describe('proxy credential encoding (special characters)', () => {
   it('encodes a password containing @ so the proxy receives it intact', () => {
     // Spec #8 user story 22. `URL.password` returns the encoded substring, so

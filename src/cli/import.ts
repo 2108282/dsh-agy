@@ -79,8 +79,13 @@ export function parseAndValidateAgyToken(raw: unknown): ParsedAgyAuth {
   }
 }
 
-/** Best-effort enrichment: email (userinfo) + projectId (loadCodeAssist), time-boxed. */
-export async function enrichWithAntigravityBackend(parsed: ParsedAgyAuth): Promise<EnrichedAgyAuth> {
+/** Best-effort enrichment: email (userinfo) + projectId (loadCodeAssist), time-boxed.
+ * `proxyUrl` is the account proxy being imported: enrichment talks to Google as
+ * this account, so it must take the same egress route the account will use. */
+export async function enrichWithAntigravityBackend(
+  parsed: ParsedAgyAuth,
+  options: { proxyUrl?: string } = {},
+): Promise<EnrichedAgyAuth> {
   let email: string | null = null
   let projectId: string | null = null
 
@@ -90,7 +95,7 @@ export async function enrichWithAntigravityBackend(parsed: ParsedAgyAuth): Promi
     const res = await proxiedFetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
       headers: { Authorization: `Bearer ${parsed.accessToken}` },
       signal: controller.signal,
-    })
+    }, { proxyUrl: options.proxyUrl })
     if (res.ok) {
       email = toNonEmptyString(toRecord(await res.json()).email)
     }
@@ -116,7 +121,7 @@ export async function enrichWithAntigravityBackend(parsed: ParsedAgyAuth): Promi
           headers,
           body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } }),
           signal: loadController.signal,
-        })
+        }, { proxyUrl: options.proxyUrl })
         if (!res.ok) continue
         const data = toRecord(await res.json())
         const project = data.cloudaicompanionProject
@@ -142,15 +147,20 @@ export async function enrichWithAntigravityBackend(parsed: ParsedAgyAuth): Promi
 }
 
 /** Parse either a raw token document or a paste blob into an enriched account. */
-export async function parseImportSource(source: unknown, kind: 'json' | 'blob'): Promise<EnrichedAgyAuth> {
+export async function parseImportSource(
+  source: unknown,
+  kind: 'json' | 'blob',
+  options: { proxyUrl?: string } = {},
+): Promise<EnrichedAgyAuth> {
   if (kind === 'blob') {
     if (typeof source !== 'string') throw new AgyAuthFileError('blob must be a string', 400, 'invalid_blob')
     const blob = decodeCredentialBlob(source)
     return enrichWithAntigravityBackend(
       parseAndValidateAgyToken({ token: blob.tokens, auth_method: 'paste-blob' }),
+      options,
     )
   }
-  return enrichWithAntigravityBackend(parseAndValidateAgyToken(source))
+  return enrichWithAntigravityBackend(parseAndValidateAgyToken(source), options)
 }
 
 /** Batch-import many sources (CLI multi-file / web multi-line paste). Each item
@@ -163,7 +173,11 @@ export async function importManySources(
   const result = { imported: 0, replaced: 0, errors: [] as string[] }
   for (const item of items) {
     try {
-      const enriched = await parseImportSource(item.source, item.kind)
+      // Enrich over the proxy this account is being imported with, so the
+      // verification calls leave from the same egress as the account itself.
+      const enriched = await parseImportSource(item.source, item.kind, {
+        ...(options.proxy ? { proxyUrl: normalizeProxyUrl(options.proxy) } : {}),
+      })
       const { created } = await upsertImportedAccount(store, enriched, options)
       if (created) result.imported++
       else result.replaced++

@@ -25,7 +25,8 @@ import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
-import { classifyFetchError, classifyHttpError } from '../runtime/classify.ts'
+import { classifyFetchError, classifyHttpError, describeFetchError } from '../runtime/classify.ts'
+import { accountFetch } from '../proxy.ts'
 import { deriveAntigravitySessionId, generateAntigravityRequestId } from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
@@ -115,7 +116,10 @@ export class AgyAdapter extends LlmAdapter {
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
     try {
       const session = await this.options.getSession()
-      return await listAgyModels(session?.auth.access, session?.account.projectId)
+      // Model discovery is account-scoped: route it through the account's proxy
+      // (control-plane class, so the standard timeouts apply).
+      const routing = { proxyUrl: session?.account.proxy }
+      return await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
     } catch (error) {
       if (error instanceof AgyPoolBlockedError || error instanceof AgyAuthError) {
         return catalogModelList()
@@ -238,14 +242,24 @@ export class AgyAdapter extends LlmAdapter {
 
     let response: Response
     try {
-      response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: options.signal,
-      })
+      // Streaming dispatch: the account proxy MUST carry the generation request
+      // (it carried only the control-plane calls before, so a proxied account
+      // silently generated from the host's real IP), and the streaming
+      // dispatcher drops the per-gap body timeout a reasoning pause would trip.
+      const routing = { proxyUrl: session.account.proxy, streaming: true }
+      response = await fetchAgyFirstOk(
+        '/v1internal:streamGenerateContent?alt=sse',
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: options.signal,
+        },
+        accountFetch(routing),
+        routing,
+      )
     } catch (error) {
-      const classified = classifyFetchError(error)
+      const classified = classifyFetchError(error, { proxyUrl: session.account.proxy })
       await this.options.reportFailure(classified.kind, session)
       throw new LlmError(classified.message ?? 'agy fetch failed', 'TRANSPORT', { cause: error })
     }
@@ -321,8 +335,13 @@ export class AgyAdapter extends LlmAdapter {
         throw new LlmError('agy stream aborted', 'ABORTED', { cause: error })
       }
       await this.options.reportFailure('network-error', session)
+      // Deliberately UPSTREAM (terminal), not TRANSPORT: content may already
+      // have been emitted, and DSH's retry policy honours TRANSPORT, so retrying
+      // here would replay a partially-delivered turn. The account-level report
+      // above already absorbs the transient case by cooling/rotating. The cause
+      // code is still surfaced so the socket failure is legible in session events.
       throw new LlmError(
-        error instanceof Error ? error.message : 'agy stream parse failed',
+        error instanceof Error ? describeFetchError(error) : 'agy stream parse failed',
         UPSTREAM_ERROR_CODE,
         { cause: error },
       )

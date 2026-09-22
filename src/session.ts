@@ -40,7 +40,8 @@ import {
 import { deriveAntigravitySessionId } from './runtime/identity.ts'
 import { fingerprintMode } from './runtime/risk.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
-import { isProxyUnreachableError, proxiedFetch } from './proxy.ts'
+import { accountFetch, isProxyUnreachableError, proxiedFetch } from './proxy.ts'
+import { describeFetchError } from './runtime/classify.ts'
 import type { Fingerprint } from './types.ts'
 
 export interface SessionManagerOptions {
@@ -170,7 +171,11 @@ export class AgySessionManager {
         if (cached && !accessTokenExpired({ access: cached.access, expires: cached.expires, refresh: account.refresh })) {
           return { access: cached.access, expires: cached.expires, refresh: account.refresh }
         }
-        if (isProxyUnreachableError(result.error)) {
+        // Only an explicit per-account proxy may be judged proxy-unreachable.
+        // Without one a bare ECONNRESET is a transient network error, and
+        // reporting it as proxy_unreachable made a healthy single account look
+        // like a dead proxy (issue #29).
+        if (account.proxy && isProxyUnreachableError(result.error)) {
           throw new AgyAuthError('transport', 'proxy_unreachable', { cause: result.error })
         }
         const kind = result.error.status === 429
@@ -178,7 +183,7 @@ export class AgySessionManager {
           : result.error.status === 0 || result.error.status === 408 || result.error.status >= 500
             ? 'transport'
             : 'invalid-credential'
-        throw new AgyAuthError(kind, result.error.message, { cause: result.error })
+        throw new AgyAuthError(kind, describeFetchError(result.error), { cause: result.error })
       }
       if (result.type === 'revoked') {
         // Account credentials are dead — mark it disabled and verificationRequired in the store
@@ -242,19 +247,11 @@ export class AgySessionManager {
           const auth = await this.accessTokenFor(account)
           if (!auth) return null
           const { fetchAvailableModels } = await import('./adapter/models.ts')
-          const boundedFetch: typeof fetch = (input, init) => {
-            const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
-            const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
-            return fetch(input, { ...init, signal })
-          }
+          const routed = accountFetch({ proxyUrl: account.proxy })
           const discovered = await fetchAvailableModels(auth.access, account.projectId, (input, init) => {
             const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
             const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
-            // Explicit threading of per-account proxy (fail-closed). Use proxiedFetch when proxy is set.
-            if (account.proxy) {
-              return proxiedFetch(input, { ...init, signal }, { proxyUrl: account.proxy })
-            }
-            return fetch(input, { ...init, signal })
+            return routed(input, { ...init, signal })
           })
           const quotas = ingestFamilyQuotas(discovered)
           return { key, quotas, updatedAt: Date.now() }
@@ -364,6 +361,15 @@ export class AgySessionManager {
     let storage = await this.store.load()
     const maxAttempts = storage.accounts.filter((account) => account.enabled !== false).length
     let proxyUnreachableCount = 0
+    /**
+     * Last transport failure seen on a *proxyless* account. Such an account is
+     * skipped (another enabled account may be healthy) without writing a
+     * cooldown: a cooldown would surface as AgyPoolBlockedError — i.e. RATE_LIMIT
+     * for a plain network error — and would block a solo pool outright. It is
+     * remembered so the request still reports its real cause rather than
+     * degrading into "no account configured" when every account fails this way.
+     */
+    let lastTransportError: unknown
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const eligible = storage.accounts.filter((account) => account.enabled !== false)
@@ -377,30 +383,20 @@ export class AgySessionManager {
       try {
         auth = await this.accessTokenFor(picked.account)
       } catch (error) {
-        if (error instanceof AgyAuthError && error.kind === 'transport' && isProxyUnreachableError(error)) {
-          // Fail-closed for per-account proxy: skip this account this request, do not write cooldown.
+        if (Boolean(picked.account.proxy) && isProxyUnreachableError(error)) {
+          // Fail-closed for per-account proxy: skip this account for this request
+          // without a cooldown (the proxy may recover; a cooldown would also hide
+          // the real cause and block a solo proxied pool).
           proxyUnreachableCount++
-          this.lastUsed = null
-          // Rotate activeIndex away from the dead proxy account for next pick
-          const deadIndex = storage.accounts.findIndex((a) => this.accountKey(a) === this.accountKey(picked.account))
-          if (deadIndex !== -1) {
-            const next = pickNextAccountIndex(storage.accounts, deadIndex, Date.now())
-            if (next !== storage.activeIndex) {
-              storage.activeIndex = next
-              await this.store.mutate((s) => { s.activeIndex = next }).catch(() => {})
-            }
-          }
-          storage = await this.store.load()
+          storage = await this.skipAccount(storage, picked.account)
           continue
         }
-        // Also handle direct isProxyUnreachableError without AgyAuthError wrapper
-        if (isProxyUnreachableError(error)) {
-          proxyUnreachableCount++
-          this.lastUsed = null
-          storage = await this.store.load()
-          continue
-        }
-        throw error
+        // Otherwise the same socket codes describe the connection, not a proxy
+        // (issue #29): fall over to the next enabled account, remembering the
+        // failure in case none of them succeeds.
+        lastTransportError = error
+        storage = await this.skipAccount(storage, picked.account)
+        continue
       }
       if (!auth) {
         // The selected credential was revoked and disabled by accessTokenFor.
@@ -414,7 +410,7 @@ export class AgySessionManager {
       if (!picked.account.projectId && !this.projectRetryFailed.has(key)) {
         try {
           const { loadCodeAssist } = await import('./oauth/exchange.ts')
-          const { projectId } = await loadCodeAssist(auth.access)
+          const { projectId } = await loadCodeAssist(auth.access, { proxyUrl: picked.account.proxy })
           if (projectId) {
             await this.store.mutate((s) => {
               const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
@@ -450,7 +446,30 @@ export class AgySessionManager {
     if (proxyUnreachableCount === maxAttempts && maxAttempts > 0) {
       throw new AgyAuthError('transport', 'proxy_unreachable')
     }
+    // Every account failed for a non-proxy reason: surface the real cause rather
+    // than `undefined`, which the adapter would report as NO_CREDENTIAL
+    // ("no account configured") — misleading, and wrong for a transient blip.
+    if (lastTransportError !== undefined) throw lastTransportError
     return undefined
+  }
+
+  /**
+   * Drop the session pin and move the pool cursor off an account that just
+   * failed, so the next `pickAccount` in this same request tries another one.
+   * State on the account itself is deliberately left untouched (no cooldown).
+   */
+  private async skipAccount(storage: AccountStorageV4, account: ManagedAccount): Promise<AccountStorageV4> {
+    this.lastUsed = null
+    const key = this.accountKey(account)
+    const deadIndex = storage.accounts.findIndex((candidate) => this.accountKey(candidate) === key)
+    if (deadIndex !== -1) {
+      const next = pickNextAccountIndex(storage.accounts, deadIndex, Date.now())
+      if (next !== storage.activeIndex) {
+        storage.activeIndex = next
+        await this.store.mutate((s) => { s.activeIndex = next }).catch(() => {})
+      }
+    }
+    return this.store.load()
   }
 
   /** Adapter hook: apply rotation decisions and fingerprint regeneration. */
@@ -564,11 +583,17 @@ export class AgySessionManager {
         accept: 'text/event-stream',
         ...session.impersonation,
       }
-      const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-      })
+      const routing = { proxyUrl: session.account.proxy, streaming: true }
+      const response = await fetchAgyFirstOk(
+        '/v1internal:streamGenerateContent?alt=sse',
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        },
+        accountFetch(routing),
+        routing,
+      )
       if (!response.ok) {
         const text = await response.text().catch(() => '')
         return { ok: false, error: `HTTP ${response.status}: ${text.slice(0, 300)}` }

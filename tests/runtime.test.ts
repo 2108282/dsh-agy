@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { classifyFetchError, classifyHttpError, classifyRefreshFailure } from '../src/runtime/classify.ts'
+import {
+  classifyFetchError,
+  classifyHttpError,
+  classifyRefreshFailure,
+  describeFetchError,
+} from '../src/runtime/classify.ts'
 import {
   computeSoftQuotaCacheTtlMs,
   decideRotation,
@@ -91,6 +96,100 @@ describe('classifyHttpError', () => {
   it('classifies fetch failures as network-error', () => {
     expect(classifyFetchError(new TypeError('fetch failed')).kind).toBe('network-error')
     expect(classifyFetchError(new DOMException('aborted', 'AbortError')).kind).toBe('network-error')
+  })
+
+  // Issue #29 (1): bare socket codes mean "proxy unreachable" ONLY while an
+  // explicit per-account proxy is in effect. Without one the same code is a
+  // plain network error, and misreading it skipped a healthy account.
+  it('reads socket failures as proxy-unreachable only when an account proxy is active', () => {
+    const reset = () => {
+      const error = new TypeError('fetch failed')
+      ;(error as { cause?: unknown }).cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+      return error
+    }
+
+    expect(classifyFetchError(reset()).kind).toBe('network-error')
+    expect(classifyFetchError(reset(), { proxyUrl: 'http://127.0.0.1:9' }).kind).toBe('proxy-unreachable')
+  })
+
+  it('keeps a tagged proxy-unreachable error fail-closed in either context', () => {
+    const tagged = Object.assign(new Error('[Proxy Fast-Fail] Proxy unreachable: http://127.0.0.1:1'), {
+      code: 'PROXY_UNREACHABLE',
+      errorCode: 'proxy_unreachable',
+    })
+    expect(classifyFetchError(tagged).kind).toBe('proxy-unreachable')
+    expect(classifyFetchError(tagged, { proxyUrl: 'http://127.0.0.1:9' }).kind).toBe('proxy-unreachable')
+  })
+
+  // Issue #29 (3): `fetch failed` alone hides DNS/TLS/reset/timeout/proxy causes.
+  it('surfaces the sanitized cause code and message of a transport failure', () => {
+    const error = new TypeError('fetch failed')
+    ;(error as { cause?: unknown }).cause = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' })
+
+    const described = describeFetchError(error)
+    expect(described).toContain('fetch failed')
+    expect(described).toContain('UND_ERR_SOCKET')
+    expect(described).toContain('other side closed')
+  })
+
+  // A refresh error repeats the wrapper text; an earlier version returned
+  // "fetch failed (fetch failed)" and lost the code the user needs.
+  it('reaches the transport code through a wrapper that repeats the message', () => {
+    const inner = new TypeError('fetch failed')
+    ;(inner as { cause?: unknown }).cause = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' })
+    const wrapper = Object.assign(new TypeError('fetch failed'), { cause: inner })
+
+    const described = describeFetchError(wrapper)
+    expect(described).toContain('UND_ERR_SOCKET')
+    expect(described).not.toContain('(fetch failed)')
+  })
+
+  it('keeps the syscall detail (hostname) rather than replacing it with the code', () => {
+    const error = new TypeError('fetch failed')
+    ;(error as { cause?: unknown }).cause = Object.assign(
+      new Error('getaddrinfo ENOTFOUND daily-cloudcode-pa.googleapis.com'),
+      { code: 'ENOTFOUND' },
+    )
+    // The hostname is the actionable part; a bare "ENOTFOUND" would not be.
+    expect(describeFetchError(error)).toContain('daily-cloudcode-pa.googleapis.com')
+  })
+
+  it('redacts a password containing @ whole, not truncated at the first @', () => {
+    // RFC 3986: the userinfo delimiter is the LAST @ in the authority, so
+    // `user:p@ss@host` is one credential. A character-class regex stops at the
+    // first @ and leaks the tail ("ss@host").
+    const error = new TypeError('fetch failed')
+    ;(error as { cause?: unknown }).cause = Object.assign(
+      new Error('connect ECONNREFUSED via http://user:p@ss@127.0.0.1:9'),
+      { code: 'ECONNREFUSED' },
+    )
+    const described = describeFetchError(error)
+    expect(described).not.toContain('p@ss')
+    expect(described).not.toContain('ss@')
+    expect(described).toContain('127.0.0.1:9')
+  })
+
+  it('redacts every credential in a message carrying several URLs', () => {
+    const error = new TypeError('fetch failed')
+    ;(error as { cause?: unknown }).cause = Object.assign(
+      new Error('http://a:b@h1:1 then https://c:d@h2:2'),
+      { code: 'ECONNREFUSED' },
+    )
+    const described = describeFetchError(error)
+    expect(described).not.toContain('a:b')
+    expect(described).not.toContain('c:d')
+  })
+
+  it('never leaks proxy credentials into the described transport failure', () => {
+    const error = new TypeError('fetch failed')
+    ;(error as { cause?: unknown }).cause = Object.assign(
+      new Error('connect ECONNREFUSED via http://user:sup3rs3cret@127.0.0.1:9'),
+      { code: 'ECONNREFUSED' },
+    )
+
+    const described = describeFetchError(error)
+    expect(described).not.toContain('sup3rs3cret')
+    expect(described).toContain('ECONNREFUSED')
   })
 
   it('classifies refresh failures', () => {

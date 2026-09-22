@@ -19,7 +19,7 @@ import { generateFingerprint, recordFingerprintVersion } from '../runtime/finger
 import { resolveAntigravityVersionBounded } from '../runtime/version.ts'
 import { renderDashboardHtml, renderCallbackHtml } from './page.ts'
 import { maskProxyUrl } from '../store/accounts.ts'
-import { isProxyReachable, normalizeProxyUrl, proxyUrlForLogs } from '../proxy.ts'
+import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs } from '../proxy.ts'
 
 export interface WebRoute {
   kind: 'exact' | 'prefix'
@@ -104,7 +104,13 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
       if (!session || session.index !== entry.index) continue
       try {
         const { fetchAvailableModels } = await import('../adapter/models.ts')
-        const discovered = await fetchAvailableModels(session.auth.access, session.account.projectId)
+        // Account-scoped: route through the account's proxy (the quota panel
+        // must not reveal the host's real IP for a proxied account).
+        const discovered = await fetchAvailableModels(
+          session.auth.access,
+          session.account.projectId,
+          accountFetch({ proxyUrl: session.account.proxy }),
+        )
         const models = Object.entries(discovered.models ?? {})
         if (models.length > 0) {
           const quotaRows = models
@@ -274,7 +280,11 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     }
     try {
       const { listAgyModels } = await import('../adapter/models.ts')
-      const models = await listAgyModels(session.auth.access, session.account.projectId)
+      const models = await listAgyModels(
+        session.auth.access,
+        session.account.projectId,
+        accountFetch({ proxyUrl: session.account.proxy }),
+      )
       sendJson(res, 200, { account: session.account.email ?? null, models: models.map((m) => ({
         id: m.id,
         name: m.name,

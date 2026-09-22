@@ -20,7 +20,7 @@ import { AgySessionManager } from '../session.ts'
 import { isAgyDisabled } from '../runtime/risk.ts'
 import { startCallbackServer, openBrowser } from './callback-server.ts'
 import { importManySources, upsertImportedAccount } from './import.ts'
-import { isProxyReachable, normalizeProxyUrl } from '../proxy.ts'
+import { accountFetch, isProxyReachable, normalizeProxyUrl } from '../proxy.ts'
 
 /** Package version, read from the shipped package.json — never hard-coded twice. */
 const { version: PACKAGE_VERSION } = JSON.parse(
@@ -194,7 +194,13 @@ async function statusCommand() {
     if (session && session.index === index) {
       try {
         const { fetchAvailableModels } = await import('../adapter/models.ts')
-        const discovered = await fetchAvailableModels(session.auth.access, session.account.projectId)
+        // Account-scoped: route through the account's proxy so a status check
+        // never reveals the host's real IP for a proxied account.
+        const discovered = await fetchAvailableModels(
+          session.auth.access,
+          session.account.projectId,
+          accountFetch({ proxyUrl: session.account.proxy }),
+        )
         const entries = Object.entries(discovered.models ?? {})
         if (entries.length > 0) {
           const withQuota = entries
