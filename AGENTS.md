@@ -72,7 +72,7 @@ npm pack --dry-run           # Verify packaged files before release (npm ships w
 
 ## Scripts and CI/CD
 
-- `scripts/` contains developer tools (`record:fixtures`, `e2e`, `debug:request`, `verify:tools`, `verify:blocks`), **all requiring real accounts or network access**. They are not part of routine dev loops, are not packaged into npm, and are not run in CI. `scripts/unfold-credentials.mjs` is the exception: a standalone stopgap for the published 0.2.7 reader, run directly with node.
+- `scripts/` contains developer tools (`record:fixtures`, `e2e`, `debug:request`, `verify:tools`, `verify:blocks`, `verify:proxy-routing`), **all requiring real accounts or network access**. They are not part of routine dev loops, are not packaged into npm, and are not run in CI. `scripts/unfold-credentials.mjs` is the exception: a standalone stopgap for the published 0.2.7 reader, run directly with node.
 - `ci.yml` (runs on every PR and push to `main`): 3 OS (Ubuntu / Windows / macOS) × 2 Node versions (22 / 24; pnpm 11 requires 22.13+) -> pnpm install -> test -> typecheck -> build -> `npm pack --dry-run` -> **tarball smoke test** (installs into a clean temp directory and verifies CLI `--help`, `import('dsh-agy')`, and `import('dsh-agy/web')`).
 - Package contents gate: `package.json` `files` only contains `lib/`, `bin/`, `cordis.patch.yml`, `README.md`, `LICENSE`. Adding a new entrypoint requires updating `tsdown.config.ts`, `exports`, and `files` simultaneously.
 - `publish.yml` (triggered on `v*` tag push or manual dispatch): test -> build -> `npm publish` (requires `NPM_TOKEN` secret) -> GitHub Release. **Releases are made via `npm version patch|minor|major` + git tag push; do not run manual `npm publish`**.
