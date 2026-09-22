@@ -3,10 +3,10 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
-import { formatTieredModelName } from '../src/adapter/catalog.ts'
+import { AGY_PUBLIC_MODELS, formatTieredModelName } from '../src/adapter/catalog.ts'
 import { AgyAdapter } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
@@ -418,6 +418,37 @@ describe('translate', () => {
     const gemini = toAgyRequestBody(generateOptions({ model: 'gemini-2.5-flash', messages }), {})
     expect(gemini.request.contents.map((c) => c.role)).toEqual(['model', 'user', 'model'])
   })
+
+  // Claude-family ceiling is 64000, not the Gemini 65536 the catalog pinned:
+  // 64001+ answers 400 INVALID_ARGUMENT ("Request contains an invalid
+  // argument"), so the default the harness injects must stay under it.
+  it('clamps maxOutputTokens to the Claude ceiling on the wire', () => {
+    const overCap = toAgyRequestBody(
+      generateOptions({ model: 'claude-opus-4-6-thinking', maxTokens: 65536 }),
+      {},
+    )
+    expect(overCap.request.generationConfig?.maxOutputTokens).toBe(AGY_CLAUDE_MAX_OUTPUT_TOKENS)
+    expect(AGY_CLAUDE_MAX_OUTPUT_TOKENS).toBe(64000)
+
+    // At or under the ceiling passes through untouched (no silent shrink).
+    const atCap = toAgyRequestBody(
+      generateOptions({ model: 'claude-sonnet-4-6', maxTokens: 64000 }),
+      {},
+    )
+    expect(atCap.request.generationConfig?.maxOutputTokens).toBe(64000)
+    const underCap = toAgyRequestBody(
+      generateOptions({ model: 'claude-sonnet-4-6', maxTokens: 8192 }),
+      {},
+    )
+    expect(underCap.request.generationConfig?.maxOutputTokens).toBe(8192)
+
+    // Gemini keeps the larger ceiling: the clamp is Claude-specific.
+    const gemini = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3-flash-agent', maxTokens: 65536 }),
+      {},
+    )
+    expect(gemini.request.generationConfig?.maxOutputTokens).toBe(65536)
+  })
 })
 
 describe('parseSseDataLine', () => {
@@ -778,10 +809,21 @@ describe('models', () => {
   it('resolves exact-model metadata from the catalog', () => {
     const resolved = resolveAgyModel('agy', 'claude-opus-4-6-thinking')
     expect(resolved.name).toContain('Claude Opus')
-    expect(resolved.defaultMaxTokens).toBe(65536)
+    // The harness injects this as maxTokens, and Antigravity rejects >64000 on
+    // the Claude family with 400, so the catalog default must not exceed it.
+    expect(resolved.defaultMaxTokens).toBe(AGY_CLAUDE_MAX_OUTPUT_TOKENS)
+    expect(resolveAgyModel('agy', 'claude-sonnet-4-6').defaultMaxTokens).toBe(AGY_CLAUDE_MAX_OUTPUT_TOKENS)
     const unknown = resolveAgyModel('agy', 'brand-new-model')
     expect(unknown.name).toBe('brand-new-model')
     expect(unknown.defaultMaxTokens).toBeUndefined()
+  })
+
+  it('keeps every catalog default maxTokens within what upstream accepts', () => {
+    // Live-verified ceiling: 64000 for the Claude family, 65536 for Gemini.
+    for (const model of AGY_PUBLIC_MODELS) {
+      const cap = model.id.startsWith('claude-') ? AGY_CLAUDE_MAX_OUTPUT_TOKENS : 65536
+      expect(model.maxOutputTokens, `${model.id} exceeds its upstream ceiling`).toBeLessThanOrEqual(cap)
+    }
   })
 
   it('exposes reasoning efforts for tiered models (both catalog and dynamic)', () => {

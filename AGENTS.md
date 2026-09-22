@@ -50,6 +50,7 @@ share the same store/session/adapter instances via `createAgyRuntime` (`plugin-c
   - The endpoint fallback order `daily -> prod -> daily-sandbox -> autopush` is load-bearing.
   - HTTP 403 on the autopush endpoint for consumer accounts indicates "no license" (not credential failure).
   - `Client-Metadata` must only transmit `ideType`.
+  - `maxOutputTokens` ceilings are model-family-specific and measured, never derived from Anthropic/Google public limits: this channel rejects the Claude family above 64000 (64001 → 400 `INVALID_ARGUMENT`) while Gemini accepts 65536. Since `catalog.ts` `maxOutputTokens` becomes the harness-injected `defaultMaxTokens`, an over-cap Claude value fails every Claude request; `AGY_CLAUDE_MAX_OUTPUT_TOKENS` in `translate.ts` clamps explicit `maxTokens` too, and `pnpm run verify:claude-cap` re-measures the boundary.
 - **Version Freshness**:
   - The fingerprint User-Agent version is resolved dynamically via `version.ts` (750ms timeout ceiling + 6-hour cache + warm-up on boot).
   - `fingerprint-data.json` is compiled into the bundle; user hot-updates use the `$DSH_HOME/agy-fingerprint-data.json` override file.
@@ -72,7 +73,7 @@ npm pack --dry-run           # Verify packaged files before release (npm ships w
 
 ## Scripts and CI/CD
 
-- `scripts/` contains developer tools (`record:fixtures`, `e2e`, `debug:request`, `verify:tools`, `verify:blocks`, `verify:proxy-routing`), **all requiring real accounts or network access**. They are not part of routine dev loops, are not packaged into npm, and are not run in CI. `scripts/unfold-credentials.mjs` is the exception: a standalone stopgap for the published 0.2.7 reader, run directly with node.
+- `scripts/` contains developer tools (`record:fixtures`, `e2e`, `debug:request`, `verify:tools`, `verify:blocks`, `verify:claude-cap`, `verify:proxy-routing`), **all requiring real accounts or network access**. They are not part of routine dev loops, are not packaged into npm, and are not run in CI. `scripts/unfold-credentials.mjs` is the exception: a standalone stopgap for the published 0.2.7 reader, run directly with node.
 - `ci.yml` (runs on every PR and push to `main`): 3 OS (Ubuntu / Windows / macOS) × 2 Node versions (22 / 24; pnpm 11 requires 22.13+) -> pnpm install -> test -> typecheck -> build -> `npm pack --dry-run` -> **tarball smoke test** (installs into a clean temp directory and verifies CLI `--help`, `import('dsh-agy')`, and `import('dsh-agy/web')`).
 - Package contents gate: `package.json` `files` only contains `lib/`, `bin/`, `cordis.patch.yml`, `README.md`, `LICENSE`. Adding a new entrypoint requires updating `tsdown.config.ts`, `exports`, and `files` simultaneously.
 - `publish.yml` (triggered on `v*` tag push or manual dispatch): test -> build -> `npm publish` (requires `NPM_TOKEN` secret) -> GitHub Release. **Releases are made via `npm version patch|minor|major` + git tag push; do not run manual `npm publish`**.
