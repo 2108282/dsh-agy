@@ -269,6 +269,31 @@ const AGY_BUILTIN_TOOL_NAMES = new Set(['google_search', 'web_search', 'search_w
 /** Level-thinking: single id + selectable low/medium/high via thinkingLevel (catalog thinking:'level'). */
 const LEVEL_THINKING_LEVELS = new Set(['low', 'medium', 'high'])
 
+/**
+ * Claude-family output ceiling on the Antigravity channel (live-measured).
+ *
+ * The Claude models are served through the Gemini-style
+ * `generationConfig.maxOutputTokens` field here, and this channel rejects the
+ * Claude family above 64000: 64000 answers 200, 64001 answers 400
+ * `INVALID_ARGUMENT: Request contains an invalid argument` (deterministic
+ * across both Claude ids, with and without the full 87-tool payload). The
+ * Gemini family accepts 65536 on the same endpoint, so the limit is
+ * model-family-specific, not endpoint-wide.
+ *
+ * Do NOT reason about this number from Anthropic's public API limits. Agy may
+ * front a self-hosted or otherwise gated Claude deployment whose capacity and
+ * validation rules are its own; the only authority is what this channel
+ * accepts, which is what the probe measures. The value here is that
+ * measurement, nothing more.
+ *
+ * The catalog's `maxOutputTokens` is the harness-injected default
+ * (`LlmResolvedModelInfo.defaultMaxTokens`), so a wrong value there makes every
+ * Claude request fail. This clamp is the second line of defense: it also covers
+ * an explicit `maxTokens` (agent preset / call config) and a dynamically
+ * discovered Claude id absent from the pinned catalog.
+ */
+export const AGY_CLAUDE_MAX_OUTPUT_TOKENS = 64_000
+
 /** Upstream functionDeclarations names are `[a-zA-Z0-9_]` and ≤64 chars (OmniRoute-verified). */
 const AGY_TOOL_NAME_MAX_LENGTH = 64
 
@@ -325,7 +350,13 @@ export function toAgyRequestBody(
   const tools = toolsToDeclarations(options.tools)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
-  if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
+  if (options.maxTokens !== undefined) {
+    // Claude family: the platform rejects >64000 with 400, and the value the
+    // harness injects comes from the catalog default, so clamp before the wire.
+    generationConfig.maxOutputTokens = isClaudeModel(options.model)
+      ? Math.min(options.maxTokens, AGY_CLAUDE_MAX_OUTPUT_TOKENS)
+      : options.maxTokens
+  }
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
   // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.
