@@ -113,6 +113,40 @@ describe('exchangeAntigravity', () => {
     vi.unstubAllGlobals()
   })
 
+  it('routes the whole exchange (token, userinfo, bootstrap) over the account proxy', async () => {
+    // Issue #29 class: `login --proxy` stored a proxy while the exchange itself
+    // still went direct, leaking the host's real IP during login.
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    const seen: Array<{ url: string; dispatcher: unknown }> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      seen.push({ url, dispatcher: (init as { dispatcher?: unknown } | undefined)?.dispatcher })
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('userinfo')) {
+        return new Response(JSON.stringify({ email: 'user@example.com' }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ cloudaicompanionProject: { id: 'proj-1' } }), { status: 200 })
+    }))
+
+    const { verifier } = generatePkcePair()
+    const state = encodeState({ verifier, projectId: '' })
+
+    await withProxyFixture(async (proxyUrl) => {
+      const result = await exchangeAntigravity('code123', state, redirectUri, verifier, { proxyUrl })
+      expect(result.type).toBe('success')
+
+      // Every request the exchange issued must carry the account dispatcher.
+      expect(seen.length).toBeGreaterThanOrEqual(3)
+      const expected = await dispatcherForAsync(proxyUrl)
+      for (const call of seen) {
+        expect(call.dispatcher, `not proxied: ${call.url}`).toBe(expected)
+      }
+    })
+  })
+
   it('exchanges code, resolves email and project id', async () => {
     const { verifier } = generatePkcePair()
     const state = encodeState({ verifier, projectId: '' })

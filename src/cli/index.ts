@@ -136,7 +136,12 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
 
   // Bind the exchange to the verifier we issued: a state from any other login
   // (pasted from another session, or fabricated) must be rejected.
-  const result = await exchangeAntigravity(code, state, redirectUri, verifier)
+  // Route the exchange over the proxy being bound: it targets Google (never the
+  // loopback callback, which is forced direct), and leaving it unproxied would
+  // leak the host's real IP at exactly the moment the user asked to isolate it.
+  const result = await exchangeAntigravity(code, state, redirectUri, verifier, {
+    ...(normalizedProxy ? { proxyUrl: normalizedProxy } : {}),
+  })
   if (result.type === 'failed') {
     console.error(`Login failed: ${result.error}`)
     process.exit(1)

@@ -226,6 +226,7 @@ export async function exchangeAntigravity(
   state: string,
   redirectUri: string,
   expectedVerifier?: string,
+  routing: AccountRouting = {},
 ): Promise<TokenExchangeResult> {
   try {
     const { verifier, projectId } = decodeState<OAuthState>(state)
@@ -256,7 +257,7 @@ export async function exchangeAntigravity(
         redirect_uri: redirectUri,
         code_verifier: verifier,
       }),
-    })
+    }, routing)
 
     if (!tokenResponse.ok) {
       const errorText = await tokenResponse.text()
@@ -270,7 +271,7 @@ export async function exchangeAntigravity(
         Authorization: `Bearer ${tokenPayload.access_token}`,
         'User-Agent': getAgyBootstrapUserAgent(),
       },
-    })
+    }, routing)
     const userInfo: UserInfo = userInfoResponse.ok
       ? ((await userInfoResponse.json()) as UserInfo)
       : {}
@@ -280,7 +281,7 @@ export async function exchangeAntigravity(
       return { type: 'failed', error: 'Missing refresh token in response' }
     }
 
-    const effectiveProjectId = projectId || (await bootstrapAccount(tokenPayload.access_token)).projectId
+    const effectiveProjectId = projectId || (await bootstrapAccount(tokenPayload.access_token, routing)).projectId
 
     return {
       type: 'success',
