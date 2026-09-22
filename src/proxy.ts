@@ -63,9 +63,14 @@ export function normalizeProxyUrl(proxyUrl: string): string {
   if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
     throw new Error('[proxy] invalid port')
   }
-  // Build auth with proper encoding (parsed.username/password are decoded)
+  // Build auth from the DECODED credentials. `URL.username`/`password` return the
+  // percent-ENCODED substrings (not decoded, despite what the older comment here
+  // claimed), so encoding them again double-encodes: `p@ss` became `p%2540ss`,
+  // which the proxy decodes to the literal `p%40ss` and rejects. Decoding first
+  // also makes this function idempotent, which matters because a stored proxy URL
+  // is normalized again on every request.
   const auth = parsed.username
-    ? `${encodeURIComponent(parsed.username)}${parsed.password ? `:${encodeURIComponent(parsed.password)}` : ''}@`
+    ? `${encodeURIComponent(decodeURIComponent(parsed.username))}${parsed.password ? `:${encodeURIComponent(decodeURIComponent(parsed.password))}` : ''}@`
     : ''
   const normalizedBase = `${protocol}//${auth}${parsed.hostname}:${port}`
   return familySuffix ? `${normalizedBase}${familySuffix}` : normalizedBase

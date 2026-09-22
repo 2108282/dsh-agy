@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EnvHttpProxyAgent } from 'undici'
-import { proxiedFetch, proxyAgent } from '../src/proxy.ts'
+import { proxiedFetch, proxyAgent, normalizeProxyUrl } from '../src/proxy.ts'
 
 describe('proxy env support', () => {
   afterEach(() => {
@@ -34,5 +34,35 @@ describe('proxy env support', () => {
       signal: controller.signal,
       dispatcher: proxyAgent,
     })
+  })
+})
+
+describe('proxy credential encoding (special characters)', () => {
+  it('encodes a password containing @ so the proxy receives it intact', () => {
+    // Spec #8 user story 22. `URL.password` returns the encoded substring, so
+    // re-encoding it produced `p%2540ss`, which the proxy decodes to the literal
+    // `p%40ss` and rejects (authentication failure).
+    expect(normalizeProxyUrl('http://user:p@ss@127.0.0.1:9')).toBe('http://user:p%40ss@127.0.0.1:9')
+    expect(normalizeProxyUrl('http://user:pa:ss@127.0.0.1:9')).toBe('http://user:pa%3Ass@127.0.0.1:9')
+    expect(normalizeProxyUrl('socks5://u:p@ss@127.0.0.1:1080')).toBe('socks5://u:p%40ss@127.0.0.1:1080')
+  })
+
+  it('is idempotent, because a stored proxy URL is normalized again per request', () => {
+    for (const raw of [
+      'http://user:p@ss@127.0.0.1:9',
+      'http://user:p%40ss@127.0.0.1:9',
+      'http://user:pa:ss@h:9',
+      'http://user:plain@h:9',
+      'socks5://u:p@ss@h:1080',
+      'http://h:8080',
+    ]) {
+      const once = normalizeProxyUrl(raw)
+      expect(normalizeProxyUrl(once), `not idempotent for ${raw}`).toBe(once)
+    }
+  })
+
+  it('leaves an already-correctly-encoded password untouched', () => {
+    expect(normalizeProxyUrl('http://u:p%2Fw@h:1')).toBe('http://u:p%2Fw@h:1')
+    expect(normalizeProxyUrl('http://user:plain@127.0.0.1:9')).toBe('http://user:plain@127.0.0.1:9')
   })
 })
