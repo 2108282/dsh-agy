@@ -57,6 +57,22 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 - **插件行为——非图片多模态文件（仅 Gemini）** — `src/adapter/multimodal.ts` 还会把 DSH 文件句柄文本中的非图片文件解析为同一 `inlineData` part 形状，单文件上限 20MB。覆盖格式：`.pdf` → `application/pdf`（已对 Antigravity 用多页 PDF 实测通过）；音频 `.mp3/.wav/.m4a/.aac/.ogg/.flac`、视频 `.mp4/.mov/.webm` 与图片 `.bmp/.heic/.heif` 遵循 Gemini 公开的多模态支持，尚未实测。门控默认拒绝（`supportsMultimodalFiles`）：Claude 系模型一律排除（Vertex 对非图片 `inlineData` 返回 500）、catalog 模型必须具备视觉能力、catalog 未收录的 id 仅在 `gemini-` 前缀下放行。与图片路径不同，读取失败、超限或格式不受支持时静默回退：原文件句柄文本保留在 prompt 中，模型仍可用文件工具读取。
 - 证据来源：OmniRoute 的 OPENAI→ANTIGRAVITY 翻译器在同一端点上产出该形状（其 Claude 路径白名单对 contents 原样放行）；自录 fixture 待补——发版前用真实账号实测一次。
 
+### 3.3 Claude 路径的 `contents[]` part 契约（实测）
+
+Claude 系模型由同一 `streamGenerateContent` envelope 背后的 **Anthropic 校验器**处理：错误以 Anthropic 原生形状返回（`{"type":"error","error":{"type":"invalid_request_error","message":"messages.N.content.M..."}}`），嵌在 Gemini 风格的 `error.message` 字符串里。有三种 part 形状 Gemini 路径接受、Claude 路径一律 400（全部实测；`pnpm run verify:claude-parts` 可复测每一行）：
+
+| 被拒形状 | Claude | Gemini | 错误 |
+|---|---|---|---|
+| 空 text part（`{text:""}`） | 400 | 200 | `messages.N.content.M.text.text: Field required` |
+| 缺 id 的 `functionResponse` | 400 | 200 | `messages.N.content.M.tool_result.tool_use_id: Field required` |
+| 回放的 thought（`{thought:true,text}`） | 400 | 200 | `thinking.signature: Field required`；改用 `skip_thought_signature_validator` 哨兵则被拒为 `Invalid signature in thinking block` |
+
+校验器按**翻译后请求内的下标**寻址 part（`messages.N.content.M`），因此错误文案能精确定位到出问题的 part——排查长历史里的 400 时很有用。
+
+- **空 text** — DSH 在工具调用后会产出尾部零长 text block；上游自身的 parts 归一化也会丢弃空 `text`（§3.2），故 `translate.ts` 对所有模型族一律丢弃。
+- **`tool_use_id`** — tool-call id 始终随 `functionResponse` 一起发送（`block.toolCallId`）；Gemini 接受该多余字段，故不按模型族分叉。
+- **回放的 thought** — thought 只能由产出它的模型重新签名，而 functionCall 的哨兵不是合法的 thinking 签名，因此来自其它模型族的 thought **没有**任何合法形态。`translate.ts` 因此在 Claude 路径上丢弃 thought part。触发场景并不罕见：会话中途从 tiered Gemini 模型（agy 中唯一产出 `reasoning` block 的模型）切到 Claude 模型，该历史就会被回放。
+
 ## 4. OAuth 细节
 
 - client_id `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com`（Antigravity 桌面客户端，公开凭据；secret 经 OmniRoute `resolvePublicCred` 模式处理）。

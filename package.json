@@ -49,7 +49,8 @@
     "verify:tools": "tsx scripts/verify-tools.mts",
     "verify:blocks": "tsx scripts/verify-blocks.mts",
     "verify:claude-cap": "tsx scripts/verify-claude-cap.mts",
-    "verify:proxy-routing": "tsx scripts/verify-proxy-routing.mts"
+    "verify:proxy-routing": "tsx scripts/verify-proxy-routing.mts",
+    "verify:claude-parts": "tsx scripts/verify-claude-parts.mts"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
