@@ -37,3 +37,32 @@ describe('dsh-agy web page rendering', () => {
     expect(enKeys.sort()).toEqual(zhKeys.sort())
   })
 })
+
+describe('dsh-agy web entry injection contract', () => {
+  it('never statically injects a Web-only service', async () => {
+    // Regression, measured on a real TUI profile: `webServer` sat in the static
+    // `inject`. No provider of that service is mounted outside a Web
+    // composition, so the entry stayed permanently pending — and the loader
+    // treats a pending entry as a FAILED PROFILE, not a skipped one:
+    //
+    //   dsh: plugin tree failed to load: dsh: 1 entry did not activate
+    //   dsh-agy/web: pending (waiting for service: webServer)
+    //
+    // Installing dsh-agy into dsh-tui therefore broke TUI startup outright.
+    // Both Web-only services must be reached through `ctx.inject([...])`.
+    const { inject } = await import('../src/web/plugin.ts')
+    expect(inject).toEqual(['llm'])
+    for (const service of ['webServer', 'connection', 'webStartup', 'attachments']) {
+      expect(inject as readonly string[]).not.toContain(service)
+    }
+  })
+
+  it('drops the dashboard route, keeping only the OAuth callback', async () => {
+    // The management surface moved to the `/api/agy` RPC channel; the callback
+    // stays a real route because Google redirects a browser to it with a GET.
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync(new URL('../src/web/plugin.ts', import.meta.url), 'utf8')
+    expect(source).toContain("path: '/agy/oauth-callback'")
+    expect(source).not.toContain('renderDashboardHtml')
+  })
+})

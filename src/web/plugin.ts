@@ -14,11 +14,17 @@
  *    Google redirects a browser to it with a GET, which the management RPC
  *    channel (POST-only) cannot carry.
  *
- * `connection` is deliberately NOT in the static `inject`: that service exists
- * only in a Web composition, and a statically injected missing service leaves
- * the plugin pending, which fails profile startup in TUI/headless. It is
- * reached lazily with `ctx.inject([...])`, so those profiles load this entry and
- * simply register no management RPC.
+ * BOTH `webServer` and `connection` are deliberately reached lazily rather than
+ * statically injected. Each exists only in a Web composition, and a statically
+ * injected service that never appears leaves this entry permanently pending —
+ * and the loader treats a pending entry as a FAILED PROFILE, not a skipped one:
+ *
+ *   dsh: plugin tree failed to load: dsh: 1 entry did not activate
+ *   dsh-agy/web: pending (waiting for service: webServer)
+ *
+ * Measured on a real TUI profile, where no provider of `webServer` is mounted.
+ * `ctx.inject([...])` keeps this entry active and inert instead, so a TUI or
+ * headless profile boots with no management surface rather than not booting.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -32,148 +38,161 @@ import { renderCallbackHtml } from './page.ts'
 
 export const name = 'dsh-agy-web'
 
-/** Services required for the OAuth callback route; `connection` is injected lazily. */
-export const inject = ['llm', 'webServer']
+/** The one service every composition provides; the rest are resolved lazily. */
+export const inject = ['llm']
+
+/** The slice of the host's web-server service this entry uses. */
+interface WebServerLike {
+  register(route: {
+    kind: 'exact'
+    path: string
+    handler: (req: IncomingMessage, res: ServerResponse) => void
+  }): () => void
+  host?: string
+}
 
 export function apply(ctx: Context): void {
   if (isAgyDisabled()) {
     ctx.logger.warn('[dsh-agy] disabled by DSH_AGY_DISABLE=1 — skipping web registration')
     return
   }
-  ctx.effect(async () => {
-    const webServer = ctx.get('webServer') as
+  // Lazily, like `connection` below: see the module docblock for why a static
+  // `webServer` is a profile-breaking bug rather than a nicety.
+  ctx.inject(['webServer'], (webCtx) => {
+    const webServer = webCtx.get('webServer') as WebServerLike | undefined
+    if (!webServer) return
+    webCtx.effect(() => registerAgyWeb(webCtx, webServer))
+  })
+}
+
+/**
+ * Register the OAuth callback route, and the management RPC once `connection`
+ * appears.
+ * @param ctx - the web-server-bearing context (owns both registrations).
+ * @param webServer - the host web server.
+ * @returns disposer for every registration this function made.
+ */
+async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<() => void> {
+  // Host/port come from the webStartup provider (CLI args); the fallbacks are
+  // DSH's own web-app defaults (loopback + 3080), never a user override.
+  const webStartup = ctx.get('webStartup') as { host?: string; port?: number } | undefined
+  const host = webStartup?.host ?? '127.0.0.1'
+  const port = webStartup?.port ?? 3080
+
+  // The OAuth callback manages credentials with no authentication of its own,
+  // so it must never be reachable from the network. When the web server binds
+  // a non-loopback interface, refuse to register it (the loopback-only OAuth
+  // redirect would be unusable there anyway).
+  const bindHost = webServer.host ?? host
+  if (!['127.0.0.1', 'localhost', '::1'].includes(bindHost)) {
+    ctx.logger.warn(
+      '[dsh-agy] web server bound to "' + bindHost + '" (non-loopback): not registering the agy routes ' +
+      '(they manage account credentials and must stay loopback-only). Bind the web server to 127.0.0.1 to enable them.',
+    )
+    return () => {}
+  }
+
+  const { store, sessions, adapter, stats, modelVisibility } = await createAgyRuntime(ctx)
+  const baseUrl = `http://${host}:${port}`
+  const management = createAgyManagement({
+    store,
+    sessions,
+    stats,
+    modelVisibility,
+    // The adapter's *unfiltered* catalog, so a hidden model still appears in
+    // the settings list alongside the switch that un-hides it.
+    listAllModels: () => adapter.listAllModels(),
+    baseUrl,
+    // DSH refreshes the model picker on `llm/adapters-updated`; the hidden
+    // list lives in agy's own file, so nothing else would announce the change
+    // and the toggle would appear to do nothing until a page reload.
+    // (`llm/adapters-updated` is declared `@mode emit` for exactly this kind
+    // of registry notification.)
+    notifyModelsChanged: () => { ctx.emit('llm/adapters-updated') },
+  })
+  const disposers: Array<() => void> = []
+
+  // The one endpoint that cannot ride the RPC channel: Google sends the
+  // browser here with a GET redirect.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/agy/oauth-callback',
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url ?? '/', baseUrl)
+      const result = await management.handleCallback(url.searchParams).catch((error: unknown) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+      }))
+      res.writeHead(result.ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(result.ok
+        ? renderCallbackHtml({ ok: true, email: result.email ?? null, baseUrl })
+        : renderCallbackHtml({ ok: false, error: result.error ?? 'Unknown error', baseUrl }))
+    },
+  }))
+
+  // Lazy injection: see the module docblock for why this is not static.
+  ctx.inject(['connection'], (connectionCtx) => {
+    const connection = connectionCtx.get('connection') as
       | {
-        register(route: {
-          kind: 'exact'
-          path: string
-          handler: (req: IncomingMessage, res: ServerResponse) => void
-        }): () => void
-        host?: string
+        fetch: {
+          register(route: {
+            path: string
+            methods: string[]
+            requestBody: 'buffered' | 'streaming'
+            fetch: (request: Request) => Promise<Response>
+          }): () => void
+        }
       }
       | undefined
-    if (!webServer) return () => {}
-
-    // Host/port come from the webStartup provider (CLI args); the fallbacks are
-    // DSH's own web-app defaults (loopback + 3080), never a user override.
-    const webStartup = ctx.get('webStartup') as { host?: string; port?: number } | undefined
-    const host = webStartup?.host ?? '127.0.0.1'
-    const port = webStartup?.port ?? 3080
-
-    // The OAuth callback manages credentials with no authentication of its own,
-    // so it must never be reachable from the network. When the web server binds
-    // a non-loopback interface, refuse to register it (the loopback-only OAuth
-    // redirect would be unusable there anyway).
-    const bindHost = webServer.host ?? host
-    if (!['127.0.0.1', 'localhost', '::1'].includes(bindHost)) {
-      ctx.logger.warn(
-        '[dsh-agy] web server bound to "' + bindHost + '" (non-loopback): not registering the agy routes ' +
-        '(they manage account credentials and must stay loopback-only). Bind the web server to 127.0.0.1 to enable them.',
-      )
-      return () => {}
+    if (!connection || typeof connection.fetch?.register !== 'function') {
+      connectionCtx.logger.warn('[dsh-agy] connection.fetch unavailable — management RPC not registered')
+      return
     }
-
-    const { store, sessions, adapter, stats, modelVisibility } = await createAgyRuntime(ctx)
-    const baseUrl = `http://${host}:${port}`
-    const management = createAgyManagement({
-      store,
-      sessions,
-      stats,
-      modelVisibility,
-      // The adapter's *unfiltered* catalog, so a hidden model still appears in
-      // the settings list alongside the switch that un-hides it.
-      listAllModels: () => adapter.listAllModels(),
-      baseUrl,
-      // DSH refreshes the model picker on `llm/adapters-updated`; the hidden
-      // list lives in agy's own file, so nothing else would announce the change
-      // and the toggle would appear to do nothing until a page reload.
-      // (`llm/adapters-updated` is declared `@mode emit` for exactly this kind
-      // of registry notification.)
-      notifyModelsChanged: () => { ctx.emit('llm/adapters-updated') },
-    })
-    const disposers: Array<() => void> = []
-
-    // The one endpoint that cannot ride the RPC channel: Google sends the
-    // browser here with a GET redirect.
-    disposers.push(webServer.register({
-      kind: 'exact',
-      path: '/agy/oauth-callback',
-      handler: async (req: IncomingMessage, res: ServerResponse) => {
-        const url = new URL(req.url ?? '/', baseUrl)
-        const result = await management.handleCallback(url.searchParams).catch((error: unknown) => ({
-          ok: false as const,
-          error: error instanceof Error ? error.message : String(error),
-        }))
-        res.writeHead(result.ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' })
-        res.end(result.ok
-          ? renderCallbackHtml({ ok: true, email: result.email ?? null, baseUrl })
-          : renderCallbackHtml({ ok: false, error: result.error ?? 'Unknown error', baseUrl }))
-      },
-    }))
-
-    // Lazy injection: see the module docblock for why this is not static.
-    ctx.inject(['connection'], (connectionCtx) => {
-      const connection = connectionCtx.get('connection') as
-        | {
-          fetch: {
-            register(route: {
-              path: string
-              methods: string[]
-              requestBody: 'buffered' | 'streaming'
-              fetch: (request: Request) => Promise<Response>
-            }): () => void
-          }
+    connectionCtx.effect(() => connection.fetch.register({
+      path: '/api/agy',
+      methods: ['POST'],
+      requestBody: 'buffered',
+      async fetch(request: Request): Promise<Response> {
+        if (request.method !== 'POST') return new Response('method not allowed', { status: 405 })
+        const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+        if (contentType !== 'application/json') {
+          return new Response('content type must be application/json', { status: 415 })
         }
-        | undefined
-      if (!connection || typeof connection.fetch?.register !== 'function') {
-        connectionCtx.logger.warn('[dsh-agy] connection.fetch unavailable — management RPC not registered')
-        return
-      }
-      connectionCtx.effect(() => connection.fetch.register({
-        path: '/api/agy',
-        methods: ['POST'],
-        requestBody: 'buffered',
-        async fetch(request: Request): Promise<Response> {
-          if (request.method !== 'POST') return new Response('method not allowed', { status: 405 })
-          const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
-          if (contentType !== 'application/json') {
-            return new Response('content type must be application/json', { status: 415 })
-          }
-          let message: Record<string, unknown>
-          try {
-            message = await request.json() as Record<string, unknown>
-          } catch {
-            return new Response('body is not JSON', { status: 400 })
-          }
-          const rpcId = typeof message.rpcId === 'string' ? message.rpcId : 'invalid-request'
-          const call = message.payload as { method?: unknown; payload?: unknown } | undefined
-          if (
-            message.type !== 'client-request'
-            || typeof message.rpcId !== 'string'
-            || typeof call?.method !== 'string'
-          ) {
-            return reply(rpcId, {
-              ok: false,
-              error: { code: 'agy/bad-request', message: 'Invalid agy management request.' },
-            })
-          }
-          try {
-            const value = await management.call(call.method, call.payload)
-            return reply(rpcId, { ok: true, value })
-          } catch (error) {
-            const text = error instanceof Error ? error.message : String(error)
-            connectionCtx.logger.warn(`[dsh-agy] ${call.method} failed: ${text}`)
-            // A structured failure, not a bare 500: the client's unwrap needs a
-            // parseable envelope or a failed call looks like "nothing happened".
-            return reply(rpcId, { ok: false, error: { code: 'agy/handler-failed', message: text } })
-          }
-        },
-      }), 'dsh-agy: /api/agy management RPC')
-    })
-
-    return () => {
-      for (const dispose of disposers) dispose()
-    }
+        let message: Record<string, unknown>
+        try {
+          message = await request.json() as Record<string, unknown>
+        } catch {
+          return new Response('body is not JSON', { status: 400 })
+        }
+        const rpcId = typeof message.rpcId === 'string' ? message.rpcId : 'invalid-request'
+        const call = message.payload as { method?: unknown; payload?: unknown } | undefined
+        if (
+          message.type !== 'client-request'
+          || typeof message.rpcId !== 'string'
+          || typeof call?.method !== 'string'
+        ) {
+          return reply(rpcId, {
+            ok: false,
+            error: { code: 'agy/bad-request', message: 'Invalid agy management request.' },
+          })
+        }
+        try {
+          const value = await management.call(call.method, call.payload)
+          return reply(rpcId, { ok: true, value })
+        } catch (error) {
+          const text = error instanceof Error ? error.message : String(error)
+          connectionCtx.logger.warn(`[dsh-agy] ${call.method} failed: ${text}`)
+          // A structured failure, not a bare 500: the client's unwrap needs a
+          // parseable envelope or a failed call looks like "nothing happened".
+          return reply(rpcId, { ok: false, error: { code: 'agy/handler-failed', message: text } })
+        }
+      },
+    }), 'dsh-agy: /api/agy management RPC')
   })
+
+  return () => {
+    for (const dispose of disposers) dispose()
+  }
 }
 
 /**
