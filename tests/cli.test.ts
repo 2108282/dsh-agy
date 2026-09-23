@@ -17,7 +17,14 @@ afterEach(() => {
 })
 
 describe('dsh-agy export blob file', () => {
-  it('writes the blob owner-only', () => {
+  // POSIX owner-only enforcement is skipped on win32 BY DESIGN (keyring.ts), and
+  // that must cover the assertion too: Windows synthesizes the mode bits rather
+  // than applying them, so this file reports 0o666 no matter what
+  // `writeFileSync({ mode })` was given — `mode` is not the mechanism that
+  // protects it there. Same convention as the mode checks in store.test.ts.
+  // The CODE still passes 0o600 unconditionally; only the observation is
+  // platform-specific, so nothing about the guarantee is lost on POSIX.
+  it.skipIf(process.platform === 'win32')('writes the blob owner-only', () => {
     // A blob carries a live access+refresh token in plain base64. Without an
     // explicit mode the file lands at the umask default (0644), i.e. readable by
     // every user on the machine. Asserting the group/other bits rather than the
