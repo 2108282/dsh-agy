@@ -46,6 +46,19 @@ interface RawQuotaSummary {
   }>
 }
 
+/**
+ * Sort rank for an upstream window token: shorter windows first.
+ *
+ * An explicit table so the order states the intended duration ordering rather
+ * than inferring it from string length. Unknown tokens rank last (and tie-break
+ * alphabetically) so a window added upstream later is still shown, just after
+ * the ones we understand.
+ */
+function windowRank(window: string): number {
+  const known: Record<string, number> = { '5h': 0, daily: 1, weekly: 2, monthly: 3 }
+  return known[window] ?? Number.MAX_SAFE_INTEGER
+}
+
 /** Clamp to 0..1; a non-number is "unknown" rather than zero. */
 function fractionOf(raw: unknown): number | null {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
@@ -86,8 +99,14 @@ export function parseQuotaSummary(raw: unknown): QuotaGroup[] {
       })
     }
     if (windows.length === 0) continue
-    // Shortest window first: `5h` before `weekly`.
-    windows.sort((a, b) => a.window.length - b.window.length || a.window.localeCompare(b.window))
+    // Shortest window first, by an explicit table rather than by token length.
+    // Length happens to order today's vocabulary correctly (`5h` < `weekly`), and
+    // would even survive `daily`/`monthly`, but it ranks by a coincidence of
+    // spelling instead of by the duration the token names — `daily` (5 chars)
+    // would sort BEFORE `weekly` (6) for the wrong reason. An unknown token sorts
+    // last, so a window upstream adds later appears after the known ones instead
+    // of landing somewhere arbitrary.
+    windows.sort((a, b) => windowRank(a.window) - windowRank(b.window) || a.window.localeCompare(b.window))
     groups.push({ name: stringOf(group.displayName) ?? '', windows })
   }
   return groups

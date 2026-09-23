@@ -392,6 +392,15 @@ export class AgySessionManager {
    * Cost is bounded by the same TTL the scheduling path uses, so this runs at
    * most once per window rather than per request.
    *
+   * KNOWN LIMITATION (deliberate, not overlooked): a FAILED probe writes no
+   * marker, so "probe failed" and "never probed" are indistinguishable and
+   * `isLimitsStale` reports stale again on the next call. The practical effect is
+   * that an account whose endpoint never returns groups is re-probed each time
+   * the accounts page is opened, with no backoff. Acceptable today — the call is
+   * display-only, TTL-bounded, and triggered by opening a tab rather than by a
+   * poll — so no negative-TTL field is added yet. Revisit if the trigger becomes
+   * frequent or the pool grows enough that the extra calls matter.
+   *
    * @param storage - the loaded storage document, overlaid in memory on success.
    */
   async refreshLimits(storage: AccountStorageV4): Promise<void> {

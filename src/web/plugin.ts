@@ -103,6 +103,8 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     thinkingBudget: {
       all: () => thinkingBudget.all(),
       set: (level, value) => thinkingBudget.setBudget(level, value),
+      claude: () => thinkingBudget.claudeBudget(),
+      setClaude: (value) => thinkingBudget.setClaudeBudget(value).claudeBudget,
     },
     // The adapter's *unfiltered* catalog, so a hidden model still appears in
     // the settings list alongside the switch that un-hides it.

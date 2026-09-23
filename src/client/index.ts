@@ -30,7 +30,7 @@ import type { StateDotState, TagTone } from '@deepseek-ai/dsh-client-ui-primitiv
 import { installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
 import type { AccountView, AgyRpcClient, ModelView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
-import { THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
+import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -335,13 +335,13 @@ function agoText(iso: string | null, t: T, now: number): string {
  * is safe for buttons outside rows, where there is no ancestor handler.
  */
 function button(label: string, onClick: () => void, options: {
-  variant?: 'danger' | 'toolbar'
+  variant?: 'danger' | 'ghost'
   size?: 'sm'
   disabled?: boolean
   title?: string
 } = {}): ReactNode {
   return h(Button, {
-    variant: options.variant === 'toolbar' ? 'toolbar' : 'outline',
+    variant: options.variant === 'danger' ? 'outline' : (options.variant ?? 'outline'),
     size: options.size === 'sm' ? 'sm' : 'md',
     ...(options.disabled === true ? { disabled: true } : {}),
     ...(options.title === undefined ? {} : { title: options.title }),
@@ -354,28 +354,6 @@ function button(label: string, onClick: () => void, options: {
 }
 
 /** Full-width quota row used by the (collapsible) model quota list. */
-function quotaRow(
-  model: { id: string, remainingFraction: number | null, resetTime: string | null },
-  t: T,
-  now: number,
-): ReactNode {
-  const fraction = model.remainingFraction
-  // The reset phrase rides in the trailing percentage column, not inside the
-  // name: inline after the id, every row's text ran a different length and the
-  // column edges never lined up (every row showed its own reset phrase at a
-  // different offset). The id stays alone on the left, so the list reads as one
-  // aligned grid.
-  return h('div', { className: 'agy-quota-row', key: model.id },
-    h('span', { className: 'agy-quota-name' }, model.id),
-    h('span', { className: 'agy-quota-track' },
-      fraction === null
-        ? null
-        : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
-    h('span', { className: 'agy-quota-pct' },
-      fraction === null ? null : `${Math.round(fraction * 100)}%`,
-      model.resetTime === null ? null : h('code', null, untilText(model.resetTime, t, now))))
-}
-
 /** Account state rendered with the host's state dot plus a tinted tag. */
 function stateBadge(state: AccountView['state'], label: string): ReactNode {
   const dot: StateDotState = state === 'active'
@@ -529,15 +507,24 @@ function AccountDetail(props: {
    * the whole point of the panel.
    *
    * A window with no reported fraction renders its bar empty and its percentage
-   * as an em dash — "unknown" must not look like "0% left". A null `limits`
-   * means the account has never been measured (the session manager only fills
-   * this on a pool with more than one enabled account), and says so rather than
-   * showing an empty card.
+   * as an em dash — "unknown" must not look like "0% left". A null `limits` means
+   * the account has not been measured YET, and says so rather than showing an
+   * empty card. That is reachable at any pool size: `refreshLimits` runs for a
+   * solo account too (unlike the scheduling quota refresh, which a pool of one
+   * skips because measuring it could block the only account).
    */
   const limitsBlock = card(t('limitsTitle'),
     account.limits === null || account.limits.length === 0
       ? h('div', { className: 'agy-empty' }, t('limitsUnavailable'))
+      // The snapshot's age is shown, not just its values. These windows come from
+      // a TTL cache and a FAILED refresh keeps the previous numbers rather than
+      // clearing them, so an unlabelled figure could be arbitrarily old with
+      // nothing on screen to say so — the same trap as an undated cooldown reason.
       : h('div', { className: 'agy-limits' },
+        account.limitsUpdatedAt === null
+          ? null
+          : h('div', { className: 'agy-limit-age' },
+            t('limitsMeasured', { ago: agoText(new Date(account.limitsUpdatedAt).toISOString(), t, now) })),
         ...account.limits.map((group) => h('div', { className: 'agy-limit-group', key: group.name },
           h('div', { className: 'agy-limit-group-name' }, group.name),
           ...group.windows.map((window) => {
@@ -696,8 +683,6 @@ export function orderModels(models: readonly ModelView[]): ModelView[] {
 function ModelsTab(props: {
   models: ModelView[]
   account: string | null
-  quota: AccountView['quota']
-  quotaAccount: string | null
   /** Model ids whose own toggle write is in flight; everything else stays live. */
   pending: ReadonlySet<string>
   /** Model ids whose own test call is in flight (see the per-row test button). */
@@ -709,8 +694,7 @@ function ModelsTab(props: {
   rpc: AgyRpcClient
   t: T
 }): ReactNode {
-  const { models, account, quota, quotaAccount, pending, testing, onToggle, onTestModel, rpc, t } = props
-  const [quotaOpen, setQuotaOpen] = useState(false)
+  const { models, account, pending, testing, onToggle, onTestModel, rpc, t } = props
 
   // Hooks MUST run unconditionally: an early `return` above any hook changes
   // this component's hook count between renders, and React's renderer state —
@@ -725,9 +709,6 @@ function ModelsTab(props: {
     return card(t('modelsTitle'), h('div', { className: 'agy-empty' }, t('emptyModels')))
   }
   const hidden = models.filter((model) => model.disabled).length
-  const quotaModels = quota?.models ?? []
-  // One clock reading per render, so every reset label in the list agrees.
-  const now = Date.now()
 
   // One normal row per model. A row is a plain grid, not a table: the switch is
   // the affordance and a table's column rules would fight the card's rhythm.
@@ -743,14 +724,15 @@ function ModelsTab(props: {
         ? null
         : h('div', { className: 'agy-rowmeta agy-mono' }, model.id)),
     h('div', { className: 'agy-rowactions' },
-      h('button', {
-        type: 'button',
-        className: 'agy-rowtest',
-        // Per-model state: the button under the click shows progress; every
-        // other row stays live. `busy` would freeze the whole tab again.
-        disabled: testing.has(model.id),
-        onClick: () => { onTestModel(model.id) },
-      }, testing.has(model.id) ? t('modelTesting') : t('actionTestModel')),
+      // The host `Button` at `ghost`, not a local class: this is a quiet action
+      // (one per row of a long list, so a filled capsule would read as many
+      // competing primary actions), and `ghost` is the host's own variant for
+      // exactly that weight. Styling it locally meant our own colors, radius and
+      // focus ring, which is how this row ended up looking unlike every other
+      // button in the panel.
+      button(testing.has(model.id) ? t('modelTesting') : t('actionTestModel'),
+        () => { onTestModel(model.id) },
+        { size: 'sm', variant: 'ghost', disabled: testing.has(model.id) }),
       h(Switch, {
         checked: !model.disabled,
         // Only THIS switch locks while its own write is in flight. The previous
@@ -762,30 +744,10 @@ function ModelsTab(props: {
         onChange: () => { onToggle(model.id, !model.disabled) },
       }))))
 
-  const quotaBlock = quotaModels.length === 0 ? null : h('div', {
-    className: 'agy-disclosure',
-    'data-open': quotaOpen,
-  },
-  h('button', {
-    type: 'button',
-    className: 'agy-disclosure-toggle',
-    'aria-expanded': quotaOpen,
-    onClick: () => { setQuotaOpen(!quotaOpen) },
-  },
-  h('span', { className: 'agy-caret' }),
-  h('span', null, t('quotaTitle')),
-  h('span', { className: 'agy-disclosure-meta' },
-    t('quotaModelCount', { count: quotaModels.length }))),
-  // Arrow-wrapped: `Array.map` would otherwise pass the index as `t`.
-  quotaOpen ? h('div', { className: 'agy-disclosure-body' }, ...quotaModels.map((row) => quotaRow(row, t, now))) : null)
-
   return h('div', { className: 'agy-root' },
     card(t('modelsTitle'), h('div', { className: 'agy-rows' }, ...rows),
       hidden > 0 ? t('modelsHiddenSuffix', { count: hidden }) : account ?? undefined),
     hint(t('modelsHelp')),
-    quotaBlock === null ? null : card(
-      quotaAccount === null ? t('quotaTitle') : `${t('quotaTitle')} · ${quotaAccount}`,
-      quotaBlock),
     h(ThinkingBudgetCard, { rpc, t }))
 }
 
@@ -806,6 +768,8 @@ function ModelsTab(props: {
 function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const { rpc, t } = props
   const [budgets, setBudgets] = useState<ThinkingBudgets>({})
+  const [claudeBudget, setClaudeBudget] = useState<number | null>(null)
+  const [claudeDraft, setClaudeDraft] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [open, setOpen] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
@@ -822,6 +786,8 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         const result = await rpc.call('thinking.get', {})
         if (!alive.current) return
         setBudgets(result.budgets)
+        setClaudeBudget(result.claudeBudget)
+        setClaudeDraft(result.claudeBudget === null ? '' : String(result.claudeBudget))
         // Drafts mirror the stored values as strings, so an in-progress edit is
         // never clobbered by a reload and an empty box stays empty.
         setDrafts(Object.fromEntries(
@@ -866,6 +832,26 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     })()
   }
 
+  const saveClaude = (raw: string): void => {
+    const trimmed = raw.trim()
+    const value = trimmed === '' ? null : Number(trimmed)
+    if (value !== null && !Number.isInteger(value)) {
+      setError(t('thinkingInvalid'))
+      return
+    }
+    void (async () => {
+      try {
+        const result = await rpc.call('thinking.setClaude', { budget: value })
+        if (!alive.current) return
+        setClaudeBudget(result.claudeBudget)
+        setError(undefined)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      }
+    })()
+  }
+
   const configured = THINKING_LEVELS.filter((level) => budgets[level] !== undefined).length
   const block = h('div', { className: 'agy-disclosure', 'data-open': open },
     h('button', {
@@ -898,9 +884,45 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
               const stored = budgets[level] === undefined ? '' : String(budgets[level])
               if (next.trim() !== stored) save(level, next)
             },
-          }))),
-        h('p', { className: 'agy-hint' },
-          t('thinkingHint', { min: THINKING_BUDGET_MIN, max: THINKING_BUDGET_MAX })))
+          }),
+          // The wire form for THIS level, right where the choice is made: the
+          // whole point of the setting is what goes out on the wire, and that
+          // differs per level once a budget is set.
+          h('span', { className: 'agy-thinking-wire' },
+            budgets[level] === undefined
+              ? t('thinkingWireLevel', { level })
+              : t('thinkingWireBudget', { budget: budgets[level] })))),
+        // What each level does by default, and what the upstream default is.
+        // Both are measured facts, not invented values: the official default is
+        // the `thinkingBudget` upstream itself reports for these ids.
+        h('div', { className: 'agy-thinking-notes' },
+          h('p', { className: 'agy-hint' }, t('thinkingHint', { min: THINKING_BUDGET_MIN, max: THINKING_BUDGET_MAX })),
+          h('p', { className: 'agy-hint' }, t('thinkingHintOfficial')),
+          h('p', { className: 'agy-hint' }, t('thinkingHintMinus1'))),
+        // Claude gets its own single field rather than three levels: the family is
+        // id-bound (each capability is its own model id, e.g.
+        // `claude-opus-4-6-thinking`), so there is no level to key by. Its
+        // interval also differs — floor 1024, and the request needs `max_tokens`
+        // strictly greater than the budget — which is why it validates separately.
+        h('div', { className: 'agy-thinking-claude' },
+          h('div', { className: 'agy-thinking-row' },
+            h('span', { className: 'agy-thinking-k' }, t('thinkingClaudeLabel')),
+            h(Input, {
+              value: claudeDraft,
+              placeholder: t('thinkingAuto'),
+              inputMode: 'numeric',
+              onChange: (event: { target: { value: string } }) => { setClaudeDraft(event.target.value) },
+              onBlur: (event: { target: { value: string } }) => {
+                const next = event.target.value
+                const stored = claudeBudget === null ? '' : String(claudeBudget)
+                if (next.trim() !== stored) saveClaude(next)
+              },
+            }),
+            h('span', { className: 'agy-thinking-wire' },
+              claudeBudget === null
+                ? t('thinkingWireNone')
+                : t('thinkingWireBudget', { budget: claudeBudget }))),
+          h('p', { className: 'agy-hint' }, t('thinkingClaudeHint', { min: CLAUDE_BUDGET_MIN, max: CLAUDE_BUDGET_MAX }))))
       : null)
 
   return card(t('thinkingTitle'), block)
@@ -945,22 +967,28 @@ function numHeader(index: number, label: string): ReactNode {
 /**
  * The Token composition bar rows: cache read, uncached input, output.
  *
- * Ordered LARGEST FIRST by the caller. A plain-prefix cache makes the cache-read
- * share dominate (it re-reads the whole prefix every turn), which is correct but
- * reads as impossible without a breakdown — hence this bar, which shows the
- * proportion rather than restating the numbers.
+ * A plain-prefix cache makes the cache-read share dominate (it re-reads the whole
+ * prefix every turn), which is correct but reads as impossible without a
+ * breakdown — hence this bar, which shows the proportion rather than restating
+ * the numbers.
+ *
+ * `labelKey` and `id` are SEPARATE fields on purpose. A single `key` field used
+ * for both the i18n lookup and React's `key` prop is how the label position ended
+ * up rendering the raw dictionary key (`kpiCacheRead`) to every user: the value
+ * served React correctly, so nothing failed, and the same variable was then
+ * handed to the label span. Two names make that mix-up impossible.
  */
-function tokenComposition(counters: UsageCounters): ReactNode {
+function tokenComposition(counters: UsageCounters, t: T): ReactNode {
   const total = totalTokens(counters)
-  const rows: Array<{ key: string, value: number, tone: string }> = [
-    { key: 'kpiCacheRead', value: counters.cacheRead, tone: 'var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6)' },
-    { key: 'kpiInput', value: counters.input, tone: 'var(--dsw-static-neutral-bluish-700, #8b8f96)' },
-    { key: 'kpiOutput', value: counters.output, tone: 'var(--dsw-alias-state-success-primary, #22c55e)' },
+  const rows: Array<{ id: string, labelKey: AgyLocaleKey, value: number, tone: string }> = [
+    { id: 'cacheRead', labelKey: 'kpiCacheRead', value: counters.cacheRead, tone: 'var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6)' },
+    { id: 'input', labelKey: 'kpiInput', value: counters.input, tone: 'var(--dsw-static-neutral-bluish-700, #8b8f96)' },
+    { id: 'output', labelKey: 'kpiOutput', value: counters.output, tone: 'var(--dsw-alias-state-success-primary, #22c55e)' },
   ]
   return h('div', { className: 'agy-compose' }, ...rows.map((row) => {
     const share = total > 0 ? (row.value / total) * 100 : 0
-    return h('div', { className: 'agy-compose-row', key: row.key },
-      h('span', { className: 'agy-compose-k' }, row.key),
+    return h('div', { className: 'agy-compose-row', key: row.id },
+      h('span', { className: 'agy-compose-k' }, t(row.labelKey)),
       h('span', { className: 'agy-compose-track' },
         h('i', { style: { width: `${Math.max(share, row.value > 0 ? 1 : 0)}%`, background: row.tone } })),
       h('span', { className: 'agy-compose-v' }, tokenText(row.value)),
@@ -988,7 +1016,6 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
   const counters = view.counters
   const hit = cacheHitPercent(counters)
   const total = totalTokens(counters)
-  const totalRequests = Math.max(1, view.models.reduce((sum, row) => sum + row.counters.requests, 0))
 
   // The primitives catalog names `Pill` for view switchers and filters: it owns
   // the active/inactive fill pair, so no local chip skin is needed.
@@ -1023,7 +1050,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
         hit === null ? t('kpiNoBilledInput') : t('kpiCacheHit', { percent: hit })),
       metric(t('kpiOutput'), counters.output, t('kpiOutputDetail')),
     ]),
-    tokenComposition(counters)))
+    tokenComposition(counters, t)))
 
   const timing = card(t('fieldLatency'), defs([
     [t('fieldCacheWrite'), tokenText(counters.cacheWrite)],
@@ -1270,7 +1297,6 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     }
   }, [rpc])
 
-  useEffect(() => { void refresh() }, [refresh])
   // Models load up front, not on first visit to the Models tab: the tab badge is
   // rendered from this list, so lazy loading made the count appear only after
   // the user had already been there, and left it stale after account changes.
@@ -1298,38 +1324,6 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
       if (alive.current) setBusy(false)
     }
   }, [refresh])
-
-  /**
-   * The active account's quota, fetched on its own.
-   *
-   * It used to ride on `account.list`, which made the accounts list wait on an
-   * upstream probe; a slow network then showed "no accounts" behind a permanent
-   * spinner. It is loaded separately now, and only when the Model tab is opened
-   * (see the effect below), so nothing else waits on it.
-   */
-  const [activeQuota, setActiveQuota] = useState<AccountView['quota']>(null)
-  const [activeQuotaAccount, setActiveQuotaAccount] = useState<string | null>(null)
-
-  const loadQuota = useCallback(async () => {
-    try {
-      const result = await rpc.call('account.quota', {})
-      if (!alive.current) return
-      setActiveQuota(result.quota)
-      setActiveQuotaAccount(result.account)
-    } catch {
-      // A quota panel that cannot load is a legitimate state, never an error
-      // banner: the account list and usage figures are unaffected by it.
-      if (!alive.current) return
-      setActiveQuota(null)
-    }
-  }, [rpc])
-
-  useEffect(() => {
-    // Quota is fetched when — and only when — the Model tab is shown. Nothing
-    // else depends on it, so keeping it off the initial load and off the
-    // accounts path is what stops a slow upstream probe from delaying them.
-    if (tab === 'models') void loadQuota()
-  }, [tab, loadQuota])
 
   const startLogin = useCallback(() => {
     setBusy(true)
@@ -1415,8 +1409,6 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
           // ("which models can I use, how much is left"), so it lives here. It is
           // read from the active account's row, which is the only one the host
           // queries (see management.ts listAccounts).
-          quota: activeQuota,
-          quotaAccount: activeQuotaAccount,
           pending: toggling,
           testing: modelTesting,
           rpc,
@@ -1533,15 +1525,15 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         h('div', { className: 'agy-title' }, 'Antigravity'),
         h('div', { className: 'agy-sub' }, t('subtitle'))),
       h('div', { className: 'agy-toolbar' },
+        // Both header actions use the host's `outline` variant — the same one
+        // Refresh already used. They are equal-weight utility actions, so they
+        // must look identical; an earlier pass gave Login `toolbar` (a filled
+        // variant) to avoid the near-white `primary` slab, which fixed that
+        // button but left the pair visibly mismatched. Copying Refresh is the
+        // correct answer: `outline` is a bordered transparent capsule that reads
+        // correctly in both themes, and it needs no token reasoning of ours.
         button(t('refresh'), () => { void refresh() }, { size: 'sm', disabled: busy }),
-        // `primary` is the host's INVERTED capsule — under the dark theme
-        // `--dsw-alias-button-primary-fill` resolves through `brand-primary` to
-        // `--dsw-static-neutral-bluish-50` (#f9fafb), i.e. a near-white pill with
-        // near-black text. That is correct for a page's single primary action,
-        // but this is one of two equal-weight header/utility actions sitting
-        // beside Refresh, where a white slab reads as a rendering fault. The
-        // `toolbar` family is the host's own token set for exactly this slot.
-        button(t('login'), startLogin, { size: 'sm', variant: 'toolbar', disabled: busy }))),
+        button(t('login'), startLogin, { size: 'sm', disabled: busy }))),
     h('div', { className: 'agy-tabs' },
       tabButton('accounts', t('tabAccounts'), accounts.length),
       tabButton('models', t('tabModels'), models.length > 0 ? models.length : undefined),

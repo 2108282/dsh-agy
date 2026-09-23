@@ -102,6 +102,8 @@ function makeHarness(options: {
     thinkingBudget: {
       all: () => thinkingBudget.all(),
       set: (level, value) => thinkingBudget.setBudget(level, value),
+      claude: () => thinkingBudget.claudeBudget(),
+      setClaude: (value) => thinkingBudget.setClaudeBudget(value).claudeBudget,
     },
     notifyModelsChanged: () => { notifications += 1 },
     listAllModels: async () => options.models ?? [
@@ -352,6 +354,37 @@ describe('agy management RPC', () => {
       expect(alsoCleared.budgets).toEqual({})
     })
 
+    it('sets, reads and clears the Claude budget', async () => {
+      // Claude has no levels (each capability is its own model id), so it gets a
+      // single value with its OWN interval: floor 1024, not -1.
+      const { management } = makeHarness()
+      const initial = await management.call('thinking.get', {}) as {
+        claudeBudget: number | null
+        claudeMin: number
+        claudeMax: number
+      }
+      expect(initial.claudeBudget).toBeNull()
+      expect(initial.claudeMin).toBe(1024)
+      expect(initial.claudeMax).toBe(63999)
+
+      const set = await management.call('thinking.setClaude', { budget: 16384 }) as { claudeBudget: number | null }
+      expect(set.claudeBudget).toBe(16384)
+      expect((await management.call('thinking.get', {}) as { claudeBudget: number | null }).claudeBudget).toBe(16384)
+
+      // -1 and 0 are accepted as special values by the validator.
+      expect((await management.call('thinking.setClaude', { budget: -1 }) as { claudeBudget: number | null }).claudeBudget).toBe(-1)
+      // Clearing is its own action.
+      expect((await management.call('thinking.setClaude', { budget: null }) as { claudeBudget: number | null }).claudeBudget).toBeNull()
+    })
+
+    it('rejects a Claude budget below its own floor', async () => {
+      // The tiered interval allows -1 and 1; Claude's floor is 1024, so the two
+      // must not share a validator.
+      const { management } = makeHarness()
+      await expect(management.call('thinking.setClaude', { budget: 512 })).rejects.toThrow(/1024/)
+      await expect(management.call('thinking.setClaude', { budget: 64000 })).rejects.toThrow(/63999/)
+      await expect(management.call('thinking.setClaude', { budget: '100' })).rejects.toThrow(/must be a number/)
+    })
     it('rejects out-of-range values with the upstream interval in the message', async () => {
       // Upstream answers 400 naming this range, so rejecting it here turns a
       // per-request failure into a save-time message.
@@ -548,108 +581,6 @@ describe('agy management RPC', () => {
     })
   })
 
-  describe('quota rows', () => {
-    /** Answer model discovery with the given per-model quota fractions. */
-    function stubDiscovery(models: Record<string, number | null>): void {
-      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
-        models: Object.fromEntries(Object.entries(models).map(([id, fraction]) => [
-          id,
-          fraction === null ? {} : { quotaInfo: { remainingFraction: fraction } },
-        ])),
-      }), { status: 200 })))
-    }
-
-    /** The active account must carry an access token for quota to be queried. */
-    function quotaHarness(): Harness {
-      const harness = makeHarness({
-        session: { index: 0, account: account(), auth: { access: 'at' } },
-      })
-      return harness
-    }
-
-    it('sorts models with no reported fraction LAST, not first', async () => {
-      // Regression: an unreported fraction was mapped to a -1 sentinel, which
-      // sorted a block of "—" rows above genuinely low-quota models. Unknown
-      // headroom is not empty headroom.
-      stubDiscovery({ plenty: 0.9, unknown: null, nearlyOut: 0.05 })
-      const { quota } = await quotaHarness().management.call('account.quota', {}) as {
-        quota: { models: Array<{ id: string }> } | null
-      }
-      const ids = quota!.models.map((row) => row.id)
-      expect(ids).toEqual(['nearlyOut', 'plenty', 'unknown'])
-    })
-
-    it('hides the non-chat ids the model list hides', async () => {
-      // Regression, visible in a real account's quota panel: `chat_23310`,
-      // `tab_flash_lite_preview` and `gemini-3.1-flash-image` were listed even
-      // though none of them can serve a chat request. The quota panel now
-      // consumes the same visibility rule as the model list.
-      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
-        models: {
-          'gemini-3.5-flash': { quotaInfo: { remainingFraction: 1 } },
-          // tab_-prefixed: dropped by the prefix rule alone.
-          'tab_flash_lite_preview': { quotaInfo: { remainingFraction: 1 } },
-          // tab_-less tab id: only the payload's role list knows it is a tab
-          // model (live accounts really do return `chat_20706`-style ids).
-          'chat_23310': { quotaInfo: { remainingFraction: 1 } },
-          // image role: only the payload's role list knows it.
-          'gemini-3.1-flash-image': { quotaInfo: { remainingFraction: 1 } },
-        },
-        tabModelIds: ['chat_23310', 'tab_flash_lite_preview'],
-        imageGenerationModelIds: ['gemini-3.1-flash-image'],
-      }), { status: 200 })))
-      const { quota } = await quotaHarness().management.call('account.quota', {}) as {
-        quota: { models: Array<{ id: string }>, modelCount: number } | null
-      }
-      const ids = quota!.models.map((row) => row.id)
-      expect(ids).toEqual(['gemini-3.5-flash'])
-      expect(quota!.modelCount).toBe(1)
-    })
-
-    it('never blocks account.list on the upstream quota probe', async () => {
-      // Regression: `account.list` embedded the quota probe, so a slow network
-      // held the whole reply. The client's paired refresh then showed "no
-      // accounts" plus a permanent spinner — a transient blip that looked like
-      // lost data. The probe must not run at all on this path.
-      const harness = quotaHarness()
-      let quotaProbed = false
-      vi.stubGlobal('fetch', vi.fn(async () => {
-        quotaProbed = true
-        // Never resolves within the test: if account.list awaits this, it hangs.
-        return new Promise<Response>(() => {})
-      }))
-      const { accounts } = await harness.management.call('account.list', {}) as {
-        accounts: Array<{ quota: unknown }>
-      }
-      expect(accounts).toHaveLength(1)
-      expect(accounts[0]!.quota).toBeNull()
-      expect(quotaProbed).toBe(false)
-    })
-
-    it('reports no quota panel rather than an error when the probe fails', async () => {
-      // A quota panel that cannot load is a legitimate state, and it must not
-      // surface as an error banner: the accounts list and usage are unaffected.
-      vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down') }))
-      const { quota, account: owner } = await quotaHarness().management.call('account.quota', {}) as {
-        quota: unknown
-        account: string | null
-      }
-      expect(quota).toBeNull()
-      // The owning account is still reported, so the panel can name it.
-      expect(owner).toBe('a@x.com')
-    })
-
-    it('clamps a fraction outside 0..1 rather than rendering a broken bar', async () => {
-      stubDiscovery({ over: 4, under: -3 })
-      const { quota } = await quotaHarness().management.call('account.quota', {}) as {
-        quota: { models: Array<{ id: string, remainingFraction: number | null }> } | null
-      }
-      const fractions = Object.fromEntries(
-        quota!.models.map((row) => [row.id, row.remainingFraction]),
-      )
-      expect(fractions).toEqual({ over: 1, under: 0 })
-    })
-  })
 
   describe('proxy', () => {
     it('normalizes a saved proxy and never returns it raw', async () => {

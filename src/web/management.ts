@@ -22,19 +22,18 @@ import type { DiscoveredModelEntry } from '../adapter/models.ts'
 import { clearExpiredState } from '../runtime/rotation.ts'
 import { foldWindowBreakdown } from '../stats.ts'
 import { THINKING_BUDGET_MAX, THINKING_BUDGET_MIN } from '../thinking-budget.ts'
+import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN } from '../thinking-types.ts'
 import type { UsageCounters, UsageSource } from '../stats.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { AgySessionManager } from '../session.ts'
 import type { ModelVisibility } from '../model-visibility.ts'
 import type { UsageStats } from '../stats.ts'
 import type {
-  AccountQuota,
   AccountState,
   AccountUsageView,
   AccountView,
   AgyRpcMethod,
   ModelView,
-  QuotaRow,
   RangeBreakdown,
   StatsView,
   ThinkingBudgets,
@@ -60,6 +59,8 @@ export interface AgyManagementOptions {
   thinkingBudget: {
     all: () => ThinkingBudgets
     set: (level: string, value: number | undefined) => ThinkingBudgets
+    claude: () => number | undefined
+    setClaude: (value: number | undefined) => number | undefined
   }
   /**
    * The adapter's *unfiltered* model catalog.
@@ -101,74 +102,21 @@ function asIndex(payload: unknown): number {
 }
 
 /**
- * Total budget for the quota probe embedded in `account.list`.
+ * Flatten one account's ledger entry for transport.
  *
- * Deliberately modest and never fatal: a quota panel that cannot load is a
- * legitimate page state (`quotaFor` returns null), while a slow probe must not
- * hold the accounts list hostage. Matches the session manager's own quota
- * timeout for the same upstream call.
+ * `models` and `lastUsedAt` are deliberately NOT carried: the per-model table
+ * that read `models` was removed (the cumulative metric strip states the same
+ * figures better), and the `lastUsedAt` ordering rule went with it. Sending
+ * fields no client reads is a wire surface with no consumer, which reads as
+ * intentional to the next person and invites a stale assumption.
  */
-const QUOTA_QUERY_BUDGET_MS = 3_000
-
-/** Best-effort quota for one account, via the account's own proxy. */
-async function quotaFor(
-  account: { proxy?: string },
-  projectId: string | undefined,
-  access: string | undefined,
-): Promise<AccountQuota | null> {
-  // Without a usable access token there is nothing to ask; a missing quota
-  // panel is a legitimate state, not an error.
-  if (access === undefined || access === '') return null
-  try {
-    const { fetchAvailableModels, chatCallableDiscoveredIds } = await import('../adapter/models.ts')
-    // A hard ceiling: this runs inside `account.list`, which gates the whole
-    // accounts+usage view. `fetchAvailableModels` walks four endpoints in
-    // series on per-gap timers, so without a total budget a slow network held
-    // the RPC for minutes and the UI showed "no accounts" + a permanent
-    // "loading" — a transient blip looked like lost data.
-    const discovered = await fetchAvailableModels(
-      access,
-      projectId,
-      withTotalTimeout(accountFetch({ proxyUrl: account.proxy }), QUOTA_QUERY_BUDGET_MS),
-    )
-    // Same visibility rule as the model list (`mergeModelCatalog` consumes the
-    // same helper): drop the tab_/role/deprecated ids upstream files as
-    // non-chat. Without this the quota panel listed `chat_23310`, `tab_*`
-    // previews and the image model — ids that can never serve a chat request.
-    const all = discovered.models ?? {}
-    const models = chatCallableDiscoveredIds(discovered)
-      .map((id) => [id, all[id]] as const)
-      .filter((entry): entry is [string, DiscoveredModelEntry] => entry[1] !== undefined)
-    if (models.length === 0) return null
-    const rows: QuotaRow[] = models
-      .map(([id, model]) => ({
-        id,
-        remainingFraction: typeof model.quotaInfo?.remainingFraction === 'number'
-          ? Math.max(0, Math.min(1, model.quotaInfo.remainingFraction))
-          : null,
-        resetTime: model.quotaInfo?.resetTime ?? null,
-      }))
-      // Most-constrained first, so the models about to run out lead. A model the
-      // endpoint reported no fraction for sorts LAST: its headroom is unknown,
-      // not empty, and mapping it to a sentinel below every real value used to
-      // put a block of "—" rows above genuinely low-quota models.
-      .sort((a, b) => (a.remainingFraction ?? 2) - (b.remainingFraction ?? 2))
-    return { modelCount: models.length, models: rows }
-  } catch {
-    // A quota panel that cannot load is not an errored page.
-    return null
-  }
-}
-
 function toAccountUsageView(
-  usage: { totals: UsageCounters; models: Record<string, UsageCounters>; sources: Record<UsageSource, number>; lastUsedAt: number } | undefined,
+  usage: { totals: UsageCounters; sources: Record<UsageSource, number> } | undefined,
 ): AccountUsageView | null {
   if (usage === undefined) return null
   return {
     totals: usage.totals,
-    models: Object.entries(usage.models).map(([model, counters]) => ({ model, counters })),
     sources: usage.sources,
-    lastUsedAt: usage.lastUsedAt,
   }
 }
 
@@ -253,7 +201,6 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
           : null,
         fingerprintHistory: (account.fingerprintHistory ?? []).length,
         proxy: account.proxy ? maskProxyUrl(account.proxy) : null,
-        quota: null,
         // Read from the cache the session manager already refreshes alongside the
         // per-model quota, so showing the windows costs no request. Null means
         // "never measured" and renders as an explicit placeholder rather than a
@@ -263,31 +210,13 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         usage: key === undefined ? null : toAccountUsageView(ledger.accounts[key]),
       })
     }
-    // Quota is deliberately NOT fetched here. It costs an upstream round trip,
-    // and embedding it in this reply meant the accounts list (and, via the
-    // client's paired refresh, the usage tab) could not render until that probe
-    // finished — on a slow network the panel showed "no accounts" behind a
-    // permanent spinner, indistinguishable from data loss. The Model tab asks
-    // for it with `account.quota`, where a missing panel is a valid state.
+    // Per-model quota is deliberately NOT fetched here (nor anywhere else): it
+    // costs an upstream round trip, and embedding it in this reply once meant the
+    // accounts list could not render until that probe finished — on a slow
+    // network the panel showed "no accounts" behind a permanent spinner,
+    // indistinguishable from data loss. The grouped 5h/weekly windows are the
+    // surviving quota display, and they arrive via `account.limits`.
     return rows
-  }
-
-  /** Quota for the account that would serve a request, or null when unavailable. */
-  const activeQuota = async (): Promise<{
-    account: string | null
-    quota: AccountQuota | null
-  }> => {
-    const session = await sessions.getSession().catch(() => undefined)
-    if (session === undefined) return { account: null, quota: null }
-    // Only the active account is queried: it is the one whose quota decides
-    // whether a request can be served, and polling the whole pool on every view
-    // would multiply upstream traffic for no extra truth.
-    const quota = await quotaFor(
-      session.account,
-      session.account.projectId,
-      session.auth.access,
-    )
-    return { account: session.account.email ?? null, quota }
   }
 
   /** Fold the ledger into the Usage tab's view. */
@@ -364,8 +293,6 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       const indices = Array.isArray(raw) ? raw.map((value) => Number(value)) : undefined
       return { results: await sessions.checkAccounts(indices) }
     },
-
-    'account.quota': async () => activeQuota(),
 
     /**
      * Refresh and return the 5h/weekly windows for every enabled account.
@@ -568,7 +495,22 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       budgets: thinkingBudget.all(),
       min: THINKING_BUDGET_MIN,
       max: THINKING_BUDGET_MAX,
+      claudeBudget: thinkingBudget.claude() ?? null,
+      claudeMin: CLAUDE_BUDGET_MIN,
+      claudeMax: CLAUDE_BUDGET_MAX,
     }),
+
+    'thinking.setClaude': async (payload) => {
+      const body = payload as { budget?: unknown } | undefined
+      const raw = body?.budget
+      if (raw !== undefined && raw !== null && typeof raw !== 'number') fail('budget must be a number')
+      try {
+        const value = thinkingBudget.setClaude(raw === undefined || raw === null ? undefined : raw)
+        return { claudeBudget: value ?? null }
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    },
 
     'thinking.set': async (payload) => {
       const body = payload as { level?: unknown; budget?: unknown } | undefined

@@ -24,25 +24,6 @@ export type { ThinkingBudgets, ThinkingLevel } from './thinking-types.ts'
 /** Account lifecycle state as the UI presents it. */
 export type AccountState = 'active' | 'cooling' | 'verification-required' | 'disabled'
 
-/**
- * The active account's quota panel: per-model rows from `fetchAvailableModels`.
- *
- * A named type because the panel is served by its own `account.quota` call now,
- * and null is a legitimate value (unqueried, or the endpoint reported nothing).
- */
-export interface AccountQuota {
-  modelCount: number
-  models: QuotaRow[]
-}
-
-/** One model's quota row (from `fetchAvailableModels`). */
-export interface QuotaRow {
-  id: string
-  /** 0..1, or null when the endpoint reported no fraction for this model. */
-  remainingFraction: number | null
-  resetTime: string | null
-}
-
 /** One account row. Mirrors the /agy dashboard's shape, minus stored secrets. */
 export interface AccountView {
   index: number
@@ -83,24 +64,17 @@ export interface AccountView {
   /** Masked proxy (`protocol//host:port`), never credentials. */
   proxy: string | null
   /**
-   * Always null in an `account.list` reply.
-   *
-   * Quota is no longer embedded here: it costs an upstream round trip, and
-   * gating the accounts list on it meant a slow network showed "no accounts"
-   * with a permanent spinner. The Model tab fetches it separately via
-   * `account.quota`, where a missing panel is a legitimate state.
-   */
-  quota: AccountQuota | null
-  /**
-   * Grouped 5-hour / weekly windows for this account, or null when never
+   * Grouped 5-hour / weekly windows for this account, or null when not yet
    * measured.
    *
-   * Distinct from `quota`: that is per-MODEL and answers "which model is nearly
-   * drained" for the model picker, while these are upstream's per-GROUP windows
-   * (Gemini vs Claude+GPT) and are what a user reads to see how much of the
-   * rolling budget is left. They come from a different endpoint
-   * (`retrieveUserQuotaSummary`) and are refreshed alongside the per-model quota
-   * by the session manager, so no extra request is issued to show them.
+   * These are upstream's per-GROUP windows (Gemini vs Claude+GPT), from
+   * `retrieveUserQuotaSummary` — a different endpoint from the per-model
+   * `quotaInfo` that feeds rotation. They are refreshed by a SEPARATE call
+   * (`account.limits`, backed by `session.refreshLimits`) rather than riding the
+   * scheduling quota refresh: that one is skipped for a solo pool because writing
+   * its cache can block the only account, which is exactly why the windows are
+   * fetched on a path that touches `cachedLimits` alone. So this arrives on its
+   * own request, not with `account.list`.
    */
   limits: QuotaGroup[] | null
   /** When `limits` was measured (Unix ms), or null when never. */
@@ -109,12 +83,17 @@ export interface AccountView {
   usage: AccountUsageView | null
 }
 
-/** One account's ledger, flattened for transport. */
+/**
+ * One account's ledger, flattened for transport.
+ *
+ * Only the two fields the account detail actually renders. `models` and
+ * `lastUsedAt` were carried here with no reader — the per-model table that used
+ * the former was removed, and the ordering rule that used the latter went with
+ * it — so they are gone rather than left as a wire surface nobody consumes.
+ */
 export interface AccountUsageView {
   totals: UsageCounters
-  models: Array<{ model: string; counters: UsageCounters }>
   sources: Record<UsageSource, number>
-  lastUsedAt: number
 }
 
 /** A model row in the Model tab. */
@@ -179,10 +158,6 @@ export interface AgyRpcMethods {
   'account.delete': { payload: { index: number }; result: { ok: true } }
   'account.verify': { payload: { index: number }; result: { ok: boolean; email?: string; error?: string } }
   'account.health': { payload: { indices?: number[] }; result: { results: unknown[] } }
-  'account.quota': {
-    payload: Record<string, never>
-    result: { account: string | null; quota: AccountQuota | null }
-  }
   /**
    * Refresh and return the 5h/weekly windows for every enabled account.
    *
@@ -245,7 +220,16 @@ export interface AgyRpcMethods {
    */
   'thinking.get': {
     payload: Record<string, never>
-    result: { budgets: ThinkingBudgets; min: number; max: number }
+    result: {
+      budgets: ThinkingBudgets
+      min: number
+      max: number
+      /** Claude-family budget (a single value; the family is id-bound). */
+      claudeBudget: number | null
+      /** Claude's own accepted interval, which differs from the tiered one. */
+      claudeMin: number
+      claudeMax: number
+    }
   }
   /**
    * Set or clear one level's budget.
@@ -258,6 +242,17 @@ export interface AgyRpcMethods {
   'thinking.set': {
     payload: { level: string; budget?: number | null }
     result: { budgets: ThinkingBudgets }
+  }
+  /**
+   * Set or clear the Claude thinking budget.
+   *
+   * Its own call rather than a `level` value on `thinking.set`, because Claude
+   * has no levels and validates differently (floor 1024, and the request needs
+   * `max_tokens` strictly greater than the budget).
+   */
+  'thinking.setClaude': {
+    payload: { budget?: number | null }
+    result: { claudeBudget: number | null }
   }
   'stats.get': { payload: Record<string, never>; result: StatsView }
 }

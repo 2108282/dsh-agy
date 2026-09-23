@@ -392,6 +392,14 @@ export function toAgyRequestBody(
      * silently inert, which is worse than not offering the setting.
      */
     thinkingBudgetFor?: (level: string) => number | undefined
+    /**
+     * The configured Claude thinking budget, or undefined when unset.
+     *
+     * A single value, not a per-level map: the Claude family is id-bound (each
+     * capability is its own model id with no level selector), so there is no
+     * level to key by.
+     */
+    claudeBudgetFor?: () => number | undefined
   },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
@@ -417,7 +425,10 @@ export function toAgyRequestBody(
   }
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
-  // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.
+  // Id-bound models (thinking !== 'level') never emit it, and a tiered model
+  // emits NOTHING when no effort is requested — there is deliberately no default
+  // level, because "no level chosen" is what lets the model allocate its own
+  // thinking (see `LEVEL_REASONING` for why declaring a default broke that).
   // When purpose is 'session-title' or reasoning is off, thinkingBudget: 0 prevents
   // default thinking tokens from exhausting tight output caps (e.g. maxTokens: 64).
   const effort = options.reasoningEffort?.toLowerCase()
@@ -431,6 +442,24 @@ export function toAgyRequestBody(
       generationConfig.thinkingConfig = configured === undefined
         ? { thinkingLevel: effort, includeThoughts: true }
         : { thinkingBudget: configured, includeThoughts: true }
+    }
+  } else if (claude && options.purpose !== 'session-title') {
+    // Claude thinking models are id-bound (no level selector), so their budget is
+    // a single configured value rather than one per level. Measured constraints,
+    // all of which must hold or the request is a 400:
+    //   - `max_tokens` must be STRICTLY greater than the budget. `budget=1024`
+    //     with `max_tokens=1024` is rejected, and so is a budget sent with no
+    //     `maxOutputTokens` at all.
+    //   - the floor is 1024 (not `-1`); the store validates that on save.
+    // So a budget that does not leave room is DROPPED rather than forced through
+    // by raising `maxTokens`: silently enlarging the caller's output cap would
+    // change the request's cost and truncation behaviour, while omitting the
+    // budget merely means this turn thinks with upstream's default. A 400 would
+    // be worse than either.
+    const claudeBudget = context.claudeBudgetFor?.()
+    const outputCap = generationConfig.maxOutputTokens
+    if (claudeBudget !== undefined && outputCap !== undefined && outputCap > claudeBudget) {
+      generationConfig.thinkingConfig = { thinkingBudget: claudeBudget, includeThoughts: true }
     }
   }
 

@@ -1042,6 +1042,54 @@ describe('models', () => {
     )
     expect(idBound.request.generationConfig?.thinkingConfig).toBeUndefined()
   })
+
+  it('sends a Claude budget only when max_tokens leaves room above it', () => {
+    // Measured on this channel: Claude rejects a budget that is not STRICTLY
+    // below `max_tokens` (`budget=1024, max_tokens=1024` is a 400), and it also
+    // rejects a budget sent with no `maxOutputTokens` at all. So the guard is the
+    // difference between a working setting and a 400 on every request.
+    const withClaudeBudget = (maxTokens: number | undefined): unknown =>
+      toAgyRequestBody(
+        generateOptions({ model: 'claude-opus-4-6-thinking', ...(maxTokens === undefined ? {} : { maxTokens }) }),
+        { claudeBudgetFor: () => 16384 },
+      ).request.generationConfig?.thinkingConfig
+
+    // Room above the budget: sent.
+    expect(withClaudeBudget(64_000)).toEqual({ thinkingBudget: 16384, includeThoughts: true })
+    // Exactly equal is NOT enough (strictly greater is required).
+    expect(withClaudeBudget(16_384)).toBeUndefined()
+    // Below the budget: dropped rather than raising the caller's cap.
+    expect(withClaudeBudget(1024)).toBeUndefined()
+    // No output cap at all: also dropped.
+    expect(withClaudeBudget(undefined)).toBeUndefined()
+  })
+
+  it('leaves a Claude request untouched when no budget is configured', () => {
+    // The shipped default must change nothing: no budget means the request keeps
+    // upstream's own thinking behaviour.
+    const body = toAgyRequestBody(
+      generateOptions({ model: 'claude-opus-4-6-thinking', maxTokens: 64_000 }),
+      { claudeBudgetFor: () => undefined },
+    )
+    expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
+    // And the resolver being absent entirely behaves the same way.
+    const absent = toAgyRequestBody(
+      generateOptions({ model: 'claude-opus-4-6-thinking', maxTokens: 64_000 }),
+      {},
+    )
+    expect(absent.request.generationConfig?.thinkingConfig).toBeUndefined()
+  })
+
+  it('never sends a Claude budget on a session-title request', () => {
+    // Session titles run with a tiny output cap, so a large budget would be
+    // dropped by the room check anyway — but the purpose check keeps the
+    // behaviour explicit rather than incidental.
+    const body = toAgyRequestBody(
+      generateOptions({ model: 'claude-opus-4-6-thinking', purpose: 'session-title' as any, maxTokens: 64_000 }),
+      { claudeBudgetFor: () => 16384 },
+    )
+    expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
+  })
 })
 
 describe('buildRequestHeaders', () => {

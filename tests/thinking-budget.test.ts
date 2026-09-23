@@ -76,15 +76,45 @@ describe('thinking budget store', () => {
     expect(sanitizeThinkingBudgets([1, 2])).toEqual({})
   })
 
-  it('sees a concurrent writer rather than serving a stale copy', () => {
+  it('sees a concurrent writer once its revalidation window elapses', () => {
     // Two instances coexist in one process (main plugin + web entry); the editor
     // writes while the generation path reads, so a stale read would make the
     // setting appear to do nothing until restart.
+    //
+    // The reader's throttle is 0 here so the cross-instance write is visible
+    // immediately; the default window is asserted separately below, because "how
+    // long a hot-path read may serve a stale copy" is itself worth pinning.
     const file = scratch()
-    const reader = new ThinkingBudgetStore({ file })
+    const reader = new ThinkingBudgetStore({ file, revalidateIntervalMs: 0 })
     expect(reader.budgetFor('high')).toBeUndefined()
     new ThinkingBudgetStore({ file }).setBudget('high', 8192)
     expect(reader.budgetFor('high')).toBe(8192)
+  })
+
+  it('serves the in-memory copy inside the revalidation window', () => {
+    // The hot path must not touch disk per request. A reader that just
+    // revalidated keeps its copy even though the file changed underneath it —
+    // that is the throttle working, not a bug.
+    const file = scratch()
+    const reader = new ThinkingBudgetStore({ file, revalidateIntervalMs: 60_000 })
+    expect(reader.budgetFor('high')).toBeUndefined()
+    new ThinkingBudgetStore({ file }).setBudget('high', 8192)
+    expect(reader.budgetFor('high')).toBeUndefined()
+    // A reader whose window has elapsed picks the change up on its next read.
+    expect(new ThinkingBudgetStore({ file }).budgetFor('high')).toBe(8192)
+  })
+
+  it('never lets the throttle drop a concurrent write', () => {
+    // The write path bypasses the throttle on purpose: merging into a
+    // throttled-skipped stale copy would silently discard the other instance's
+    // edit, which is exactly what the re-read exists to prevent.
+    const file = scratch()
+    const a = new ThinkingBudgetStore({ file, revalidateIntervalMs: 60_000 })
+    const b = new ThinkingBudgetStore({ file, revalidateIntervalMs: 60_000 })
+    a.setBudget('low', 1000)
+    b.setBudget('high', 8192)
+    // Both edits survive: `b` re-read `a`'s write before mutating.
+    expect(new ThinkingBudgetStore({ file }).all()).toEqual({ low: 1000, high: 8192 })
   })
 
   it('validates the shared interval definition', () => {

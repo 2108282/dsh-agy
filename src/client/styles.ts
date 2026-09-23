@@ -156,20 +156,6 @@ const CSS = `
 /* margin-left: auto right-aligns the cluster while it shares a line with the
    identity, and becomes inert once flex-wrap moves it to its own line. */
 .agy-rowactions { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
-/* Per-model test: a quiet text button, not a capsule — one per row of a long
-   list, so a solid Button would read as five competing primary actions. */
-.agy-rowtest {
-  border: 0; padding: 2px 4px; background: transparent; cursor: pointer;
-  font: var(--dsw-font-xxs-12);
-  color: var(--dsw-alias-state-business-primary, #4176e6);
-  border-radius: 6px;
-}
-.agy-rowtest:hover:not(:disabled) { color: var(--dsw-alias-label-primary, #1f2329); }
-.agy-rowtest:disabled { cursor: default; opacity: 0.55; }
-.agy-rowtest:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary, #4176e6);
-  outline-offset: 1px;
-}
 .agy-state { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 
 .agy-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -249,10 +235,15 @@ const CSS = `
    width-capped so the empty state reads as "no value set" rather than as a wide
    field waiting to be filled. */
 .agy-thinking-row {
-  display: grid; grid-template-columns: 64px minmax(0, 200px);
+  display: grid; grid-template-columns: 64px minmax(0, 200px) minmax(0, 1fr);
   align-items: center; gap: 10px; padding: 5px 0;
 }
 .agy-thinking-k { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary, #61666b); }
+/* What this level actually sends. Placed inline with the input because the
+   wire form IS the setting's effect, and it changes as soon as a budget is set. */
+.agy-thinking-wire { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
+.agy-thinking-notes { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.agy-thinking-notes .agy-hint { margin: 0; }
 .agy-disclosure-meta { margin-left: auto; font: var(--dsw-font-xxxs-11);
   color: var(--dsw-alias-label-tertiary, #8f959e); font-variant-numeric: tabular-nums; }
 
@@ -261,6 +252,7 @@ const CSS = `
    The rows are a fixed 4-column grid so the bars and the percentages line up
    across groups: label / bar / percentage / reset countdown. */
 .agy-limits { display: flex; flex-direction: column; gap: 10px; padding: 4px 0; }
+.agy-limit-age { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
 .agy-limit-group { display: flex; flex-direction: column; gap: 2px; }
 .agy-limit-group-name {
   font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-label-secondary, #61666b);
@@ -278,26 +270,6 @@ const CSS = `
 .agy-limit-p { text-align: right; font-variant-numeric: tabular-nums;
   color: var(--dsw-alias-label-primary, #1f2329); }
 .agy-limit-reset { text-align: right; font: var(--dsw-font-xxxs-11);
-  color: var(--dsw-alias-label-tertiary, #8f959e); }
-
-/* ── Quota rows ──────────────────────────────────────────────────────────── */
-.agy-quota-row {
-  display: grid; grid-template-columns: minmax(0,1fr) 96px minmax(0,auto);
-  align-items: center; gap: 10px; padding: 6px 0;
-  font: var(--dsw-font-xxs-12); border-bottom: 0.5px solid var(--dsw-alias-border-l1, rgba(0,0,0,.03));
-}
-.agy-quota-row:last-child { border-bottom: 0; }
-.agy-quota-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--dsw-alias-label-secondary, #61666b); }
-.agy-quota-track { height: 5px; border-radius: 3px; overflow: hidden;
-  background: var(--dsw-alias-border-l2, rgba(0,0,0,.12)); }
-.agy-quota-track i { display: block; height: 100%; border-radius: 3px; }
-/* The reset phrase lives in the trailing column so every row's id starts at the
-   same x — inline-after-name made each row run a different length. */
-.agy-quota-pct { display: flex; align-items: baseline; justify-content: flex-end; gap: 8px;
-  font-variant-numeric: tabular-nums;
-  color: var(--dsw-alias-label-tertiary, #8f959e); font: var(--dsw-font-xxs-12); }
-.agy-quota-pct code { font: var(--dsw-font-xxxs-11); font-family: var(--ds-font-family-code);
   color: var(--dsw-alias-label-tertiary, #8f959e); }
 
 /* ── Dense breakdown tables (Usage tab only) ─────────────────────────────── */

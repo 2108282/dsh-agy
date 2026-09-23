@@ -28,3 +28,30 @@ export const THINKING_BUDGET_MAX = 65_535
 
 /** One budget per level; an ABSENT key means "send no budget" (upstream decides). */
 export type ThinkingBudgets = Partial<Record<ThinkingLevel, number>>
+
+/**
+ * The Claude family's `thinkingBudget` bounds, measured separately from Gemini's.
+ *
+ * The two families do NOT share a contract, which is why one interval cannot
+ * serve both:
+ *   - Claude's floor is **1024**, not `-1`. A budget of 1 or 512 is rejected with
+ *     `thinking.enabled.budget_tokens: Input should be greater than or equal to
+ *     1024`; `-1` and `0` are accepted as special values.
+ *   - Claude additionally requires **`max_tokens` strictly greater than the
+ *     budget**: `budget=1024, max_tokens=1024` is a 400, and a budget sent with
+ *     no `maxOutputTokens` at all also fails. So the margin is at least one token.
+ *
+ * `CLAUDE_BUDGET_MAX` is therefore one below `AGY_CLAUDE_MAX_OUTPUT_TOKENS` — the
+ * largest budget that can still leave room for a strictly greater `max_tokens`.
+ */
+export const CLAUDE_BUDGET_MIN = 1024
+export const CLAUDE_BUDGET_MAX = 63_999
+
+/** Whether `value` may be sent as a Claude `thinkingBudget`. */
+export function isValidClaudeBudget(value: unknown): value is number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return false
+  // `-1` (adaptive) and `0` are accepted in addition to the documented minimum;
+  // both are measured rather than inferred.
+  if (value === -1 || value === 0) return true
+  return value >= CLAUDE_BUDGET_MIN && value <= CLAUDE_BUDGET_MAX
+}

@@ -106,6 +106,13 @@ export interface AgyAdapterOptions {
    * @returns the budget to send, or undefined to let the level stand alone.
    */
   thinkingBudgetFor?(level: string): number | undefined
+  /**
+   * Configured Claude thinking budget, or undefined when unset.
+   *
+   * Separate from `thinkingBudgetFor` because the Claude family is id-bound and
+   * carries its own validation (floor 1024, and `max_tokens` must exceed it).
+   */
+  claudeBudgetFor?(): number | undefined
   /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
   resolveAttachments?(): AgyAttachmentStore | undefined
   /**
@@ -408,6 +415,9 @@ export class AgyAdapter extends LlmAdapter {
           ...(this.options.thinkingBudgetFor === undefined
             ? {}
             : { thinkingBudgetFor: this.options.thinkingBudgetFor }),
+          ...(this.options.claudeBudgetFor === undefined
+            ? {}
+            : { claudeBudgetFor: this.options.claudeBudgetFor }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
         })
