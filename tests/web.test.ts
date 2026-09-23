@@ -14,12 +14,56 @@ describe('dsh-agy web page rendering', () => {
     expect(successHtml).toContain('test@example.com')
     expect(successHtml).toContain('window.close()')
     // The callback announces success to its opener, which is how the Settings
-    // section learns to refresh without polling.
-    expect(successHtml).toContain("postMessage({ type: 'agy_login_success' }, '*')")
+    // section learns to refresh without polling. The target origin is this
+    // page's own origin, never '*': a wildcard delivered the success message to
+    // whatever window happened to open the callback.
+    expect(successHtml).toContain("postMessage({ type: 'agy_login_success' }, window.location.origin)")
+    expect(successHtml).not.toContain("'*')")
 
     const failedHtml = renderCallbackHtml({ ok: false, error: 'Access denied', baseUrl: 'http://127.0.0.1:3080' })
     expect(failedHtml).toContain('Sign-in Failed')
     expect(failedHtml).toContain('Access denied')
+    // The `/agy` dashboard route is gone (asserted in the suite below), so a
+    // link to it 404s. The failure branch points at the GUI root, where the agy
+    // surface now lives as a Settings section.
+    expect(failedHtml).toContain('href="http://127.0.0.1:3080/"')
+    expect(failedHtml).not.toContain('/agy"')
+  })
+
+  it('escapes attacker- and upstream-influenced text out of the markup', () => {
+    // `error` is the token endpoint's raw response body and `email` comes from
+    // Google's userinfo. This page shares an origin with the DSH GUI, so markup
+    // injected here would run with the GUI session and could reach `/api/agy`
+    // (where `account.exportAll` returns live credential blobs).
+    const failedHtml = renderCallbackHtml({
+      ok: false,
+      error: '<img src=x onerror="alert(1)">',
+      baseUrl: 'http://127.0.0.1:3080',
+    })
+    expect(failedHtml).not.toContain('<img src=x')
+    expect(failedHtml).toContain('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;')
+
+    // The base URL reaches an href attribute; a quote would break out of it.
+    const attributeHtml = renderCallbackHtml({
+      ok: false,
+      error: 'nope',
+      baseUrl: 'http://127.0.0.1:3080" onmouseover="alert(1)',
+    })
+    expect(attributeHtml).not.toContain('" onmouseover="alert(1)')
+    expect(attributeHtml).toContain('&quot; onmouseover=&quot;alert(1)')
+
+    // The success branch interpolates the email into the markup AND into the
+    // inline `<script>`. The script payload goes through jsonForInlineScript:
+    // bare JSON.stringify escapes for a JS string, not for the HTML script-data
+    // state, so a `</script>` in the value terminated the element early and
+    // everything after it was parsed as markup (measured, not hypothesised).
+    const email = `a"b</script><img src=x onerror=alert(1)>@example.com`
+    const successHtml = renderCallbackHtml({ ok: true, email, baseUrl: 'http://127.0.0.1:3080' })
+    expect(successHtml).not.toContain('<img src=x')
+    expect(successHtml).not.toContain('</script><img')
+    expect(successHtml).toContain('\\u003c/script\\u003e')
+    const script = successHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+    expect(() => new Function(script!)).not.toThrow()
   })
 
   it('serves a syntactically valid callback script (template-literal escapes)', () => {

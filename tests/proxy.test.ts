@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EnvHttpProxyAgent } from 'undici'
-import { proxiedFetch, proxyAgent, proxyStreamingAgent, dispatcherForAsync, dispatcherOptsFor, normalizeProxyUrl, _clearDispatcherCacheForTest } from '../src/proxy.ts'
+import { proxiedFetch, proxyAgent, proxyStreamingAgent, dispatcherForAsync, dispatcherOptsFor, normalizeProxyUrl, proxyUrlForLogs, _clearDispatcherCacheForTest } from '../src/proxy.ts'
 
 describe('proxy env support', () => {
   afterEach(() => {
@@ -101,5 +101,25 @@ describe('proxy credential encoding (special characters)', () => {
   it('leaves an already-correctly-encoded password untouched', () => {
     expect(normalizeProxyUrl('http://u:p%2Fw@h:1')).toBe('http://u:p%2Fw@h:1')
     expect(normalizeProxyUrl('http://user:plain@127.0.0.1:9')).toBe('http://user:plain@127.0.0.1:9')
+  })
+})
+
+describe('proxy URL in log messages', () => {
+  it('never echoes credentials for a URL that does not parse', () => {
+    // `normalizeProxyUrl` embeds this string in its error message, which reaches
+    // the GUI and stderr. The fallback used to return the raw input, so the one
+    // shape that is guaranteed to still hold a password was the one shape that
+    // printed it.
+    for (const raw of ['not a url user:pass@host', 'http://user:pass@', 'user:pa@ss@127.0.0.1:9']) {
+      const logged = proxyUrlForLogs(raw)
+      expect(logged, `leaked for ${raw}`).not.toContain('pass')
+      expect(logged).not.toContain('user:')
+    }
+  })
+
+  it('reports host and port without the userinfo for a valid URL', () => {
+    expect(proxyUrlForLogs('http://user:pass@127.0.0.1:9')).toBe('http://127.0.0.1:9')
+    expect(proxyUrlForLogs('socks5://u:p@h')).toBe('socks5://h:1080')
+    expect(proxyUrlForLogs('http://h:8080')).toBe('http://h:8080')
   })
 })

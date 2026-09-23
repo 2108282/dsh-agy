@@ -10,6 +10,7 @@ import { createConnection } from 'node:net'
 import { createRequire } from 'node:module'
 import { isProxyRouted } from './types.ts'
 import type { AccountRouting } from './types.ts'
+import { redactCredentials } from './redact.ts'
 
 const envAgent = new EnvHttpProxyAgent()
 
@@ -27,7 +28,10 @@ export const proxyAgent = envAgent
 /** The streaming env proxy agent (exported for tests). */
 export const proxyStreamingAgent = envStreamingAgent
 
-// ── Dispatcher cache (bounded by MAX_ACCOUNTS=10, no leak concern) ──
+// ── Dispatcher cache, keyed `normalizedProxyUrl|stream` ──
+// Entries live for the process, so the cache size tracks the number of DISTINCT
+// proxy URLs in use rather than the account count. (It previously claimed to be
+// "bounded by MAX_ACCOUNTS=10" — a constant nothing enforced.)
 const dispatcherCache = new Map<string, any>()
 
 // ── Proxy URL normalization ──
@@ -95,10 +99,20 @@ export function proxyUrlForLogs(proxyUrl: string): string {
     const fam = proxyUrl.match(/\?family=(ipv4|ipv6)$/)
     const base = fam ? proxyUrl.slice(0, -fam[0].length) : proxyUrl
     const u = new URL(base)
+    // A scheme-less `user:pass@host` parses "successfully" as the non-special
+    // scheme `user:` with an empty host, which would render as `user://:8080` —
+    // a misleading string in the very error message meant to explain the input.
+    // Fall through to the redacting fallback instead of reporting a host that
+    // was never in the input.
+    if (!u.hostname) return redactCredentials(proxyUrl)
     const port = u.port || defaultPort(u.protocol)
     return `${u.protocol}//${u.hostname}:${port}`
   } catch {
-    return proxyUrl
+    // Unparseable input is exactly the case that still holds credentials: this
+    // value is embedded in `normalizeProxyUrl`'s error message, which reaches the
+    // GUI and stderr. Returning the raw input leaked `user:pass` there, so the
+    // fallback redacts instead of echoing.
+    return redactCredentials(proxyUrl)
   }
 }
 

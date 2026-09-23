@@ -249,6 +249,18 @@ async function importCommand(options: { blob: boolean; files?: string[]; email?:
   for (const error of result.errors) console.log(`  ! ${error}`)
 }
 
+/**
+ * Write one exported credential blob to disk.
+ *
+ * 0600: a blob carries a live access+refresh token in plain base64. Every other
+ * credential write in this repo sets an owner-only mode; this was the one
+ * `writeFileSync` without it, so the default umask (0644) left the export
+ * world-readable on a shared machine.
+ */
+export function writeBlobFile(file: string, blob: string): void {
+  writeFileSync(file, blob + '\n', { mode: 0o600 })
+}
+
 async function exportCommand(options: { index?: string; out?: string }) {
   const store = createReadOnlyStoreOrExit()
   const sessions = new AgySessionManager({ store })
@@ -271,7 +283,7 @@ async function exportCommand(options: { index?: string; out?: string }) {
     }
     if (options.out) {
       const file = join(options.out, `dsh-agy-${index}.blob`)
-      writeFileSync(file, result.blob + '\n')
+      writeBlobFile(file, result.blob)
       console.log(`[${index}] ${account.email ?? ''} — wrote ${file}`)
     } else {
       console.log(result.blob)

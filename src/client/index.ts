@@ -1009,6 +1009,11 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   // The callback page posts this once the exchange succeeds.
   useEffect(() => {
     const onMessage = (event: MessageEvent): void => {
+      // Check the ORIGIN, not just the payload: the callback page is served from
+      // this same web server, so a matching origin is what distinguishes it from
+      // any other page that can reach this window. Without the check, an
+      // unrelated opener could trigger a refresh by posting the same shape.
+      if (event.origin !== window.location.origin) return
       if ((event.data as { type?: string } | null)?.type === 'agy_login_success') void refresh()
     }
     window.addEventListener('message', onMessage)

@@ -11,9 +11,50 @@
 
 import { I18N_DICT } from './i18n.ts'
 
+/**
+ * Escape text for an HTML text/attribute position.
+ *
+ * Every interpolation below except the static markup is attacker-influenced or
+ * upstream-influenced: `error` is the token endpoint's raw response body, and
+ * `email` comes from Google's userinfo. This page is served by the SAME web
+ * server, and therefore the same origin, as the DSH GUI — so injected script
+ * here would run with the GUI's session and could reach `/api/agy`
+ * (`account.exportAll` returns live credential blobs). That chain is why the
+ * escaping matters more than the narrow trigger suggests.
+ *
+ * Text in markup goes through {@link escapeHtml}; text inside the inline
+ * `<script>` goes through {@link jsonForInlineScript}. Neither is optional.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
+ * Serialize a value for interpolation into the inline `<script>`.
+ *
+ * `JSON.stringify` escapes for a JS string context only, NOT for the HTML script
+ * data state: it leaves `<` alone, so an email or error body containing
+ * `</script>` terminates the element early and everything after it is parsed as
+ * markup. Escaping the three HTML-significant characters as `\uXXXX` keeps the
+ * JSON value identical while making the byte sequence unrepresentable in the
+ * source. (The `JSON.stringify` output above is a valid JS string either way,
+ * because a `\u003c` escape and a literal `<` denote the same character.)
+ */
+function jsonForInlineScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+}
+
 export function renderCallbackHtml(options: { ok: boolean; error?: string; email?: string | null; baseUrl: string }): string {
   const { ok, error, email, baseUrl } = options
-  const i18nJson = JSON.stringify(I18N_DICT)
+  const i18nJson = jsonForInlineScript(I18N_DICT)
 
   return `<!doctype html>
 <html lang="en">
@@ -106,14 +147,14 @@ export function renderCallbackHtml(options: { ok: boolean; error?: string; email
     ${ok ? `
       <div class="icon-wrap icon-success">✓</div>
       <h1 id="title">Sign-in Successful</h1>
-      <p id="desc">Your Antigravity account ${email ? '<strong>' + email + '</strong> ' : ''}has been authorized and saved.</p>
+      <p id="desc">Your Antigravity account ${email ? '<strong>' + escapeHtml(email) + '</strong> ' : ''}has been authorized and saved.</p>
       <p style="font-size:12px;opacity:0.8;" id="closing">This window will close automatically...</p>
       <button class="btn" onclick="window.close()">Close Window</button>
     ` : `
       <div class="icon-wrap icon-error">✕</div>
       <h1 id="title">Sign-in Failed</h1>
-      <p id="desc">Error details: ${error || 'Unknown error'}</p>
-      <a class="btn btn-primary" href="${baseUrl}/agy">Return to Dashboard</a>
+      <p id="desc">Error details: ${escapeHtml(error || 'Unknown error')}</p>
+      <a class="btn btn-primary" href="${escapeHtml(baseUrl)}/">Return to Settings</a>
     `}
   </div>
   <script>
@@ -123,13 +164,18 @@ export function renderCallbackHtml(options: { ok: boolean; error?: string; email
 
     if (${ok ? 'true' : 'false'}) {
       document.getElementById('title').textContent = dict.loginSuccessTitle;
-      document.getElementById('desc').innerHTML = dict.loginSuccessDesc + (${JSON.stringify(email ? ' (' + email + ')' : '')});
+      // textContent, not innerHTML: an email containing markup must never be
+      // parsed as HTML. The string itself is serialized for the script data
+      // state by jsonForInlineScript, so it cannot terminate this element.
+      document.getElementById('desc').textContent = dict.loginSuccessDesc + (${jsonForInlineScript(email ? ' (' + email + ')' : '')});
       document.getElementById('closing').textContent = dict.windowClosing;
       
       // Notify parent window & close
       try {
         if (window.opener) {
-          window.opener.postMessage({ type: 'agy_login_success' }, '*');
+          // Target this page's own origin rather than '*', so the message cannot
+          // be delivered to an unrelated opener.
+          window.opener.postMessage({ type: 'agy_login_success' }, window.location.origin);
         }
       } catch (e) {}
       setTimeout(() => {
