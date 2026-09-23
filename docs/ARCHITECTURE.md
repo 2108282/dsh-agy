@@ -13,8 +13,8 @@
                              │              │
             ┌────────────────▼───┐   ┌──────▼─────────┐
             │ adapter/           │   │ web/           │
-            │ AgyAdapter          │   │ /agy route+HTML  │
-            │ (DSH-named seam)    │   │ (thin shell)      │
+            │ AgyAdapter          │   │ /api/agy RPC +   │
+            │ (DSH-named seam)    │   │ oauth callback   │
             └────────┬───────────┘   └──────┬─────────┘
                      │                      │
             ┌────────▼──────────┐   ┌───────▼─────────┐
@@ -54,12 +54,14 @@ Dependency direction: `oauth/` and `store/` are leaves (no internal deps); `runt
 | `adapter/translate` | `toBody(generateOptions) -> RequestBody` | DSH messages/tools -> Gemini contents[], thinking carried verbatim | fixture (recorded requests) |
 | `adapter/parse` | `fromSSE(line) -> Chunk[]` | SSE line parsing, candidates[] -> StreamChunk, usage/error events | fixture (recorded responses) |
 | `adapter/models` | `listModels() / resolveModel(id)` | fetchAvailableModels fetch + catalog metadata merge + filter + fallback | fixture |
+| `stats` | `UsageStats.record() / flush() / snapshot()` | cumulative ledger: in-memory accumulation on the hot path, lock-and-merge flush, rolling day window, defensive parse | unit (fake lock + clock) |
+| `model-visibility` | `ModelVisibility.disabledFor(provider) / setDisabled()` | hidden-model blacklist, in-memory read for per-catalog filtering | unit |
 | `proxy` | `normalizeProxyUrl(url) / proxyUrlForLogs(url) / isProxyUnreachableError(err) / dispatcherForAsync(url, {streaming}) / dispatcherOptsFor(streaming) / isProxyReachable(url) / proxiedFetch(input, init, {proxyUrl, streaming})` | URL normalization (`socks://`→`socks5://`, `socks5h`→`socks5`, default ports, `?family=`), fast-fail 2s TCP (30s healthy / 2s unhealthy cache), dispatcher cache per call class (`ProxyAgent` keepAlive:1, `SocksProxyAgent` lazy via `socks-proxy-agent`), loopback forced direct, fail-closed (skips account without cooldown), encrypted at rest + masked display via `store/accounts`. Two call classes: control-plane (`bodyTimeout` 30s) and streaming (`bodyTimeout` 0 — a generation stream may stay silent for minutes while reasoning, and `bodyTimeout` is a per-*gap* inactivity timer, not a total budget) | pure unit + TCP probe stub |
 
 ## 3. Thin Shells (deliberately shallow, no abstraction)
 
 - `cli/` subcommands: read store -> call oauth/runtime -> print. No "command framework"; commander drives directly.
-- `web/routes.ts`: webServer handler -> calls the same modules. HTML is inline (single-file page, vanilla JS), no front-end framework.
+- `web/plugin.ts`: registers two things over different transports — the management RPC at `/api/agy` (`connection.fetch.register`, so it inherits the host's trust fence and BrowserAuth) and the OAuth callback as a plain HTTP route (Google redirects a browser to it). `web/management.ts` holds the method table; `client/` is the browser half.
 - `adapter/adapter.ts`: the `LlmAdapter` subclass only orchestrates (get token -> refresh -> translate -> stream -> classify error); translation/parsing live in the deep modules.
 
 ## 4. Exclusions (why not)

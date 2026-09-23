@@ -19,18 +19,28 @@ fingerprinting, and both CLI and web management.
   selection (family-scoped quotas, OMP-aligned ranking), automatic rotation on
   rate limits, per-account cooldown to the real reset time, per-account device
   fingerprints.
-- **Quota dashboard**: only active when DSH Web is running; append `/agy` to
-  your dsh web address: login, account management, per-model quota bars, model
-  testing, credential export/import, fingerprint management.
+- **Inline Settings UI**: an Antigravity section inside DSH Settings with four
+  tabs — accounts (login, activation, per-model quota bars, test calls,
+  fingerprint and proxy management), models (per-model visibility), usage
+  (cumulative token and request statistics), and credentials (import/export).
+  No separate page: the surface only exists where DSH Settings does.
+- **Model visibility toggles**: hide individual models from the DSH model
+  selector. Blacklist semantics — only models you switch off are hidden, so
+  models the server adds later stay visible.
+- **Usage statistics**: input / output / cache-read / cache-write tokens,
+  request counts, failures, rate limits, rotations, latency and
+  time-to-first-token, aggregated by account and by model. Includes calls that
+  never pass through DSH (CLI, verification, test calls), which no
+  session-based statistic can see.
 - **CLI**: `dsh-agy login|status|import|verify|logout` works standalone, with or
   without a harness.
 
 ## Screenshots
 
-The `/agy` dashboard inside DSH Web — account cards, per-model quota bars, and
+The Antigravity section inside DSH Settings — accounts, per-model quota, and
 one-shot model tests:
 
-![dsh-agy dashboard](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/screenshot_en.png)
+![dsh-agy settings](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/screenshot_en.png)
 
 ## Quickstart
 
@@ -46,11 +56,12 @@ dsh plugin --profile web add dsh-agy
 # 2. Launch DSH Web
 dsh web
 
-# 3. Open dashboard at http://127.0.0.1:3080/agy
-# Click "Login with Google", complete OAuth authorization, and start using the agy provider
+# 3. Open Settings → Antigravity, then click "登录" (Login) in that section
+# Complete OAuth authorization, and start using the agy provider
 ```
 
-Open **Settings → Plugins → Antigravity → Open Antigravity dashboard**; the button opens `/agy` in a new tab.
+The section lives in **Settings → Antigravity** (top-level, alongside General
+and Models). There is no separate dashboard page: the old `/agy` URL is gone.
 
 ### Path B: Headless / Terminal Only (Standalone CLI)
 
@@ -99,7 +110,7 @@ dsh-agy status                              # shows proxy column (masked host:po
 
 Fallback: with no per-account proxy, requests use `EnvHttpProxyAgent` (`HTTP_PROXY`/`HTTPS_PROXY` with `NO_PROXY` honored). Per-account proxies ignore `NO_PROXY`, are fail-closed (unreachable proxy skips the account without cooldown and clears affinity), and loopback targets (`localhost`/`127.0.0.1`/`::1`) are always forced direct.
 
-Web dashboard (`/agy`): each account card shows an inline Proxy row `[input] [Save][Clear][Test]` with masked `host:port`; writes via `POST /agy/api/proxy`, probes via `POST /agy/api/proxy/test`.
+Settings → Antigravity → account detail shows a Proxy row `[input] [Save][Clear][Test]` with the masked `host:port`; writes and probes go over the management RPC (`account.proxy` / `account.proxyTest`). Save requires a non-empty value — clearing an existing proxy is the explicit `Clear` action, never an accidental empty Save.
 
 ### Path C: Local Development & Link
 
@@ -122,7 +133,7 @@ npm uninstall -g dsh-agy
 
 # 3. Optional: delete local account data (accounts + master key + fingerprint override)
 dsh-agy logout              # remove accounts first (or skip)
-rm -f ~/.dsh/agy-accounts.json
+rm -f ~/.dsh/agy-accounts.json ~/.dsh/agy-stats.json ~/.dsh/agy-models.json
 # remove only the AGY_MASTER_KEY line from ~/.dsh/.credentials.yaml — keep other keys!
 rm -f ~/.dsh/agy-fingerprint-data.json   # only if you created an override
 
@@ -160,7 +171,7 @@ counter.
 
 | Env | Effect |
 |---|---|
-| `DSH_AGY_DISABLE=1` | Kill switch: the plugin registers nothing (provider + `/agy` routes) and the CLI refuses to run. |
+| `DSH_AGY_DISABLE=1` | Kill switch: the plugin registers nothing (provider + Settings section + OAuth callback) and the CLI refuses to run. |
 | `DSH_AGY_FINGERPRINT_MODE=stable` | One fixed client identity per account — no per-request header randomization, no fingerprint regeneration (OMP-style fixed-client posture). Default `dynamic` keeps per-request randomization. |
 | `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | Background batch health probe inside the harness (refresh + userinfo on the configured interval); off by default. |
 | `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | BYO OAuth app escape hatch: override the embedded public Antigravity client credentials. |
@@ -199,6 +210,13 @@ the context grows, bounded by the model's context window.
   in `~/.dsh/.credentials.yaml` (`AGY_MASTER_KEY`, 0600). `$DSH_HOME` relocates both.
 - Fingerprint pools (version strings, SDK clients) are user-overridable via
   `~/.dsh/agy-fingerprint-data.json` — no code release needed to keep them current.
+- Model visibility: `~/.dsh/agy-models.json` (0600) — the hidden-model blacklist.
+  Holds only the models you switched off, so re-enabling one removes its entry.
+- Usage statistics: `~/.dsh/agy-stats.json` (0600) — cumulative counters plus a
+  rolling 30-day window. Counts are merged under a file lock, so several
+  processes (Desktop, a web-profile server, the CLI) record concurrently without
+  losing each other's data. It stores account emails but never tokens, proxies,
+  or project ids.
 
 ## ⚠️ Disclaimer
 
