@@ -189,8 +189,11 @@ describe('usage ledger', () => {
     expect(store.pendingCount).toBe(0)
     const doc = JSON.parse(readFileSync(file, 'utf8'))
     expect(doc.totals.requests).toBe(1)
-    // The lock target must stay owner-only.
-    expect(statSync(file).mode & 0o777).toBe(0o600)
+    // Owner-only is POSIX-only: Windows skips these checks by design (keyring.ts),
+    // and its mode bits are not a permission model. Matches tests/store.test.ts.
+    if (process.platform !== 'win32') {
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+    }
   })
 
   it('merges two concurrent writers through the real lock', () => {
@@ -389,6 +392,38 @@ describe('model visibility', () => {
     writeFileSync(file, JSON.stringify({ version: 1, disabled: { agy: { 'model-z': true } } }))
     expect(reader.isDisabled('agy', 'model-z')).toBe(true)
     expect(reader.isDisabled('agy', 'model-a')).toBe(false)
+  })
+
+  it('sees a change written within the same filesystem timestamp tick', () => {
+    // Regression, caught by CI on Windows: detection was mtime-based, and two
+    // writes landing in one timestamp tick reported an IDENTICAL mtime, so the
+    // second change was invisible and a disabled model stayed selectable.
+    // Windows resolves that tick far more coarsely than macOS. Detection is now
+    // a content comparison, which cannot miss a change at any clock resolution.
+    const { dir } = scratch()
+    const file = join(dir, 'agy-models.json')
+    const reader = new ModelVisibility({ file })
+    reader.setDisabled('agy', 'model-a', true)
+
+    // Two writes back to back, deliberately without awaiting the clock.
+    writeFileSync(file, JSON.stringify({ version: 1, disabled: { agy: { 'model-b': true } } }))
+    writeFileSync(file, JSON.stringify({ version: 1, disabled: { agy: { 'model-c': true } } }))
+
+    expect(reader.isDisabled('agy', 'model-c')).toBe(true)
+    expect(reader.isDisabled('agy', 'model-a')).toBe(false)
+  })
+
+  it('rewrites identical content without a needless reload', () => {
+    // Content comparison must not reparse on every read when nothing changed:
+    // the returned set stays the same memoized reference.
+    const { dir } = scratch()
+    const file = join(dir, 'agy-models.json')
+    const reader = new ModelVisibility({ file })
+    reader.setDisabled('agy', 'model-a', true)
+
+    const first = reader.disabledFor('agy')
+    const second = reader.disabledFor('agy')
+    expect(second).toBe(first)
   })
 
   it('treats a deleted file as a change rather than serving a stale set', () => {

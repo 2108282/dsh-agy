@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
-import { apply } from '../src/client/index.ts'
+import { apply, orderModels } from '../src/client/index.ts'
 import { en, zh } from '../src/client/locales.ts'
 
 /** Minimal client context: locale, connection (RPC transport), and the slot registry. */
@@ -106,5 +106,38 @@ describe('agy section i18n', () => {
     }
     expect(cjkIn('index.ts'), 'CJK copy in index.ts (belongs in locales.ts)').toEqual([])
     expect(cjkIn('styles.ts'), 'CJK copy in styles.ts').toEqual([])
+  })
+})
+
+describe('model list ordering', () => {
+  const m = (id: string, disabled: boolean) => ({ id, name: id, disabled })
+
+  it('puts disabled models last, keeping host order within each group', () => {
+    // The requested behaviour: switching a model off moves it to the bottom
+    // rather than leaving it wherever the reload happened to place it.
+    const ordered = orderModels([m('a', false), m('b', true), m('c', false), m('d', true)])
+    expect(ordered.map((entry) => entry.id)).toEqual(['a', 'c', 'b', 'd'])
+  })
+
+  it('moves only the toggled row, never reshuffling the others', () => {
+    // Stability is the point: with a non-stable sort the untouched rows could
+    // reorder, which is what made the list appear to jump on every toggle.
+    const before = orderModels([m('a', false), m('b', false), m('c', false)])
+    expect(before.map((entry) => entry.id)).toEqual(['a', 'b', 'c'])
+
+    // Switching the FIRST model off must send it past the two it preceded,
+    // without disturbing their relative order.
+    const firstOff = orderModels([m('a', true), m('b', false), m('c', false)])
+    expect(firstOff.map((entry) => entry.id)).toEqual(['b', 'c', 'a'])
+
+    // Switching it back on restores the host's original order.
+    const restored = orderModels([m('a', false), m('b', false), m('c', false)])
+    expect(restored.map((entry) => entry.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('does not mutate the input list', () => {
+    const input = [m('a', false), m('b', true)]
+    orderModels(input)
+    expect(input.map((entry) => entry.id)).toEqual(['a', 'b'])
   })
 })

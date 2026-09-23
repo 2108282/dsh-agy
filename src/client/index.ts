@@ -517,16 +517,31 @@ function AccountsTab(props: {
  * is long (20+ rows), so it must not push the account list off screen. The
  * disclosure keeps it one click away without spending the space by default.
  */
+/**
+ * Order models for display: enabled first, disabled sunk to the bottom.
+ *
+ * Exported for a direct unit test — the rule is pure and worth pinning, and the
+ * client test harness does not render. Stable by construction: `Array.sort` is
+ * stable per spec, so the host's own order survives inside each group. That is
+ * what makes a toggle move exactly one row instead of reshuffling the list.
+ * @param models - the host's list, in host order.
+ * @returns a new array, enabled models first.
+ */
+export function orderModels(models: readonly ModelView[]): ModelView[] {
+  return [...models].sort((a, b) => Number(a.disabled) - Number(b.disabled))
+}
+
 function ModelsTab(props: {
   models: ModelView[]
   account: string | null
   quota: AccountView['quota']
   quotaAccount: string | null
-  busy: boolean
+  /** Model ids whose own toggle write is in flight; everything else stays live. */
+  pending: ReadonlySet<string>
   onToggle: (modelId: string, disabled: boolean) => void
   t: T
 }): ReactNode {
-  const { models, account, quota, quotaAccount, busy, onToggle, t } = props
+  const { models, account, quota, quotaAccount, pending, onToggle, t } = props
   const [quotaOpen, setQuotaOpen] = useState(false)
 
   if (models.length === 0) {
@@ -537,9 +552,13 @@ function ModelsTab(props: {
   // One clock reading per render, so every reset label in the list agrees.
   const now = Date.now()
 
+  // Disabled models sink to the bottom (see `orderModels`), so the models you
+  // switched off never push the live ones around.
+  const ordered = useMemo(() => orderModels(models), [models])
+
   // One normal row per model. A row is a plain grid, not a table: the switch is
   // the affordance and a table's column rules would fight the card's rhythm.
-  const rows = models.map((model) => h('div', { className: 'agy-rowitem', key: model.id },
+  const rows = ordered.map((model) => h('div', { className: 'agy-rowitem', key: model.id },
     h('div', { className: 'agy-rowmain' },
       h('div', { className: 'agy-rowtitle' },
         h('span', { className: 'agy-rowname' }, model.name)),
@@ -549,7 +568,11 @@ function ModelsTab(props: {
     h('div', { className: 'agy-rowactions' },
       h(Switch, {
         checked: !model.disabled,
-        disabled: busy,
+        // Only THIS switch locks while its own write is in flight. The previous
+        // global `busy` disabled every control on the page for the duration of
+        // two network round trips, which is what made one toggle feel like the
+        // whole panel froze.
+        disabled: pending.has(model.id),
         label: t('modelToggleAria', { name: model.name }),
         onChange: () => { onToggle(model.id, !model.disabled) },
       }))))
@@ -733,6 +756,8 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const [modelAccount, setModelAccount] = useState<string | null>(null)
   /** Model-discovery failure, shown on the Models tab only (see loadModels). */
   const [modelError, setModelError] = useState<string | undefined>(undefined)
+  /** Model ids whose own visibility write is in flight (see the toggle handler). */
+  const [toggling, setToggling] = useState<ReadonlySet<string>>(() => new Set())
   const [stats, setStats] = useState<StatsView | null>(null)
   const [error, setError] = useState<string | undefined>(undefined)
   /** A non-fatal outcome worth reporting (e.g. a partial credential import). */
@@ -909,15 +934,42 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
           // queries (see management.ts listAccounts).
           quota: activeQuota,
           quotaAccount: activeQuotaAccount,
-          busy,
+          pending: toggling,
           t,
+          /**
+           * Optimistic, per-model toggle.
+           *
+           * The old handler ran the write AND a full `model.list` reload through
+           * `act()`, so a click cost two network round trips (the reload reaches
+           * upstream model discovery) while a single global `busy` flag disabled
+           * every control on the page — hence "it hangs, everything is disabled,
+           * then it switches". The write is authoritative and its result is
+           * already known, so the list is updated from the response and no
+           * reload is needed: the switch reflects exactly what the host stored.
+           */
           onToggle: (modelId: string, disabled: boolean) => {
-            void act(async () => {
-              await rpc.call('model.setDisabled', { modelId, disabled })
-              // Reload from the host so the switch mirrors what the adapter will
-              // actually filter, rather than what this click hoped it would.
-              await loadModels()
-            })
+            setToggling((current) => new Set(current).add(modelId))
+            void (async () => {
+              try {
+                const result = await rpc.call('model.setDisabled', { modelId, disabled })
+                if (!alive.current) return
+                setModels((current) => current.map((model) => (model.id === result.modelId
+                  ? { ...model, disabled: result.disabled }
+                  : model)))
+                setError(undefined)
+              } catch (caught) {
+                if (!alive.current) return
+                setError(caught instanceof Error ? caught.message : String(caught))
+              } finally {
+                if (alive.current) {
+                  setToggling((current) => {
+                    const next = new Set(current)
+                    next.delete(modelId)
+                    return next
+                  })
+                }
+              }
+            })()
           },
         })
         : h('div', { className: 'agy-root' },

@@ -24,7 +24,7 @@
  * every toggle.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { resolveDshHome } from './store/keyring.ts'
 
@@ -94,16 +94,16 @@ export interface ModelVisibilityOptions {
 export class ModelVisibility {
   private readonly file: string
   private disabled: DisabledModelMap
+  /** Raw text this instance last read or wrote; see `reloadIfChanged`. */
+  private raw: string
   /** Reusable frozen empty set, so the common "nothing disabled" read allocates nothing. */
   private readonly sets = new Map<string, ReadonlySet<string>>()
-  /** mtime of the file as last read, or null when it was absent (or unreadable). */
-  private loadedMtimeMs: number | null
 
   constructor(options: ModelVisibilityOptions = {}) {
     this.file = options.file ?? join(resolveDshHome(), 'agy-models.json')
-    const initial = this.readWithMtime()
+    const initial = this.readWithRaw()
     this.disabled = initial.disabled
-    this.loadedMtimeMs = initial.mtimeMs
+    this.raw = initial.raw
   }
 
   /** Path of the backing file. */
@@ -111,43 +111,36 @@ export class ModelVisibility {
     return this.file
   }
 
-  /** mtime of the backing file, or null when it does not exist / cannot be statted. */
-  private statMtime(): number | null {
-    try {
-      return statSync(this.file).mtimeMs
-    } catch {
-      return null
-    }
-  }
-
-  private read(): DisabledModelMap {
-    try {
-      return parseModelVisibility(readFileSync(this.file, 'utf8')).disabled
-    } catch {
-      // A missing or unreadable file means "nothing disabled".
-      return {}
-    }
+  /** The exact bytes `write()` would persist, so `raw` can track what this instance wrote. */
+  private static serialize(next: DisabledModelMap): string {
+    const doc: ModelVisibilityDocument = { version: MODELS_VERSION, disabled: next }
+    return JSON.stringify(doc, null, 2) + '\n'
   }
 
   /**
-   * Read the map together with the mtime the read is valid for.
+   * Read the map together with the raw text it came from.
    *
-   * The stat is taken BEFORE the read on purpose. Stat-after-read records the
-   * mtime of a write that landed mid-read while holding the older content, so
-   * the next `reloadIfChanged()` sees an equal mtime and serves stale data
-   * forever. Stat-before-read can only be too old, which costs one redundant
-   * re-read and is self-correcting.
+   * The TEXT (not an mtime) is what detects another writer's change. An mtime
+   * cannot: a toggle and a re-read can land in the same filesystem timestamp
+   * tick, and Windows resolves that coarsely enough to have failed CI — two
+   * distinct writes reported an identical mtime, so the second change was never
+   * seen and a disabled model stayed selectable. Content comparison cannot miss
+   * a change, whatever the clock resolution.
    */
-  private readWithMtime(): { disabled: DisabledModelMap, mtimeMs: number | null } {
-    const mtimeMs = this.statMtime()
-    return { disabled: this.read(), mtimeMs }
+  private readWithRaw(): { disabled: DisabledModelMap, raw: string } {
+    try {
+      const raw = readFileSync(this.file, 'utf8')
+      return { disabled: parseModelVisibility(raw).disabled, raw }
+    } catch {
+      // A missing or unreadable file means "nothing disabled".
+      return { disabled: {}, raw: '' }
+    }
   }
 
   private write(next: DisabledModelMap): void {
-    const doc: ModelVisibilityDocument = { version: MODELS_VERSION, disabled: next }
     mkdirSync(dirname(this.file), { recursive: true })
     const tmp = `${this.file}.tmp`
-    writeFileSync(tmp, JSON.stringify(doc, null, 2) + '\n', { mode: 0o600 })
+    writeFileSync(tmp, ModelVisibility.serialize(next), { mode: 0o600 })
     renameSync(tmp, this.file)
   }
 
@@ -210,29 +203,36 @@ export class ModelVisibility {
     else next[provider] = perProvider
     this.write(next)
     this.disabled = next
-    this.loadedMtimeMs = this.statMtime()
+    this.raw = ModelVisibility.serialize(next)
     // Drop the memoized set for this provider so the next read reflects the write.
     this.sets.delete(provider)
   }
 
   /** Re-read the file (multi-process: another writer may have toggled a model). */
   reload(): void {
-    const fresh = this.readWithMtime()
+    const fresh = this.readWithRaw()
     this.disabled = fresh.disabled
-    this.loadedMtimeMs = fresh.mtimeMs
+    this.raw = fresh.raw
     this.sets.clear()
   }
 
   /**
-   * Reload only when the file moved since the last read.
+   * Reload when the file's contents differ from what this instance last read.
    *
-   * Deliberately silent on a stat failure: a transient filesystem error must
-   * not be treated as "the file changed", or every catalog refresh would pay a
-   * read. A genuinely deleted file changes the mtime to null, which differs
-   * from a numeric mtime and therefore does reload.
+   * Reads rather than stats: `disabledFor()` runs once per catalog refresh, not
+   * per request, and the call it feeds is a network request to the model
+   * endpoint — one small local read is not the cost that matters here, while a
+   * missed change is the bug this whole mechanism exists to prevent.
    */
   private reloadIfChanged(): void {
-    if (this.statMtime() === this.loadedMtimeMs) return
+    let current: string
+    try {
+      current = readFileSync(this.file, 'utf8')
+    } catch {
+      // Missing/unreadable: treat as empty, matching `readWithRaw`.
+      current = ''
+    }
+    if (current === this.raw) return
     this.reload()
   }
 }
