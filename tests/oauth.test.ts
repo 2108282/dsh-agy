@@ -6,6 +6,14 @@ import {
   formatRefreshParts,
   parseRefreshParts,
 } from '../src/oauth/auth.ts'
+import {
+  AGY_VERSION_FALLBACK,
+  antigravityUserAgent,
+  currentAgyVersion,
+  getAgyBootstrapUserAgent,
+  setResolvedAgyVersion,
+} from '../src/oauth/constants.ts'
+import { resolveAntigravityVersion } from '../src/runtime/version.ts'
 import { authorizeAntigravity } from '../src/oauth/authorize.ts'
 import { bootstrapAccount, exchangeAntigravity, extractOnboardTierId } from '../src/oauth/exchange.ts'
 import {
@@ -290,6 +298,51 @@ describe('credential blob', () => {
     const other = encodeCredentialBlob('codex', { access_token: 'at' })
     expect(() => decodeCredentialBlob(other)).toThrow(/provider mismatch/)
     expect(() => encodeCredentialBlob('agy', {})).toThrow(/access_token/)
+  })
+})
+
+describe('bootstrap UA version freshness', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    setResolvedAgyVersion(undefined)
+  })
+
+  /**
+   * Regression test for pinned control-plane versions.
+   *
+   * The resolved version used to be a function PARAMETER, and all six bootstrap
+   * call sites omitted it, so every control-plane request advertised the stale
+   * fallback while the generation path advertised the resolved version — one
+   * process presenting two different clients. The default now reads a published
+   * shared value, which makes that drift unrepresentable.
+   */
+  it('advertises the published version, not a per-call default', () => {
+    setResolvedAgyVersion('9.9.9')
+    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/9.9.9')
+    // The short form used by the version feeds agrees with the bootstrap form.
+    expect(antigravityUserAgent()).toBe('antigravity/9.9.9 darwin/arm64')
+  })
+
+  it('falls back to the pinned floor before any version is resolved', () => {
+    setResolvedAgyVersion(undefined)
+    expect(getAgyBootstrapUserAgent()).toContain(`Antigravity/${AGY_VERSION_FALLBACK}`)
+    expect(currentAgyVersion()).toBe(AGY_VERSION_FALLBACK)
+  })
+
+  it('publishes the resolved version for every User-Agent builder', async () => {
+    setResolvedAgyVersion(undefined)
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('antigravity-auto-updater')) {
+        return new Response(JSON.stringify([{ version: '1.2.3' }, { version: '1.20.1' }]), { status: 200 })
+      }
+      return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
+    }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+    expect(await resolveAntigravityVersion(fetchImpl)).toBe('1.20.1')
+    // Resolution must reach the bootstrap UA without any call site passing it.
+    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/1.20.1')
+    expect(antigravityUserAgent()).toBe('antigravity/1.20.1 darwin/arm64')
   })
 })
 

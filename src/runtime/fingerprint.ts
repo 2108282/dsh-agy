@@ -20,11 +20,8 @@ import fingerprintData from './fingerprint-data.json'
 export interface FingerprintData {
   versionPool: string[]
   platforms: string[]
-  architectures: string[]
-  osVersions: Record<string, string[]>
   sdkClients: string[]
   ideTypes: string[]
-  pluginTypes: string[]
 }
 
 export const DEFAULT_FINGERPRINT_DATA = fingerprintData as FingerprintData
@@ -82,13 +79,14 @@ export function generateFingerprint(
   }
 }
 
-/** The only header composed from a fingerprint (the rest are per-request random). */
-export function buildFingerprintHeaders(fingerprint: Fingerprint | null): { 'User-Agent'?: string } {
-  if (!fingerprint) return {}
-  return { 'User-Agent': fingerprint.userAgent }
-}
-
-/** Per-request randomized headers (platform + SDK client pools). */
+/**
+ * Per-request randomized headers (platform + SDK client pools).
+ *
+ * No longer used on any production path: the account's identity is created once
+ * on first use and reused ({@link generateFingerprint}), so nothing re-rolls a
+ * platform per request. Kept as the pool-level primitive that
+ * {@link getStableHeaders} and the fingerprint tests are built on.
+ */
 export function getRandomizedHeaders(
   data: FingerprintData = getFingerprintData(),
   version = randomFrom(data.versionPool),
@@ -139,21 +137,4 @@ export function recordFingerprintVersion(
 ): FingerprintVersion[] {
   const next = [...(history ?? []), { fingerprint, timestamp: Date.now(), reason }]
   return next.slice(-MAX_FINGERPRINT_HISTORY)
-}
-
-/**
- * Restore a stable prior identity: the oldest restorable fingerprint
- * (`initial`, else most recent `restored`). Returns `current` when the history
- * holds nothing restorable (e.g. the initial entry was evicted).
- */
-export function restoreFingerprint(
-  history: FingerprintVersion[] | undefined,
-  current: Fingerprint | undefined,
-): Fingerprint | undefined {
-  if (!history || history.length === 0) return current
-  const initial = history.find((v) => v.reason === 'initial')
-  const restored = [...history].reverse().find((v) => v.reason === 'restored')
-  const restorable = initial ?? restored
-  if (!restorable) return current
-  return restorable.fingerprint
 }

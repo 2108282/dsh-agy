@@ -10,7 +10,6 @@ import {
   LlmError,
   ProviderRequestId,
   QUOTA_EXCEEDED_CODE,
-  attributionHeaders,
 } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -25,9 +24,20 @@ import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
-import { classifyFetchError, classifyHttpError, describeFetchError } from '../runtime/classify.ts'
+import { VERIFICATION_COOLDOWN_MS } from '../runtime/rotation.ts'
+import {
+  classifyFetchError,
+  classifyHttpError,
+  describeFetchError,
+  isSessionAccumulationOverflow,
+} from '../runtime/classify.ts'
 import { accountFetch } from '../proxy.ts'
-import { deriveAntigravitySessionId, generateAntigravityRequestId } from '../runtime/identity.ts'
+import {
+  bumpSessionGeneration,
+  currentSessionGeneration,
+  deriveAntigravitySessionId,
+  generateAntigravityRequestId,
+} from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
 import type { AgyResolvedImage } from './translate.ts'
@@ -63,8 +73,12 @@ function collectImageRefs(options: GenerateOptions): Array<{ attachmentId: strin
 }
 
 export interface AgyAdapterOptions {
-  /** Resolve the active account for a request (model-aware: family-scoped quota ranking). */
-  getSession(model?: string): Promise<AgyAccountSession | undefined>
+  /**
+   * Resolve the active account for a request (model-aware: family-scoped quota
+   * ranking). `conversationKey` scopes account affinity, so concurrent
+   * conversations hold independent pins.
+   */
+  getSession(model?: string, conversationKey?: string): Promise<AgyAccountSession | undefined>
   /** Report a classified upstream failure so the shell can cool/rotate/revoke. */
   reportFailure(
     kind: FailureKind,
@@ -77,12 +91,26 @@ export interface AgyAdapterOptions {
       resetTime?: string
       /** Requested model id; drives family-scoped rate-limit bookkeeping. */
       model?: string
+      /** Appeal link from a `verification-required` body; surfaced to the user. */
+      verificationUrl?: string
     },
   ): Promise<void>
   /** Report a clean stream completion (resets the failure counter). */
   markSuccess?(session: AgyAccountSession): Promise<void>
   /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
   resolveAttachments?(): AgyAttachmentStore | undefined
+  /**
+   * In-flight accounting for per-account request fan-out. Takes the account
+   * rather than a key so the session manager derives the identity itself —
+   * `accountKey` (id-first) and `ledgerAccountKey` (email-first) differ, and
+   * mixing them would count against an account nobody selects.
+   *
+   * `noteRequestSettled` MUST run on every path, including an abandoned stream:
+   * the adapter calls it from a `finally`, which async generators run on
+   * completion, error, and early consumer termination alike.
+   */
+  noteRequestStarted?(account: ManagedAccount): void
+  noteRequestSettled?(account: ManagedAccount): void
   /**
    * Hidden-model lookup. Optional so an adapter stays constructible without the
    * settings layer (tests, standalone use); absent means nothing is hidden.
@@ -112,14 +140,31 @@ function ledgerAccountKey(session: AgyAccountSession): string | undefined {
   return session.account.email ?? session.account.id
 }
 
-/** Build the impersonation headers for one request (per-request randomization applied by the shell). */
+/**
+ * Build the impersonation headers for one request.
+ *
+ * `User-Agent` carries the Antigravity client string and NOTHING else. The
+ * harness's `attributionHeaders()` is deliberately not merged in: it returns a
+ * lowercase `user-agent` key, so spreading it alongside the camel-case
+ * `session.impersonation` produced TWO distinct object properties that `fetch`
+ * folded into one comma-joined value —
+ *
+ *   `deepseek-harness/<v> (+url), antigravity/<v> <platform>`
+ *
+ * — a header no official client can emit, byte-identical for every dsh-agy
+ * user, and therefore a stronger fingerprint than the one it was trying to
+ * avoid. There is exactly one `User-Agent` field on the wire and the upstream
+ * requires it to be the client identity, so this request cannot carry both.
+ *
+ * This adapter performs its own dispatch (see the `fetchAgyFirstOk` call in
+ * `stream()`); nothing downstream re-adds the header.
+ */
 export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
   return {
     authorization: `Bearer ${session.auth.access}`,
     'content-type': 'application/json',
     accept: 'text/event-stream',
     'x-goog-request-id': generateAntigravityRequestId(),
-    ...attributionHeaders(),
     ...session.impersonation,
   }
 }
@@ -235,13 +280,35 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    // The in-flight slot must be released on EVERY path — clean completion, a
+    // thrown error, and a consumer that abandons the stream mid-turn. An async
+    // generator's `finally` is the one hook covering all three, so the slot is
+    // released here rather than at each exit inside `streamInner`.
+    const holder: { account?: ManagedAccount } = {}
+    try {
+      yield* this.streamInner(options, holder)
+    } finally {
+      if (holder.account !== undefined) this.options.noteRequestSettled?.(holder.account)
+    }
+  }
+
+  private async *streamInner(
+    options: GenerateOptions,
+    holder: { account?: ManagedAccount },
+  ): AsyncIterable<StreamChunk> {
     // Spec D1 sequence: resolve images first — a locally-failing image request
     // must surface UNSUPPORTED_CONTENT (user story 8) instead of being masked
     // by account-pool errors, and must not touch pool state at all.
     const images = await this.resolveRequestImages(options)
+    /**
+     * The DSH agent loop stamps `options.sessionId` on every request it builds,
+     * so it is the conversation identity — used both to scope account affinity
+     * here and to derive the upstream `sessionId` below.
+     */
+    const conversationKey = options.sessionId === undefined ? undefined : String(options.sessionId)
     let session: AgyAccountSession | undefined
     try {
-      session = await this.options.getSession(options.model)
+      session = await this.options.getSession(options.model, conversationKey)
     } catch (error) {
       if (error instanceof AgyAuthError) {
         if (error.kind === 'transport') {
@@ -275,45 +342,85 @@ export class AgyAdapter extends LlmAdapter {
     }
 
     const multimodalFiles = await resolveMultimodalFiles(options)
-    const body = toAgyRequestBody(options, {
-      projectId: session.account.projectId,
-      sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
-      ...(images.size > 0 ? { images } : {}),
-      ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
-    })
-    const headers = buildRequestHeaders(session)
+    // The account is now fixed for this request; take the in-flight slot that the
+    // `stream` wrapper releases (see its comment for why release lives there).
+    holder.account = session.account
+    this.options.noteRequestStarted?.(session.account)
+    // `conversationKey` is resolved above and shared with account affinity.
+    // Standalone CLI callers leave `options.sessionId` unset, so the upstream
+    // session id degrades to the per-account value rather than inventing a
+    // conversation.
+    const conversationAccount = ledgerAccountKey(session)
     /** Wall-clock origin for this attempt's latency figures. */
     const startedAt = Date.now()
+    // Streaming dispatch: the account proxy MUST carry the generation request
+    // (it carried only the control-plane calls before, so a proxied account
+    // silently generated from the host's real IP), and the streaming
+    // dispatcher drops the per-gap body timeout a reasoning pause would trip.
+    const routing = { proxyUrl: session.account.proxy, streaming: true }
 
-    let response: Response
-    try {
-      // Streaming dispatch: the account proxy MUST carry the generation request
-      // (it carried only the control-plane calls before, so a proxied account
-      // silently generated from the host's real IP), and the streaming
-      // dispatcher drops the per-gap body timeout a reasoning pause would trip.
-      const routing = { proxyUrl: session.account.proxy, streaming: true }
-      response = await fetchAgyFirstOk(
-        '/v1internal:streamGenerateContent?alt=sse',
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: options.signal,
-        },
-        accountFetch(routing),
-        routing,
-      )
-    } catch (error) {
-      const classified = classifyFetchError(error, { proxyUrl: session.account.proxy })
-      await this.options.reportFailure(classified.kind, session)
-      // A transport failure consumed no tokens, but it is a real attempt
-      // against this account's quota — record the request, not the usage.
-      this.recordUsage(session, options.model, { ok: false }, startedAt)
-      throw new LlmError(classified.message ?? 'agy fetch failed', 'TRANSPORT', { cause: error })
+    /**
+     * Send one request, resending at most once when the upstream reports the
+     * per-`sessionId` accumulation wall.
+     *
+     * The upstream accumulates a conversation's input server-side per
+     * `sessionId`; once that passes 1M tokens every request reusing the id fails
+     * with a 400 until the upstream session expires. Bumping the generation
+     * names a fresh upstream session and recovers the conversation. This is not
+     * an account fault, so it does not go through `reportFailure`: the account
+     * stays healthy and only the derived id changes.
+     */
+    const sendAttempt = async (): Promise<{ response: Response; bodyText?: string }> => {
+      for (let attempt = 0; ; attempt++) {
+        const generation = conversationKey !== undefined && conversationAccount !== undefined
+          ? currentSessionGeneration(conversationAccount, conversationKey)
+          : 0
+        const body = toAgyRequestBody(options, {
+          projectId: session.account.projectId,
+          sessionId:
+            deriveAntigravitySessionId(session.account.email, conversationKey, generation) ?? undefined,
+          ...(images.size > 0 ? { images } : {}),
+          ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
+        })
+        let response: Response
+        try {
+          response = await fetchAgyFirstOk(
+            '/v1internal:streamGenerateContent?alt=sse',
+            {
+              method: 'POST',
+              headers: buildRequestHeaders(session),
+              body: JSON.stringify(body),
+              signal: options.signal,
+            },
+            accountFetch(routing),
+            routing,
+          )
+        } catch (error) {
+          const classified = classifyFetchError(error, { proxyUrl: session.account.proxy })
+          await this.options.reportFailure(classified.kind, session)
+          // A transport failure consumed no tokens, but it is a real attempt
+          // against this account's quota — record the request, not the usage.
+          this.recordUsage(session, options.model, { ok: false }, startedAt)
+          throw new LlmError(classified.message ?? 'agy fetch failed', 'TRANSPORT', { cause: error })
+        }
+        if (response.ok) return { response }
+        const bodyText = await response.text().catch(() => undefined)
+        if (
+          attempt === 0
+          && conversationKey !== undefined
+          && conversationAccount !== undefined
+          && isSessionAccumulationOverflow(response.status, bodyText)
+        ) {
+          bumpSessionGeneration(conversationAccount, conversationKey)
+          continue
+        }
+        return { response, bodyText }
+      }
     }
 
+    const { response, bodyText } = await sendAttempt()
+
     if (!response.ok) {
-      const bodyText = await response.text().catch(() => undefined)
       const classified = classifyHttpError(response.status, response.headers, bodyText)
       await this.options.reportFailure(classified.kind, session, {
         retryAfterMs: classified.retryAfterMs,
@@ -321,6 +428,7 @@ export class AgyAdapter extends LlmAdapter {
         rateLimitCategory: classified.rateLimitCategory,
         resetTime: classified.resetTime,
         model: options.model,
+        verificationUrl: classified.verificationUrl,
       })
       this.recordUsage(session, options.model, {
         ok: false,
@@ -340,6 +448,21 @@ export class AgyAdapter extends LlmAdapter {
           'RATE_LIMIT',
           {
             providerRetryAfterMs: classified.retryAfterMs ?? undefined,
+            requestId: ProviderRequestId(generateAntigravityRequestId()),
+          },
+        )
+      }
+      if (classified.kind === 'verification-required') {
+        // Recoverable, so deliberately NOT INVALID_CREDENTIAL: the account is
+        // parked for a timed window, not disabled, and the pool moves on. The
+        // appeal link goes in the message because a message is the only channel
+        // DSH surfaces to the user.
+        const appeal = classified.verificationUrl ? ` Verify at: ${classified.verificationUrl}` : ''
+        throw new LlmError(
+          `agy account needs verification (${response.status}): ${classified.message ?? ''}${appeal}`,
+          'RATE_LIMIT',
+          {
+            providerRetryAfterMs: VERIFICATION_COOLDOWN_MS,
             requestId: ProviderRequestId(generateAntigravityRequestId()),
           },
         )

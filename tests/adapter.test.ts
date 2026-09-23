@@ -7,7 +7,7 @@ import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } 
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AGY_PUBLIC_MODELS, formatTieredModelName } from '../src/adapter/catalog.ts'
-import { AgyAdapter } from '../src/adapter/adapter.ts'
+import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 function textMessage(role: Message['role'], text: string): Message {
@@ -960,6 +960,57 @@ describe('models', () => {
   })
 })
 
+describe('buildRequestHeaders', () => {
+  function session(impersonation: AgyAccountSession['impersonation']): AgyAccountSession {
+    return {
+      auth: { access: 'at', expires: Date.now() + 3600_000, refresh: 'rt|p' },
+      account: { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0 },
+      index: 0,
+      impersonation,
+    }
+  }
+
+  /**
+   * Regression test for the highest-signal defect found in the security review.
+   *
+   * `attributionHeaders()` returns a lowercase `user-agent`; the impersonation
+   * object uses camel-case `User-Agent`. Spreading both kept them as two distinct
+   * properties, and `Headers` folded them into ONE comma-joined value:
+   *
+   *   `deepseek-harness/<v> (+url), antigravity/<v> <platform>`
+   *
+   * That header named this tool on every generation request, was byte-identical
+   * for every dsh-agy user, and cannot be produced by any official client. This
+   * test asserts the WIRE result rather than the intermediate object, because the
+   * object looked correct in isolation — which is exactly how the bug survived.
+   */
+  it('sends exactly one User-Agent, and it is the client identity', () => {
+    const headers = new Headers(buildRequestHeaders(session({
+      'User-Agent': 'antigravity/2.0.0 darwin/arm64',
+      'X-Goog-Api-Client': 'google-cloud-sdk vscode/1.96.0',
+      'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
+    })))
+
+    expect(headers.get('user-agent')).toBe('antigravity/2.0.0 darwin/arm64')
+    expect(headers.get('user-agent')).not.toContain('deepseek-harness')
+    // A comma-joined pair is the specific shape the old spread produced.
+    expect(headers.get('user-agent')).not.toContain(',')
+  })
+
+  it('keeps the remaining impersonation fields and the request id', () => {
+    const headers = buildRequestHeaders(session({
+      'User-Agent': 'antigravity/2.0.0 darwin/arm64',
+      'X-Goog-Api-Client': 'google-cloud-sdk vscode/1.96.0',
+      'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
+    }))
+
+    expect(headers.authorization).toBe('Bearer at')
+    expect(headers['X-Goog-Api-Client']).toBe('google-cloud-sdk vscode/1.96.0')
+    expect(headers['Client-Metadata']).toBe('{"ideType":"ANTIGRAVITY"}')
+    expect(headers['x-goog-request-id']).toMatch(/^agent\/\d+\/[0-9a-f]{8}$/)
+  })
+})
+
 describe('AgyAdapter', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -1077,6 +1128,58 @@ describe('AgyAdapter', () => {
       code: 'UNSUPPORTED_CONTENT',
       message: expect.stringContaining('agy image attachment "att-1" could not be loaded: attachment storage offline'),
     })
+  })
+
+  it('resends once under a fresh session id when the upstream hits the 1M wall', async () => {
+    const bodies: Array<{ request: { sessionId?: string } }> = []
+    const wall =
+      '{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed for the model: 1048576"}}'
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      // First attempt reports the per-session accumulation wall; the resend must
+      // succeed, which only happens if the derived session id actually changed.
+      if (bodies.length === 1) return new Response(wall, { status: 400 })
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+
+    const failures: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+    for await (const _ of adapter.stream(generateOptions({ sessionId: 'session-1' as never }))) void _
+
+    expect(bodies).toHaveLength(2)
+    const first = bodies[0]!.request.sessionId
+    const second = bodies[1]!.request.sessionId
+    expect(first).toBeDefined()
+    expect(second).toBeDefined()
+    // A different upstream session is the whole recovery mechanism.
+    expect(second).not.toBe(first)
+    // The account is healthy — this is a session-scoped wall, not an account
+    // fault, so it must not cool or rotate the account.
+    expect(failures).toEqual([])
+  })
+
+  it('does not resend an ordinary 400 under a bumped session id', async () => {
+    const bodies: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return new Response(
+        '{"error":{"code":400,"message":"Request contains an invalid argument."}}',
+        { status: 400 },
+      )
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ sessionId: 'session-1' as never }))) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+    // Resending a malformed payload changes nothing but the session id.
+    expect(bodies).toHaveLength(1)
   })
 
   it('resolves image attachments concurrently and returns a complete map', async () => {
@@ -1302,6 +1405,80 @@ describe('AgyAdapter', () => {
     expect(Number.isFinite(retryMs)).toBe(true)
     expect(Number.isInteger(retryMs)).toBe(true)
     expect(retryMs).toBeGreaterThan(0)
+  })
+
+  it('treats a 403 verification challenge as recoverable, not as a dead credential', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: {
+        code: 403,
+        status: 'PERMISSION_DENIED',
+        message: 'VALIDATION_REQUIRED',
+        details: [{ metadata: { validation_url: 'https://accounts.google.com/verify?t=abc' } }],
+      },
+    }), { status: 403 })))
+
+    const seen: Array<{ kind: string; url?: string }> = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind, _session, info) => { seen.push({ kind, url: info?.verificationUrl }) },
+    })
+
+    // INVALID_CREDENTIAL would tell the user their login is dead and disable the
+    // account; this signal means "verify, then come back".
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+
+    expect(seen).toEqual([{ kind: 'verification-required', url: 'https://accounts.google.com/verify?t=abc' }])
+  })
+
+  it('surfaces the appeal link in the failure message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: { code: 403, message: 'VALIDATION_REQUIRED', details: [{ metadata: { appeal_url: 'https://appeal.example/x' } }] },
+    }), { status: 403 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toThrow(/https:\/\/appeal\.example\/x/)
+  })
+
+  it('releases the in-flight slot when a consumer abandons the stream', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream(['data: [DONE]']), { status: 200 })))
+
+    const events: string[] = []
+    const account = { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0 }
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      noteRequestStarted: (a) => events.push(`start:${a.email}`),
+      noteRequestSettled: (a) => events.push(`settled:${a.email}`),
+    })
+
+    // Consume one chunk then break: the async generator's `finally` must still run
+    // the release, or the counter leaks and the account is deprioritized forever.
+    for await (const _ of adapter.stream(generateOptions())) break
+    expect(events).toContain(`start:${account.email}`)
+    expect(events).toContain(`settled:${account.email}`)
+  })
+
+  it('releases the in-flight slot when the request fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":"boom"}', { status: 500 })))
+
+    const events: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      noteRequestStarted: () => events.push('start'),
+      noteRequestSettled: () => events.push('settled'),
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'SERVER' })
+    expect(events).toEqual(['start', 'settled'])
   })
 
   it('maps structured auth failures to the matching host error code', async () => {

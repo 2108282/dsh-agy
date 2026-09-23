@@ -49,6 +49,13 @@ export interface AccountView {
   /** ISO timestamp while cooling, else null. */
   cooldownUntil: string | null
   cooldownReason: string | null
+  /**
+   * Appeal link from an upstream verification challenge, when one was supplied.
+   * The account is parked, not disabled, and recovers without user action.
+   */
+  verificationUrl: string | null
+  /** True while the account is parked behind a verification challenge. */
+  verificationRequired: boolean
   /** Per-family reset wall, as stored (`familyKey -> epoch ms`). */
   rateLimits: Record<string, number> | null
   fingerprint: { userAgent: string; deviceId: string; createdAt: number } | null

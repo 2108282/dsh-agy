@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgySessionManager, impersonationHeadersFor, SESSION_AFFINITY_WINDOW_MS } from '../src/session.ts'
+import { MAX_IN_FLIGHT_PER_ACCOUNT } from '../src/runtime/rotation.ts'
 import { InMemoryAccountStore } from '../src/store/accounts.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 import type { ManagedAccount } from '../src/types.ts'
@@ -88,6 +89,31 @@ describe('AgySessionManager', () => {
     const third = await sessions.getSession()
     expect(third!.index).toBe(1)
     vi.useRealTimers()
+  })
+
+  it('gives concurrent conversations independent affinity pins', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // Conversation A starts on the active account and pins it.
+    const a1 = await sessions.getSession('gemini-3-flash', undefined, 'session-A')
+    expect(a1!.index).toBe(0)
+
+    // Conversation B is steered elsewhere (its own first pick follows the shared
+    // activeIndex, which A's pin does not change) and pins that account.
+    await store.mutate((s) => { s.activeIndex = 1 })
+    const b1 = await sessions.getSession('gemini-3-flash', undefined, 'session-B')
+    expect(b1!.index).toBe(1)
+
+    // Both pins must survive independently. With the old single-slot pin, B's
+    // selection overwrote A's and A would silently migrate on its next turn.
+    expect((await sessions.getSession('gemini-3-flash', undefined, 'session-A'))!.index).toBe(0)
+    expect((await sessions.getSession('gemini-3-flash', undefined, 'session-B'))!.index).toBe(1)
+
+    // A pinned account failing frees only the conversations pinned to it.
+    await sessions.reportFailure('rate-limit', b1!)
+    expect((await sessions.getSession('gemini-3-flash', undefined, 'session-A'))!.index).toBe(0)
   })
 
   it('drops session affinity when the pinned account rotates', async () => {
@@ -298,6 +324,50 @@ describe('usage-driven selection', () => {
     expect(second!.index).toBe(0)
   })
 
+  it('uses a below-threshold account when it is the only candidate', async () => {
+    stubTokenEndpoint()
+    // Pins the DECISION, not just the mechanism: a drained account is ranked last
+    // and thus skipped whenever an alternative exists (the test above), but it is
+    // deliberately NOT hard-blocked until it is actually empty. Refusing to use
+    // the last 5% would fail the turn outright, which is worse than spending
+    // quota that resets anyway. AM's `quota_protection` reserves a percentage by
+    // excluding such an account outright; that is a different product decision
+    // (a reserve for a shared gateway) and would be a regression for a
+    // single-user plugin whose alternative is "no answer".
+    const store = new InMemoryAccountStore(storage([
+      quotaAccount('only@x', { google: { remainingFraction: 0.05 } }),
+    ], 0))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session).toBeDefined()
+    expect(session!.index).toBe(0)
+  })
+
+  it('spreads concurrent fan-out off an account that is at its in-flight cap', async () => {
+    stubTokenEndpoint()
+    const a = account('a@x')
+    const b = account('b@x')
+    const store = new InMemoryAccountStore(storage([a, b], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // Saturate account 0 (the one plain ranking would choose) and confirm the next
+    // unrelated conversation is steered to account 1 instead of stacking on it.
+    for (let i = 0; i < MAX_IN_FLIGHT_PER_ACCOUNT; i++) sessions.noteRequestStarted(a)
+    const spread = await sessions.getSession('gemini-3-flash', undefined, 'session-C')
+    expect(spread!.index).toBe(1)
+
+    // Settling frees it again. Re-seed activeIndex first: spreading rotated it to
+    // 1, and ranking is deliberately biased to the active index, which would
+    // otherwise mask whether the cap still excludes account 0.
+    sessions.noteRequestSettled(a)
+    sessions.noteRequestSettled(a)
+    sessions.noteRequestSettled(a)
+    await store.mutate((s) => { s.activeIndex = 0 })
+    const back = await sessions.getSession('gemini-3-flash', undefined, 'session-D')
+    expect(back!.index).toBe(0)
+  })
+
   it('ingests fresh family quotas from fetchAvailableModels when the cache is stale', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -437,13 +507,41 @@ describe('usage-driven selection', () => {
     expect(session!.index).toBe(0)
   })
 
-  it('stable fingerprint mode serves deterministic fallback headers without a fingerprint', () => {
-    vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', 'stable')
-    const first = impersonationHeadersFor(account('a@x'))
-    const second = impersonationHeadersFor(account('a@x'))
-    expect(first).toEqual(second)
-    expect(first['Client-Metadata']).toContain('ANTIGRAVITY')
-    vi.unstubAllEnvs()
+  it('serves deterministic fallback headers without a fingerprint, in either mode', () => {
+    // The pre-fingerprint fallback used to re-randomize platform per call in the
+    // default `dynamic` mode, so one account's consecutive requests could claim
+    // `windows/amd64` and then `darwin/arm64`. An OS that changes between two
+    // requests of one session is a stronger anomaly than a stale version, so the
+    // fallback is now deterministic regardless of mode.
+    for (const mode of ['dynamic', 'stable']) {
+      vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', mode)
+      const first = impersonationHeadersFor(account('a@x'))
+      const second = impersonationHeadersFor(account('a@x'))
+      expect(first).toEqual(second)
+      expect(first['User-Agent']).toMatch(/^antigravity\/\d+\.\d+\.\d+ \S+$/)
+      expect(first['Client-Metadata']).toContain('ANTIGRAVITY')
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('freezes one device identity per account from the first request', async () => {
+    stubTokenEndpoint()
+    const acc = account('first-use@x')
+    const store = new InMemoryAccountStore(storage([acc]))
+    const sessions = new AgySessionManager({ store })
+
+    expect(await sessions.getSession('gemini-3-flash')).toBeDefined()
+    const after = (await store.load()).accounts[0]!
+    // The identity must exist before any rate-limit: otherwise the fallback path
+    // serves the first requests and the account appears to change machine.
+    expect(after.fingerprint).toBeDefined()
+    expect(after.fingerprintHistory?.length).toBe(1)
+    expect(after.fingerprintHistory?.[0]?.reason).toBe('initial')
+
+    const first = after.fingerprint!.userAgent
+    // A second session on the same account reuses the stored identity.
+    expect(await sessions.getSession('gemini-3-flash')).toBeDefined()
+    expect((await store.load()).accounts[0]!.fingerprint!.userAgent).toBe(first)
   })
 
   it('health-check probes enabled accounts in batch and re-enables live ones', async () => {

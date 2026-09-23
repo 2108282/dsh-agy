@@ -11,7 +11,24 @@ export const BACKOFF_TIERS_MS = [5_000, 10_000, 20_000, 30_000, 60_000] as const
 /** Below this remaining fraction the account is treated as soft-quota-exhausted. */
 export const SOFT_QUOTA_THRESHOLD = 0.15
 
-export const MAX_ACCOUNTS = 10
+/**
+ * Concurrent upstream requests one account may carry before selection prefers
+ * another. A real Antigravity window serves one conversation at a time, so
+ * several simultaneous streams from one account is a shape the official client
+ * does not produce. The cap is generous on purpose: it should only bite under
+ * genuine fan-out (many parallel conversations), not on ordinary tool loops.
+ */
+export const MAX_IN_FLIGHT_PER_ACCOUNT = 3
+
+/**
+ * In-flight accounting older than this is treated as leaked and discarded.
+ *
+ * The counter is released by the adapter's `finally`, which runs on completion,
+ * error, and early consumer termination alike — but a process killed mid-request
+ * cannot release anything, and a stuck counter would permanently deprioritize an
+ * account. The sweep bounds that to one TTL.
+ */
+export const IN_FLIGHT_STALE_MS = 10 * 60 * 1000
 
 function backoffFor(consecutiveFailures: number, maxJitterMs = 1_000): number {
   const index = Math.min(Math.max(consecutiveFailures, 0), BACKOFF_TIERS_MS.length - 1)
@@ -19,28 +36,9 @@ function backoffFor(consecutiveFailures: number, maxJitterMs = 1_000): number {
   return base + Math.floor(Math.random() * maxJitterMs)
 }
 
-/** Whether the account's cached quota for a model is below the soft threshold. */
-export function isOverSoftQuota(
-  account: ManagedAccount,
-  model: string | undefined,
-  now = Date.now(),
-): boolean {
-  if (!model) return false
-  const cached = account.cachedQuota?.[model]
-  if (!cached || typeof cached.remainingFraction !== 'number') return false
-  if (cached.resetTime && Date.parse(cached.resetTime) <= now) return false
-  return cached.remainingFraction < SOFT_QUOTA_THRESHOLD
-}
-
 /** Whether the account is currently in a cooldown window. */
 export function isCoolingDown(account: ManagedAccount, now = Date.now()): boolean {
   return (account.coolingDownUntil ?? 0) > now
-}
-
-/** Whether any model rate limit on the account is still active. */
-export function isRateLimited(account: ManagedAccount, now = Date.now()): boolean {
-  const times = account.rateLimitResetTimes ?? {}
-  return Object.values(times).some((reset) => typeof reset === 'number' && reset > now)
 }
 
 /** Whether the requested model family on this account is rate-limited. */
@@ -79,6 +77,15 @@ export const FULL_QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000
 export const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000
 /** Cap for a server-reported reset time on per-minute limits (guards against bogus far-future values). */
 export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000
+
+/**
+ * How long a verification challenge parks an account before the pool tries it
+ * again. Deliberately short and timed rather than permanent: the credential is
+ * intact, the wall is upstream's, and it can clear on its own — so the account
+ * returns to service without the user doing anything, while still not being
+ * hammered in the meantime.
+ */
+export const VERIFICATION_COOLDOWN_MS = 15 * 60 * 1000
 
 /** Absolute server-reported reset in ms when it lies in the future, else undefined. */
 export function parseFutureResetMs(resetTime: string | undefined, now = Date.now()): number | undefined {
@@ -142,6 +149,19 @@ export function decideRotation(
       account.verificationRequiredReason = 'auth-failure'
       account.enabled = false
       return { action: 'revoke' }
+    }
+    case 'verification-required': {
+      // Recoverable, and NOT a credential failure: the upstream is asking the
+      // account owner to verify. Park the account for a timed window instead of
+      // disabling it, so recovery needs no human action once the wall clears,
+      // and keep the challenge state (plus the appeal URL, written by the caller)
+      // so the UI can tell the user what happened.
+      account.coolingDownUntil = now + VERIFICATION_COOLDOWN_MS
+      account.cooldownReason = 'validation-required'
+      account.verificationRequired = true
+      account.verificationRequiredAt = now
+      account.verificationRequiredReason = 'validation-required'
+      return { action: 'cool', backoffMs: VERIFICATION_COOLDOWN_MS }
     }
     case 'network-error': {
       account.coolingDownUntil = now + backoffMs

@@ -10,6 +10,8 @@ import { refreshAccessToken } from './oauth/refresh.ts'
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from './oauth/auth.ts'
 import type { AccountStore } from './store/accounts.ts'
 import {
+  IN_FLIGHT_STALE_MS,
+  MAX_IN_FLIGHT_PER_ACCOUNT,
   MAX_RATE_LIMIT_COOLDOWN_MS,
   RATE_LIMIT_COOLDOWN_MS,
   clearExpiredState,
@@ -30,9 +32,8 @@ import {
   rankPoolCandidates,
 } from './runtime/quota.ts'
 import {
-  DEFAULT_FINGERPRINT_DATA,
   generateFingerprint,
-  getRandomizedHeaders,
+  getFingerprintData,
   getStableHeaders,
   recordFingerprintVersion,
   updateFingerprintVersion,
@@ -40,6 +41,7 @@ import {
 import { deriveAntigravitySessionId } from './runtime/identity.ts'
 import { fingerprintMode } from './runtime/risk.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
+import { currentAgyVersion } from './oauth/constants.ts'
 import { accountFetch, isProxyUnreachableError, proxiedFetch } from './proxy.ts'
 import { describeFetchError } from './runtime/classify.ts'
 import type { Fingerprint } from './types.ts'
@@ -111,8 +113,15 @@ interface QuotaRefreshResult {
 
 /**
  * Resolve the impersonation headers for one request from the account's
- * persistent fingerprint (stable identity). The fallback randomizes per
- * request in `dynamic` mode and pins one identity in `stable` mode.
+ * persistent fingerprint (stable identity).
+ *
+ * The fallback below is only reachable when an account has no stored identity —
+ * normal operation creates one on first use (see `getSession`). It is therefore
+ * deliberately DETERMINISTIC rather than randomized: a per-request platform or
+ * version would make one account appear to be several different machines, which
+ * is the anomaly this identity exists to avoid. It reads
+ * {@link getFingerprintData} so a `$DSH_HOME/agy-fingerprint-data.json` override
+ * still applies on this path.
  */
 export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSession['impersonation'] {
   const fingerprint = account.fingerprint
@@ -123,9 +132,7 @@ export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSess
       'Client-Metadata': JSON.stringify(fingerprint.clientMetadata),
     }
   }
-  const headers = fingerprintMode() === 'stable'
-    ? getStableHeaders(DEFAULT_FINGERPRINT_DATA)
-    : getRandomizedHeaders(DEFAULT_FINGERPRINT_DATA)
+  const headers = getStableHeaders(getFingerprintData(), currentAgyVersion())
   return {
     'User-Agent': headers['User-Agent'],
     'X-Goog-Api-Client': headers['X-Goog-Api-Client'],
@@ -153,13 +160,111 @@ export class AgySessionManager {
   private static readonly REFRESH_SKEW_MS = 2 * 60 * 1000
 
   /**
-   * Session affinity (time-window approximation): DSH exposes no conversation
-   * id, so instead of pinning per session we reuse the last-used account while
-   * it is fresh. Keeps upstream prefix caching and sessionId continuity across
-   * the turns of one conversation (OmniRoute pins by session for the same
-   * reason). Cleared on rotate so a failure re-picks from activeIndex.
+   * Per-conversation account affinity: the account one conversation is pinned
+   * to, so its turns stay together (upstream prefix cache + `sessionId`
+   * continuity) instead of re-ranking per request.
+   *
+   * Keyed by the conversation — `GenerateOptions.sessionId`, which the DSH agent
+   * loop stamps — rather than by a single "last used" slot. That slot was a
+   * stand-in for a conversation id the code assumed DSH did not expose, and with
+   * two concurrent conversations the second overwrote the first's pin, so both
+   * drifted across the pool independently of which account they started on.
+   * Entries expire after {@link SESSION_AFFINITY_WINDOW_MS}.
    */
-  private lastUsed: { key: string; at: number } | null = null
+  private readonly affinity = new Map<string, { key: string; at: number }>()
+
+  /** Bound on tracked conversations; least-recently-pinned entries are evicted. */
+  private static readonly MAX_AFFINITY_ENTRIES = 64
+
+  /** Bucket for callers with no session identity (standalone CLI, one-shots). */
+  private static readonly ANONYMOUS_CONVERSATION = '\u0000anonymous'
+
+  /**
+   * In-flight upstream requests per account, so selection can spread concurrent
+   * fan-out across the pool instead of stacking every stream on one account.
+   *
+   * Deliberately a PREFERENCE, not a hard gate: when every eligible account is at
+   * the cap, selection proceeds with the best-ranked one rather than waiting.
+   * Blocking would need a reliable release on every path (including an abandoned
+   * stream) and a bounded wait to avoid deadlock, and a leaked counter would then
+   * stall real requests — a worse failure than the burst it prevents. The
+   * documented limitation is therefore: this spreads load across a multi-account
+   * pool, and cannot throttle a single-account one.
+   */
+  private readonly inFlight = new Map<string, { count: number; at: number }>()
+
+  /** In-flight count for one account, discarding a leaked entry past its TTL. */
+  private inFlightCount(accountKey: string, now: number): number {
+    const entry = this.inFlight.get(accountKey)
+    if (entry === undefined) return 0
+    if (now - entry.at > IN_FLIGHT_STALE_MS) {
+      this.inFlight.delete(accountKey)
+      return 0
+    }
+    return entry.count
+  }
+
+  /** Record that one upstream request for this account has started. */
+  noteRequestStarted(account: ManagedAccount): void {
+    const key = this.accountKey(account)
+    const now = Date.now()
+    this.inFlight.set(key, { count: this.inFlightCount(key, now) + 1, at: now })
+  }
+
+  /** Record that one upstream request for this account has settled, on any path. */
+  noteRequestSettled(account: ManagedAccount): void {
+    const key = this.accountKey(account)
+    const now = Date.now()
+    const count = this.inFlightCount(key, now)
+    if (count <= 1) this.inFlight.delete(key)
+    else this.inFlight.set(key, { count: count - 1, at: now })
+  }
+
+  /** The map key for a conversation; anonymous callers share one bucket. */
+  private conversationKeyFor(conversationKey?: string): string {
+    const trimmed = conversationKey?.trim()
+    return trimmed && trimmed.length > 0 ? trimmed : AgySessionManager.ANONYMOUS_CONVERSATION
+  }
+
+  /** Drop expired pins and keep the map bounded. */
+  private pruneAffinity(now: number): void {
+    for (const [conversation, pin] of this.affinity) {
+      if (now - pin.at >= SESSION_AFFINITY_WINDOW_MS) this.affinity.delete(conversation)
+    }
+    while (this.affinity.size > AgySessionManager.MAX_AFFINITY_ENTRIES) {
+      const oldest = this.affinity.keys().next()
+      if (oldest.done) break
+      this.affinity.delete(oldest.value)
+    }
+  }
+
+  /** The account key this conversation is pinned to, when the pin is still fresh. */
+  private affinityFor(conversationKey: string | undefined, now: number): string | null {
+    const pin = this.affinity.get(this.conversationKeyFor(conversationKey))
+    if (!pin || now - pin.at >= SESSION_AFFINITY_WINDOW_MS) return null
+    return pin.key
+  }
+
+  /** Pin one conversation to one account. Re-inserts so eviction stays LRU. */
+  private setAffinity(conversationKey: string | undefined, accountKey: string, now: number): void {
+    const conversation = this.conversationKeyFor(conversationKey)
+    this.affinity.delete(conversation)
+    this.affinity.set(conversation, { key: accountKey, at: now })
+    this.pruneAffinity(now)
+  }
+
+  /**
+   * Drop every pin pointing at one account.
+   *
+   * A rotation or a skip means the account just proved unusable for the
+   * conversation that was pinned to it; other conversations pinned elsewhere keep
+   * their pins, which the single-slot version could not express.
+   */
+  private clearAffinityForAccount(accountKey: string): void {
+    for (const [conversation, pin] of this.affinity) {
+      if (pin.key === accountKey) this.affinity.delete(conversation)
+    }
+  }
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store
@@ -340,18 +445,23 @@ export class AgySessionManager {
    * healthy, and not drained for the requested model; otherwise the pool is
    * ranked by family-scoped usage (OMP-aligned) and the best candidate wins.
    */
-  private async pickAccount(storage: AccountStorageV4, model?: string): Promise<{ account: ManagedAccount; index: number } | undefined> {
+  private async pickAccount(
+    storage: AccountStorageV4,
+    model?: string,
+    conversationKey?: string,
+  ): Promise<{ account: ManagedAccount; index: number } | undefined> {
     const now = Date.now()
     for (const account of storage.accounts) clearExpiredState(account, now)
 
     const family = modelFamilyOf(model)
     const familyKey = familyKeyOf(model)
-    // Session affinity (time-window approximation): reuse the last-used account
-    // while it is fresh and healthy, so one conversation stays on one account
-    // (upstream prefix cache + sessionId continuity). A drained family or a
-    // cooldown breaks the pin and re-ranks, mirroring OMP's pinned-until-unusable.
-    if (this.lastUsed && now - this.lastUsed.at < SESSION_AFFINITY_WINDOW_MS) {
-      const lastIndex = storage.accounts.findIndex((a) => this.accountKey(a) === this.lastUsed!.key)
+    // Conversation affinity: reuse the account this conversation is already
+    // pinned to while it is fresh and healthy, so one conversation stays on one
+    // account. A drained family or a cooldown breaks the pin and re-ranks,
+    // mirroring OMP's pinned-until-unusable.
+    const pinnedKey = this.affinityFor(conversationKey, now)
+    if (pinnedKey !== null) {
+      const lastIndex = storage.accounts.findIndex((a) => this.accountKey(a) === pinnedKey)
       if (lastIndex !== -1) {
         const last = storage.accounts[lastIndex]!
         if (
@@ -370,7 +480,14 @@ export class AgySessionManager {
     if (eligible.length === 0) return undefined
 
     const ranked = rankPoolCandidates(eligible, model, now, storage.activeIndex)
-    const picked = ranked.find((candidate) => candidate.blockedUntil === null)
+    // Prefer an account with in-flight headroom so concurrent conversations
+    // spread across the pool; fall back to plain ranking when every candidate is
+    // saturated (see `inFlight` for why this is a preference, not a gate).
+    const picked =
+      ranked.find((candidate) =>
+        candidate.blockedUntil === null
+        && this.inFlightCount(this.accountKey(candidate.account), now) < MAX_IN_FLIGHT_PER_ACCOUNT)
+      ?? ranked.find((candidate) => candidate.blockedUntil === null)
     if (!picked) {
       const quotaExhausted = (account: ManagedAccount): boolean => {
         if (account.cooldownReason === 'quota-exhausted' && (account.coolingDownUntil ?? 0) > now) return true
@@ -403,8 +520,16 @@ export class AgySessionManager {
    *   account than the one the user clicked would report a result for the wrong
    *   account. Deliberately does NOT update the affinity pin: a one-shot test
    *   must not steer the next real conversation onto the account it probed.
+   * @param conversationKey - the conversation's identity (`GenerateOptions.sessionId`),
+   *   which scopes account affinity. Concurrent conversations therefore hold
+   *   independent pins. Omitted by callers with no conversation (CLI, probes),
+   *   which share one anonymous bucket.
    */
-  async getSession(model?: string, accountIndex?: number): Promise<AgyAccountSession | undefined> {
+  async getSession(
+    model?: string,
+    accountIndex?: number,
+    conversationKey?: string,
+  ): Promise<AgyAccountSession | undefined> {
     let storage = await this.store.load()
     if (accountIndex !== undefined) {
       // Fail loudly rather than silently falling back to the pool: a test that
@@ -434,7 +559,7 @@ export class AgySessionManager {
         // In-memory overlay on storage already took place in refreshQuotaCache.
       }
       const picked = accountIndex === undefined
-        ? await this.pickAccount(storage, model)
+        ? await this.pickAccount(storage, model, conversationKey)
         : (() => {
           const account = storage.accounts[accountIndex]
           if (!account) throw new Error(`account #${accountIndex} not found`)
@@ -473,7 +598,7 @@ export class AgySessionManager {
           throw new Error(`account #${accountIndex} credential is no longer valid — run \`dsh-agy login\``)
         }
         // Re-read and select another enabled account within this same request.
-        this.lastUsed = null
+        this.clearAffinityForAccount(this.accountKey(picked.account))
         storage = await this.store.load()
         continue
       }
@@ -506,9 +631,34 @@ export class AgySessionManager {
         }
       }
 
+      // Create the account's device identity on first USE, not on first
+      // rate-limit. Platform, version and SDK-client are chosen once here and
+      // frozen, so one account presents one coherent device for its whole life.
+      //
+      // Previously the identity did not exist until the account's first 429, and
+      // the pre-fingerprint fallback re-picked a platform per request — so a
+      // single account's consecutive calls claimed `windows/amd64` and then
+      // `darwin/arm64`. An OS that changes between two requests of one session is
+      // a stronger anomaly than a stale version, and it was present on the most
+      // common path (every fresh account, until it happened to hit a limit).
+      if (!picked.account.fingerprint) {
+        const fingerprint = generateFingerprint(undefined, currentAgyVersion())
+        const history = recordFingerprintVersion(picked.account.fingerprintHistory, fingerprint, 'initial')
+        await this.store.mutate((s) => {
+          const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+          // Re-check under the lock: a concurrent request may have created one.
+          if (account && !account.fingerprint) {
+            account.fingerprint = fingerprint
+            account.fingerprintHistory = history
+          }
+        })
+        picked.account.fingerprint = fingerprint
+        picked.account.fingerprintHistory = history
+      }
+
       // A pinned (test) call must not touch the affinity pin: probing an account
       // is not "using" it, and pinning would steer the next real conversation.
-      if (accountIndex === undefined) this.lastUsed = { key, at: Date.now() }
+      if (accountIndex === undefined) this.setAffinity(conversationKey, key, Date.now())
       return {
         auth,
         account: picked.account,
@@ -533,7 +683,7 @@ export class AgySessionManager {
    * State on the account itself is deliberately left untouched (no cooldown).
    */
   private async skipAccount(storage: AccountStorageV4, account: ManagedAccount): Promise<AccountStorageV4> {
-    this.lastUsed = null
+    this.clearAffinityForAccount(this.accountKey(account))
     const key = this.accountKey(account)
     const deadIndex = storage.accounts.findIndex((candidate) => this.accountKey(candidate) === key)
     if (deadIndex !== -1) {
@@ -558,6 +708,8 @@ export class AgySessionManager {
       resetTime?: string
       /** Requested model id; drives family-scoped rate-limit bookkeeping. */
       model?: string
+      /** Appeal link from a `verification-required` body; surfaced to the user. */
+      verificationUrl?: string
     },
   ): Promise<void> {
     if (!session?.account) return
@@ -573,6 +725,13 @@ export class AgySessionManager {
       if (!account) return
 
       const decision = decideRotation(kind, account, consecutive, info?.retryAfterMs, info?.rateLimitCategory, info?.resetTime)
+
+      // Keep the appeal link beside the challenge state so a user can act on it.
+      // Only overwritten when the upstream actually supplied one, so a later
+      // challenge without a URL does not erase a previously captured link.
+      if (kind === 'verification-required' && info?.verificationUrl) {
+        account.verificationUrl = info.verificationUrl
+      }
 
       if (kind === 'rate-limit' && info?.rateLimitCategory !== 'soft_rate_limit') {
         // Family-scoped bookkeeping of the real reset (display + ranking wall).
@@ -616,7 +775,9 @@ export class AgySessionManager {
           storage.activeIndex = nextIndex
           nextIndexToRotate = nextIndex
         }
-        this.lastUsed = null
+        // Only conversations pinned to the failed account are freed; a pin on
+        // another account was never this failure's business.
+        this.clearAffinityForAccount(key)
       }
     })
 

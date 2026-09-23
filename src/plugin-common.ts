@@ -98,10 +98,12 @@ export async function createAgyRuntime(ctx: Context): Promise<{
     sessions.startHealthProbe(healthIntervalMs)
   }
   const adapter = new AgyAdapter({
-    getSession: (model) => sessions.getSession(model),
+    getSession: (model, conversationKey) => sessions.getSession(model, undefined, conversationKey),
     reportFailure: (kind, session, info) => sessions.reportFailure(kind, session, info),
     markSuccess: (session) => sessions.markSuccess(session),
     resolveAttachments: () => ctx.get('attachments') as AgyAttachmentStore | undefined,
+    noteRequestStarted: (account) => sessions.noteRequestStarted(account),
+    noteRequestSettled: (account) => sessions.noteRequestSettled(account),
     modelVisibility,
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })

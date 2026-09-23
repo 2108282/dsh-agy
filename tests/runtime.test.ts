@@ -4,26 +4,34 @@ import {
   classifyHttpError,
   classifyRefreshFailure,
   describeFetchError,
+  extractVerificationUrl,
+  isSessionAccumulationOverflow,
 } from '../src/runtime/classify.ts'
 import {
   computeSoftQuotaCacheTtlMs,
   decideRotation,
   isCoolingDown,
-  isOverSoftQuota,
-  isRateLimited,
+  isFamilyRateLimited,
   pickNextAccountIndex,
   recordRateLimit,
+  SOFT_QUOTA_THRESHOLD,
+  VERIFICATION_COOLDOWN_MS,
 } from '../src/runtime/rotation.ts'
 import {
-  buildFingerprintHeaders,
   generateFingerprint,
   getRandomizedHeaders,
   getStableHeaders,
+  MAX_FINGERPRINT_HISTORY,
   recordFingerprintVersion,
-  restoreFingerprint,
   updateFingerprintVersion,
 } from '../src/runtime/fingerprint.ts'
-import { deriveAntigravitySessionId, generateAntigravityRequestId, generateAntigravitySessionId } from '../src/runtime/identity.ts'
+import {
+  _clearSessionGenerationsForTest,
+  bumpSessionGeneration,
+  currentSessionGeneration,
+  deriveAntigravitySessionId,
+  generateAntigravityRequestId,
+} from '../src/runtime/identity.ts'
 import { resolveAntigravityVersion } from '../src/runtime/version.ts'
 import {
   FAMILY_UNKNOWN,
@@ -79,6 +87,41 @@ describe('classifyHttpError', () => {
     expect(quota.rateLimitCategory).toBe('quota_exhausted')
     const plain = classifyHttpError(403, new Headers(), '{"error":"access_denied"}')
     expect(plain.kind).toBe('auth-failure')
+  })
+
+  it('separates a verification challenge from dead credentials', () => {
+    // The upstream asking the owner to verify is RECOVERABLE. Classifying it as
+    // auth-failure permanently disabled a healthy account on a signal that meant
+    // "come back after verifying".
+    const challenge = classifyHttpError(403, new Headers(), JSON.stringify({
+      error: {
+        code: 403,
+        status: 'PERMISSION_DENIED',
+        message: 'VALIDATION_REQUIRED',
+        details: [{ metadata: { validation_url: 'https://accounts.google.com/verify?token=abc' } }],
+      },
+    }))
+    expect(challenge.kind).toBe('verification-required')
+    expect(challenge.verificationUrl).toBe('https://accounts.google.com/verify?token=abc')
+
+    // A genuine ban is still terminal.
+    const banned = classifyHttpError(
+      403,
+      new Headers(),
+      '{"error":{"code":403,"message":"Your account has been suspended due to a violation of the Terms of Service"}}',
+    )
+    expect(banned.kind).toBe('auth-failure')
+  })
+
+  it('extracts the appeal link from either RPC metadata field, or textually', () => {
+    expect(extractVerificationUrl(JSON.stringify({
+      error: { details: [{ metadata: { appeal_url: 'https://appeal.example/x' } }] },
+    }))).toBe('https://appeal.example/x')
+    // Google escapes & as \u0026 inside the JSON string form.
+    expect(extractVerificationUrl('please verify your account at https://x.example/v?a=1\\u0026b=2 now'))
+      .toBe('https://x.example/v?a=1&b=2')
+    expect(extractVerificationUrl('{"error":"no url here"}')).toBeUndefined()
+    expect(extractVerificationUrl(undefined)).toBeUndefined()
   })
 
   it('classifies 5xx as transient with backoff retry', () => {
@@ -229,6 +272,23 @@ describe('rotation state machine', () => {
     expect(acc.verificationRequired).toBe(true)
   })
 
+  it('parks a verification challenge instead of disabling the account', () => {
+    const acc = account()
+    const before = Date.now()
+    const decision = decideRotation('verification-required', acc, 0)
+
+    // Recoverable: the credential is intact, so the account must stay ENABLED and
+    // come back on its own. `revoke` here was the defect — it permanently
+    // disabled healthy accounts on an upstream request to verify.
+    expect(decision.action).toBe('cool')
+    expect(acc.enabled).not.toBe(false)
+    expect(acc.coolingDownUntil).toBeGreaterThanOrEqual(before + VERIFICATION_COOLDOWN_MS)
+    expect(acc.cooldownReason).toBe('validation-required')
+    // The challenge state is still recorded, so the UI can explain the pause.
+    expect(acc.verificationRequired).toBe(true)
+    expect(acc.verificationRequiredReason).toBe('validation-required')
+  })
+
   it('retries transient failures without mutating state', () => {
     const acc = account()
     const decision = decideRotation('transient', acc, 0)
@@ -301,20 +361,20 @@ describe('rotation state machine', () => {
   it('tracks rate limits and cooldowns', () => {
     const acc = account()
     recordRateLimit(acc, 'gemini-x', Date.now() + 5000)
-    expect(isRateLimited(acc)).toBe(true)
+    // The live reader is family-scoped; `isFamilyDrained`/ranking consume the
+    // same map, which is what actually keeps a limited account out of rotation.
+    expect(isFamilyRateLimited(acc, 'gemini-x')).toBe(true)
+    expect(isFamilyRateLimited(acc, 'claude-x')).toBe(false)
     expect(isCoolingDown(acc)).toBe(false)
     const cooled = { ...account(), coolingDownUntil: Date.now() + 5000 }
     expect(isCoolingDown(cooled)).toBe(true)
   })
 
   it('soft quota pre-check avoids burning requests', () => {
-    const acc = account()
-    expect(isOverSoftQuota(acc, 'm1')).toBe(false)
-    acc.cachedQuota = { m1: { remainingFraction: 0.05 } }
-    expect(isOverSoftQuota(acc, 'm1')).toBe(true)
-    expect(isOverSoftQuota(acc, 'm2')).toBe(false)
-    acc.cachedQuota = { m1: { remainingFraction: 0.05, resetTime: '2000-01-01T00:00:00Z' } }
-    expect(isOverSoftQuota(acc, 'm1')).toBe(false)
+    // The live pre-check is `isFamilyDrained` (quota.ts), exercised in the family
+    // quota helpers below; this asserts the shared threshold it reads.
+    expect(SOFT_QUOTA_THRESHOLD).toBeGreaterThan(0)
+    expect(SOFT_QUOTA_THRESHOLD).toBeLessThan(1)
   })
 
   it('computes quota cache TTLs by health', () => {
@@ -336,14 +396,6 @@ describe('fingerprint', () => {
     expect(Object.keys(fp.clientMetadata)).toEqual(['ideType'])
   })
 
-  it('composes only User-Agent from a fingerprint', () => {
-    expect(buildFingerprintHeaders(null)).toEqual({})
-    const fp = generateFingerprint()
-    const headers = buildFingerprintHeaders(fp)
-    expect(headers['User-Agent']).toBe(fp.userAgent)
-    expect(Object.keys(headers)).toEqual(['User-Agent'])
-  })
-
   it('randomizes per-request headers across the pools', () => {
     const seen = new Set<string>()
     for (let i = 0; i < 40; i++) {
@@ -363,23 +415,23 @@ describe('fingerprint', () => {
     expect(fp.userAgent).toBe(before.replace(/antigravity\/[\d.]+/, 'antigravity/9.9.9'))
   })
 
-  it('bounds history and restores prior fingerprints', () => {
+  it('bounds the fingerprint history to the most recent entries', () => {
     let history: ReturnType<typeof recordFingerprintVersion> | undefined
-    const first = generateFingerprint()
-    history = recordFingerprintVersion(history, first, 'initial')
+    history = recordFingerprintVersion(history, generateFingerprint(), 'initial')
     for (let i = 0; i < 3; i++) {
       history = recordFingerprintVersion(history, generateFingerprint(), 'regenerated')
     }
     expect(history!.length).toBe(4)
-    expect(restoreFingerprint(history, generateFingerprint())?.deviceId).toBe(first.deviceId)
-    // eviction: after 8 regenerations the initial entry is gone; nothing restorable remains
+
+    // Eviction keeps only the newest MAX_FINGERPRINT_HISTORY entries. The history
+    // is an audit trail of identities this account has presented; it is
+    // deliberately not restorable (see the non-goals in the review doc).
     let evicted = history
     for (let i = 0; i < 8; i++) {
       evicted = recordFingerprintVersion(evicted, generateFingerprint(), 'regenerated')
     }
-    expect(evicted!.length).toBe(5)
-    const current = generateFingerprint()
-    expect(restoreFingerprint(evicted, current)?.deviceId).toBe(current.deviceId)
+    expect(evicted!.length).toBe(MAX_FINGERPRINT_HISTORY)
+    expect(evicted!.at(-1)!.reason).toBe('regenerated')
   })
 
   it('pins deterministic fallback headers for the stable mode', () => {
@@ -410,9 +462,8 @@ describe('risk controls', () => {
 })
 
 describe('identity', () => {
-  it('generates request ids and session ids in backend shape', () => {
+  it('generates request ids in backend shape', () => {
     expect(generateAntigravityRequestId()).toMatch(/^agent\/\d+\/[0-9a-f]{8}$/)
-    expect(generateAntigravitySessionId()).toMatch(/^-\d{1,19}$/)
   })
 
   it('derives stable per-account session ids', () => {
@@ -422,6 +473,69 @@ describe('identity', () => {
     expect(a).toMatch(/^-\d+$/)
     expect(deriveAntigravitySessionId('')).toBeNull()
     expect(deriveAntigravitySessionId(null)).toBeNull()
+  })
+
+  it('scopes the session id to one conversation, not one account', () => {
+    const account = 'user@example.com'
+    const conversation = 'session-1'
+    const scoped = deriveAntigravitySessionId(account, conversation, 0)
+
+    // Stable across a conversation's turns: the upstream accumulates input per
+    // sessionId, so a drifting id would abandon the server-side session.
+    expect(deriveAntigravitySessionId(account, conversation, 0)).toBe(scoped)
+    expect(scoped).toMatch(/^-\d+$/)
+
+    // A different conversation on the SAME account must not share an upstream
+    // session. A single per-account constant made every conversation look like
+    // one session — a structural anomaly no official client produces.
+    expect(deriveAntigravitySessionId(account, 'session-2', 0)).not.toBe(scoped)
+
+    // A generation bump must name a fresh upstream session (the 1M recovery).
+    expect(deriveAntigravitySessionId(account, conversation, 1)).not.toBe(scoped)
+
+    // Neither may another account.
+    expect(deriveAntigravitySessionId('other@example.com', conversation, 0)).not.toBe(scoped)
+  })
+
+  it('degrades to the per-account id when no conversation is supplied', () => {
+    // The standalone CLI has no session store; it must not invent a conversation
+    // (a random id would look like a brand-new session on every single call).
+    const perAccount = deriveAntigravitySessionId('user@example.com')
+    expect(deriveAntigravitySessionId('user@example.com', undefined, 0)).toBe(perAccount)
+    expect(deriveAntigravitySessionId('user@example.com', null, 0)).toBe(perAccount)
+  })
+
+  it('tracks one generation counter per (account, conversation)', () => {
+    _clearSessionGenerationsForTest()
+    const account = 'user@example.com'
+    expect(currentSessionGeneration(account, 'a')).toBe(0)
+    expect(currentSessionGeneration(account, 'b')).toBe(0)
+
+    expect(bumpSessionGeneration(account, 'a')).toBe(1)
+    // Bumping one conversation must not disturb another, nor another account.
+    expect(currentSessionGeneration(account, 'b')).toBe(0)
+    expect(currentSessionGeneration('other@example.com', 'a')).toBe(0)
+    expect(bumpSessionGeneration(account, 'a')).toBe(2)
+  })
+})
+
+describe('session accumulation wall', () => {
+  /** The measured upstream body for a session whose server-side input passed 1M. */
+  const WALL =
+    '{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed for the model: 1048576"}}'
+
+  it('detects the bumpable per-session wall', () => {
+    expect(isSessionAccumulationOverflow(400, WALL)).toBe(true)
+    expect(isSessionAccumulationOverflow(400, 'input token count exceeds the maximum')).toBe(true)
+  })
+
+  it('does not treat an ordinary 400 or another status as the wall', () => {
+    // A generic 400 is a malformed request: resending it under a bumped session
+    // id would send the same broken payload again.
+    expect(isSessionAccumulationOverflow(400, '{"error":{"code":400,"message":"Request contains an invalid argument."}}')).toBe(false)
+    expect(isSessionAccumulationOverflow(400, undefined)).toBe(false)
+    expect(isSessionAccumulationOverflow(500, WALL)).toBe(false)
+    expect(isSessionAccumulationOverflow(429, WALL)).toBe(false)
   })
 })
 

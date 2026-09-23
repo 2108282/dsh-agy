@@ -14,7 +14,7 @@ import { authorizeAntigravity } from '../oauth/authorize.ts'
 import { exchangeAntigravity } from '../oauth/exchange.ts'
 import { importManySources, upsertImportedAccount } from '../cli/import.ts'
 import { generateFingerprint, recordFingerprintVersion } from '../runtime/fingerprint.ts'
-import { resolveAntigravityVersionBounded } from '../runtime/version.ts'
+import { currentAgyVersion } from '../oauth/constants.ts'
 import { maskProxyUrl } from '../store/accounts.ts'
 import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs, withTotalTimeout } from '../proxy.ts'
 import { AGY_PROVIDER } from '../adapter/models.ts'
@@ -208,6 +208,14 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
           ? new Date(account.coolingDownUntil).toISOString()
           : null,
         cooldownReason: account.cooldownReason ?? null,
+        /**
+         * Appeal link from an upstream verification challenge. Surfaced, never
+         * followed automatically: only the account owner can complete it, and the
+         * account returns to service on its own once the wall clears.
+         */
+        verificationUrl: account.verificationUrl ?? null,
+        verificationRequired:
+          account.verificationRequired === true && account.enabled !== false,
         rateLimits: account.rateLimitResetTimes ?? null,
         fingerprint: account.fingerprint
           ? {
@@ -377,7 +385,10 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         const account = storage.accounts[index]
         if (!account) fail('account not found')
         if (action === 'regenerate') {
-          const fresh = generateFingerprint(undefined, await resolveAntigravityVersionBounded())
+          // Same version source as first-use creation: the published value the
+          // resolver maintains, never a per-call network probe whose result the
+          // pool-randomizing default would silently discard anyway.
+          const fresh = generateFingerprint(undefined, currentAgyVersion())
           account.fingerprint = fresh
           account.fingerprintHistory = recordFingerprintVersion(account.fingerprintHistory, fresh, 'regenerated')
         }

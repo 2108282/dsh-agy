@@ -7,6 +7,7 @@
 import { isProxyRouted } from '../types.ts'
 import type { AccountRouting, FailureKind } from '../types.ts'
 import { isProxyUnreachableError } from '../proxy.ts'
+import { redactCredentials } from '../redact.ts'
 
 export interface ClassifiedError {
   kind: FailureKind
@@ -18,6 +19,67 @@ export interface ClassifiedError {
   message?: string
   /** 429 sub-category, present when kind is rate-limit. */
   rateLimitCategory?: RateLimitCategory
+  /**
+   * Appeal/verification link from a `verification-required` body, when the
+   * upstream supplied one. Surfaced to the user, never followed automatically.
+   */
+  verificationUrl?: string
+}
+
+/**
+ * Phrases the upstream uses to ask for account verification rather than
+ * rejecting a credential. Matched case-insensitively on the raw body.
+ *
+ * Kept as a phrase list (not a bare `includes('verify')`) so an ordinary
+ * permission error is not mistaken for a recoverable challenge — the cost of a
+ * false positive is a healthy account parked behind a timed block.
+ */
+const VERIFICATION_PHRASES = [
+  'validation_required',
+  'verify your account',
+  'verification required',
+  'verification_required',
+] as const
+
+/** Whether a 403 body asks the account owner to verify rather than meaning dead credentials. */
+export function isVerificationRequired(bodyText: string | undefined): boolean {
+  if (!bodyText) return false
+  const text = bodyText.toLowerCase()
+  return VERIFICATION_PHRASES.some((phrase) => text.includes(phrase))
+}
+
+/**
+ * Pull the appeal/verification link out of a Google RPC error body.
+ *
+ * Prefers the structured location — `error.details[].metadata.validation_url`,
+ * then `appeal_url` — and only falls back to the first bare `https://` match,
+ * because a loose match can pick up an unrelated link. Google escapes `&` as
+ * `\u0026` inside the JSON string form, so the fallback unescapes it.
+ */
+export function extractVerificationUrl(bodyText: string | undefined): string | undefined {
+  if (!bodyText) return undefined
+  try {
+    const data = JSON.parse(bodyText) as { error?: { details?: unknown } }
+    const details = data.error?.details
+    if (Array.isArray(details)) {
+      for (const detail of details) {
+        const meta = (detail as { metadata?: Record<string, unknown> } | null)?.metadata
+        if (!meta) continue
+        for (const field of ['validation_url', 'appeal_url'] as const) {
+          const value = meta[field]
+          if (typeof value === 'string' && value.length > 0) return value
+        }
+      }
+    }
+  } catch {
+    // not JSON — fall through to the textual scan
+  }
+  // Unescape BEFORE matching: a URL inside a JSON string carries `&` as
+  // `\u0026`, and a pattern that rejects backslashes would truncate the link at
+  // its first query separator — handing the user a broken appeal URL.
+  const unescaped = bodyText.replace(/\\u0026/gi, '&')
+  const match = /https:\/\/[^\s"'\\]+/.exec(unescaped)
+  return match ? match[0] : undefined
 }
 
 /**
@@ -112,6 +174,19 @@ export function classifyHttpError(
     return { kind: 'auth-failure', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
   }
   if (status === 403) {
+    // A verification wall is its own signal, checked BEFORE the auth-failure
+    // fallback: the credential is fine, the account is temporarily gated, and the
+    // body carries a URL the user can act on. Collapsing it into `auth-failure`
+    // permanently disabled a healthy account on a signal that meant "come back
+    // after verifying", with no automatic way back.
+    if (isVerificationRequired(bodyText)) {
+      return {
+        kind: 'verification-required',
+        status,
+        verificationUrl: extractVerificationUrl(bodyText),
+        message: bodyText ? bodyText.slice(0, 200) : undefined,
+      }
+    }
     // Google also reports quota walls as 403 RESOURCE_EXHAUSTED, and the
     // endpoint fallback chain ends on hosts answering 403 for "no license"
     // (not bad auth). Only treat a 403 as auth-failure when the body carries
@@ -154,6 +229,40 @@ export function classifyHttpError(
   return { kind: 'transient', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
 }
 
+/**
+ * Phrases the upstream returns when a conversation's SERVER-SIDE accumulated
+ * input for one `sessionId` passes the 1M ceiling.
+ *
+ * This is not a request-construction error: the payload is fine, but the
+ * upstream session that `sessionId` names has accumulated too much across turns.
+ * The recovery is to derive a different `sessionId` (a "generation" bump) and
+ * resend — hence this predicate is checked before {@link classifyHttpError} so
+ * such a 400 is not collapsed into a terminal `request-error`.
+ *
+ * Matched on the measured upstream text; kept phrase-specific (rather than a
+ * bare `includes('tokens')`) so a genuine model-capability 400 is not mistaken
+ * for a bumpable session wall.
+ */
+const SESSION_ACCUMULATION_PHRASES = [
+  'exceeds the maximum number of tokens',
+  'input token count exceeds',
+  'token count exceeds the maximum',
+] as const
+
+/**
+ * Whether a failed response is the recoverable per-`sessionId` accumulation
+ * wall rather than a malformed request.
+ *
+ * @param status - HTTP status of the failed response.
+ * @param bodyText - response body, when readable.
+ * @returns true when a session-generation bump plus one resend can recover.
+ */
+export function isSessionAccumulationOverflow(status: number, bodyText: string | undefined): boolean {
+  if (status !== 400 || !bodyText) return false
+  const text = bodyText.toLowerCase()
+  return SESSION_ACCUMULATION_PHRASES.some((phrase) => text.includes(phrase))
+}
+
 /** Codes that carry a socket/syscall `code` worth surfacing in a failure message. */
 const TRANSPORT_CAUSE_CODES = new Set([
   'ECONNREFUSED',
@@ -176,19 +285,12 @@ const TRANSPORT_CAUSE_CODES = new Set([
 ])
 
 /**
- * Strip proxy credentials from URL-like text so `user:pass` never reaches logs
- * or the GUI. Splits at the LAST `@` of the authority, which is the real
- * userinfo delimiter (RFC 3986: a host cannot contain a raw `@`), so a password
- * that itself contains `@` is redacted whole rather than truncated at the first
- * one — the failure mode of the character-class regex this replaced.
+ * Strip proxy credentials from text so `user:pass` never reaches logs or the
+ * GUI. Lives in the shared leaf module (`src/redact.ts`) so `proxy.ts` can use
+ * the same implementation without an import cycle; re-exported here because
+ * this module is where the sanitizing callers already look for it.
  */
-function redactCredentials(text: string): string {
-  return text.replace(/([a-z][a-z0-9+.-]*:\/\/)([^\s/?#]+)/gi, (match, scheme: string, authority: string) => {
-    const at = authority.lastIndexOf('@')
-    if (at === -1) return match
-    return `${scheme}<REDACTED>@${authority.slice(at + 1)}`
-  })
-}
+export { redactCredentials }
 
 /**
  * Placeholder messages undici/Node emit while the real reason sits deeper in

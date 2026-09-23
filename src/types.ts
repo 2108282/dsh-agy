@@ -217,6 +217,15 @@ export class AgyPoolBlockedError extends Error {
 export type FailureKind =
   | 'rate-limit'
   | 'auth-failure'
+  /**
+   * Upstream asked for account verification (`VALIDATION_REQUIRED`) rather than
+   * rejecting the credential. Deliberately distinct from `auth-failure` because
+   * it is RECOVERABLE: the account is temporarily walled, not dead, and the user
+   * can act on the returned URL. Treating it as `auth-failure` permanently
+   * disabled a healthy account on a signal that meant "come back after
+   * verifying", with no automatic way back.
+   */
+  | 'verification-required'
   | 'network-error'
   | 'project-error'
   | 'request-error'
@@ -224,6 +233,18 @@ export type FailureKind =
   | 'proxy-unreachable'
 
 /** Rotation state machine decision for one failed attempt. */
+/**
+ * Rotation state machine decision for one failed attempt.
+ *
+ * `backoffMs` is **advisory**, and for `retry`/`rotate` no caller consumes it.
+ * It is not the mechanism that paces the pool: the account-level `cool` paths
+ * write it into `coolingDownUntil` themselves, `rotate` blocks the failed
+ * account through `rateLimitResetTimes`, and the delay before the retry of a
+ * single request belongs to DSH's retry policy (`providerRetryAfterMs`, else its
+ * own exponential `localDelay`). Do NOT "wire it up" by feeding it into
+ * `providerRetryAfterMs`: a tier above DSH's `maxDelayMs` makes the normal retry
+ * mode give up entirely, turning a recoverable 5xx into a failed turn.
+ */
 export type RotationAction =
   | { action: 'retry'; backoffMs: number }
   | { action: 'cool'; backoffMs: number }
