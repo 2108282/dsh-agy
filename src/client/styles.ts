@@ -124,6 +124,20 @@ const CSS = `
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .agy-rowactions { display: flex; align-items: center; gap: 6px; flex: none; }
+/* Per-model test: a quiet text button, not a capsule — one per row of a long
+   list, so a solid Button would read as five competing primary actions. */
+.agy-rowtest {
+  border: 0; padding: 2px 4px; background: transparent; cursor: pointer;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-state-business-primary, #4176e6);
+  border-radius: 6px;
+}
+.agy-rowtest:hover:not(:disabled) { color: var(--dsw-alias-label-primary, #1f2329); }
+.agy-rowtest:disabled { cursor: default; opacity: 0.55; }
+.agy-rowtest:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary, #4176e6);
+  outline-offset: 1px;
+}
 .agy-state { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 
 .agy-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -178,20 +192,23 @@ const CSS = `
 
 /* ── Quota rows ──────────────────────────────────────────────────────────── */
 .agy-quota-row {
-  display: grid; grid-template-columns: minmax(0,1fr) 96px 44px;
+  display: grid; grid-template-columns: minmax(0,1fr) 96px minmax(0,auto);
   align-items: center; gap: 10px; padding: 6px 0;
   font: var(--dsw-font-xxs-12); border-bottom: 0.5px solid var(--dsw-alias-border-l1, rgba(0,0,0,.03));
 }
 .agy-quota-row:last-child { border-bottom: 0; }
 .agy-quota-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--dsw-alias-label-secondary, #61666b); }
-.agy-quota-name code { font: var(--dsw-font-xxxs-11); font-family: var(--ds-font-family-code);
-  color: var(--dsw-alias-label-tertiary, #8f959e); margin-left: 6px; }
 .agy-quota-track { height: 5px; border-radius: 3px; overflow: hidden;
   background: var(--dsw-alias-border-l2, rgba(0,0,0,.12)); }
 .agy-quota-track i { display: block; height: 100%; border-radius: 3px; }
-.agy-quota-pct { text-align: right; font-variant-numeric: tabular-nums;
+/* The reset phrase lives in the trailing column so every row's id starts at the
+   same x — inline-after-name made each row run a different length. */
+.agy-quota-pct { display: flex; align-items: baseline; justify-content: flex-end; gap: 8px;
+  font-variant-numeric: tabular-nums;
   color: var(--dsw-alias-label-tertiary, #8f959e); font: var(--dsw-font-xxs-12); }
+.agy-quota-pct code { font: var(--dsw-font-xxxs-11); font-family: var(--ds-font-family-code);
+  color: var(--dsw-alias-label-tertiary, #8f959e); }
 
 /* ── Dense breakdown tables (Usage tab only) ─────────────────────────────── */
 .agy-table-wrap { padding: 6px 0 2px; }

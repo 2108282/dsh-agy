@@ -249,15 +249,20 @@ function quotaRow(
   now: number,
 ): ReactNode {
   const fraction = model.remainingFraction
+  // The reset phrase rides in the trailing percentage column, not inside the
+  // name: inline after the id, every row's text ran a different length and the
+  // column edges never lined up (every row showed its own reset phrase at a
+  // different offset). The id stays alone on the left, so the list reads as one
+  // aligned grid.
   return h('div', { className: 'agy-quota-row', key: model.id },
-    h('span', { className: 'agy-quota-name' }, model.id,
-      model.resetTime === null ? null : h('code', null, untilText(model.resetTime, t, now))),
+    h('span', { className: 'agy-quota-name' }, model.id),
     h('span', { className: 'agy-quota-track' },
       fraction === null
         ? null
         : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
     h('span', { className: 'agy-quota-pct' },
-      fraction === null ? '—' : `${Math.round(fraction * 100)}%`))
+      fraction === null ? null : `${Math.round(fraction * 100)}%`,
+      model.resetTime === null ? null : h('code', null, untilText(model.resetTime, t, now))))
 }
 
 /** Account state rendered with the host's state dot plus a tinted tag. */
@@ -538,10 +543,14 @@ function ModelsTab(props: {
   quotaAccount: string | null
   /** Model ids whose own toggle write is in flight; everything else stays live. */
   pending: ReadonlySet<string>
+  /** Model ids whose own test call is in flight (see the per-row test button). */
+  testing: ReadonlySet<string>
   onToggle: (modelId: string, disabled: boolean) => void
+  /** Fire one test call against this exact model on the active account. */
+  onTestModel: (modelId: string) => void
   t: T
 }): ReactNode {
-  const { models, account, quota, quotaAccount, pending, onToggle, t } = props
+  const { models, account, quota, quotaAccount, pending, testing, onToggle, onTestModel, t } = props
   const [quotaOpen, setQuotaOpen] = useState(false)
 
   if (models.length === 0) {
@@ -558,6 +567,10 @@ function ModelsTab(props: {
 
   // One normal row per model. A row is a plain grid, not a table: the switch is
   // the affordance and a table's column rules would fight the card's rhythm.
+  // Each row carries its own test button: "does THIS model work" is the same
+  // decision the visibility switch answers, so the two live side by side. The
+  // old dashboard also had a "test all models" loop; deliberately not restored —
+  // it fired one billed upstream call per model, serially, behind one confirm.
   const rows = ordered.map((model) => h('div', { className: 'agy-rowitem', key: model.id },
     h('div', { className: 'agy-rowmain' },
       h('div', { className: 'agy-rowtitle' },
@@ -566,6 +579,14 @@ function ModelsTab(props: {
         ? null
         : h('div', { className: 'agy-rowmeta agy-mono' }, model.id)),
     h('div', { className: 'agy-rowactions' },
+      h('button', {
+        type: 'button',
+        className: 'agy-rowtest',
+        // Per-model state: the button under the click shows progress; every
+        // other row stays live. `busy` would freeze the whole tab again.
+        disabled: testing.has(model.id),
+        onClick: () => { onTestModel(model.id) },
+      }, testing.has(model.id) ? t('modelTesting') : t('actionTestModel')),
       h(Switch, {
         checked: !model.disabled,
         // Only THIS switch locks while its own write is in flight. The previous
@@ -758,6 +779,8 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const [modelError, setModelError] = useState<string | undefined>(undefined)
   /** Model ids whose own visibility write is in flight (see the toggle handler). */
   const [toggling, setToggling] = useState<ReadonlySet<string>>(() => new Set())
+  /** Model ids whose own test call is in flight (see the per-row test button). */
+  const [modelTesting, setModelTesting] = useState<ReadonlySet<string>>(() => new Set())
   const [stats, setStats] = useState<StatsView | null>(null)
   const [error, setError] = useState<string | undefined>(undefined)
   /** A non-fatal outcome worth reporting (e.g. a partial credential import). */
@@ -935,6 +958,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
           quota: activeQuota,
           quotaAccount: activeQuotaAccount,
           pending: toggling,
+          testing: modelTesting,
           t,
           /**
            * Optimistic, per-model toggle.
@@ -963,6 +987,40 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
               } finally {
                 if (alive.current) {
                   setToggling((current) => {
+                    const next = new Set(current)
+                    next.delete(modelId)
+                    return next
+                  })
+                }
+              }
+            })()
+          },
+          /**
+           * One billed test call against exactly this model, reported in the
+           * shared notice line (OK) or error banner (failure). The result must
+           * not be silent: a test that shows nothing looks like nothing ran.
+           */
+          onTestModel: (modelId: string) => {
+            setError(undefined)
+            setNotice(undefined)
+            setModelTesting((current) => new Set(current).add(modelId))
+            void (async () => {
+              try {
+                // The active account serves the test, which is the account whose
+                // quota this list describes; passing no index keeps that contract.
+                const result = await rpc.call('account.test', { model: modelId })
+                if (!alive.current) return
+                if (result.ok) {
+                  setNotice(t('modelTestOk', { model: modelId }))
+                } else {
+                  setError(t('modelTestFail', { model: modelId }) + (result.error ? `\n${result.error}` : ''))
+                }
+              } catch (caught) {
+                if (!alive.current) return
+                setError(caught instanceof Error ? caught.message : String(caught))
+              } finally {
+                if (alive.current) {
+                  setModelTesting((current) => {
                     const next = new Set(current)
                     next.delete(modelId)
                     return next
