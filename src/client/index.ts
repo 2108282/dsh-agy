@@ -789,11 +789,38 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const [stats, setStats] = useState<StatsView | null>(null)
   const [error, setError] = useState<string | undefined>(undefined)
   /** A non-fatal outcome worth reporting (e.g. a partial credential import). */
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const [notice, setNoticeState] = useState<string | undefined>(undefined)
+
   const [busy, setBusy] = useState(false)
   const [loaded, setLoaded] = useState(false)
   /** Guards state updates after the section unmounts mid-request. */
   const alive = useRef(true)
+
+  /**
+   * Show a transient notice, then clear it.
+   *
+   * A notice that never clears is indistinguishable from a stuck UI: the model
+   * test's "X is working." stayed on screen forever, through every later action.
+   * The deleted dashboard's toasts auto-dismissed after 3.5s for the same
+   * reason; this keeps that behaviour, and a newer notice simply replaces the
+   * pending timer.
+   */
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const setNotice = useCallback((text: string | undefined) => {
+    if (noticeTimer.current !== undefined) clearTimeout(noticeTimer.current)
+    noticeTimer.current = undefined
+    setNoticeState(text)
+    if (text === undefined) return
+    noticeTimer.current = setTimeout(() => {
+      noticeTimer.current = undefined
+      if (alive.current) setNoticeState(undefined)
+    }, 3_500)
+  }, [])
+
+  // Cancel a pending dismissal when the section unmounts.
+  useEffect(() => () => {
+    if (noticeTimer.current !== undefined) clearTimeout(noticeTimer.current)
+  }, [])
 
   useEffect(() => {
     alive.current = true
