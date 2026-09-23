@@ -26,6 +26,7 @@ export const zh = {
   coolingUntil: '冷却至',
   currentAccount: '当前账号',
   noProject: '—',
+  valueUnknown: '—',
 
   colAccount: '账号',
   colRequests: '请求',
@@ -163,6 +164,7 @@ export const en: Record<AgyLocaleKey, string> = {
   coolingUntil: 'Cooling until',
   currentAccount: 'current',
   noProject: '—',
+  valueUnknown: '—',
 
   colAccount: 'Account',
   colRequests: 'Requests',

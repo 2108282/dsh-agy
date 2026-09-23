@@ -499,8 +499,10 @@ function AccountDetail(props: {
                   ? null
                   : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
               // An unreported fraction is an em dash, never "0%": unknown
-              // headroom and no headroom are opposite facts.
-              h('span', { className: 'agy-limit-p' }, fraction === null ? t('noProject') : `${Math.round(fraction * 100)}%`),
+              // headroom and no headroom are opposite facts. A dedicated key
+              // rather than reusing `noProject`, whose NAME would then be wrong
+              // for the value it renders.
+              h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
               h('span', { className: 'agy-limit-reset' },
                 window.resetTime === null ? null : untilText(window.resetTime, t, now)))
           })))))
