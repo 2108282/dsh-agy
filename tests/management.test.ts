@@ -365,10 +365,10 @@ describe('agy management RPC', () => {
       // sorted a block of "—" rows above genuinely low-quota models. Unknown
       // headroom is not empty headroom.
       stubDiscovery({ plenty: 0.9, unknown: null, nearlyOut: 0.05 })
-      const { accounts } = await quotaHarness().management.call('account.list', {}) as {
-        accounts: Array<{ quota: { models: Array<{ id: string }> } | null }>
+      const { quota } = await quotaHarness().management.call('account.quota', {}) as {
+        quota: { models: Array<{ id: string }> } | null
       }
-      const ids = accounts[0]!.quota!.models.map((row) => row.id)
+      const ids = quota!.models.map((row) => row.id)
       expect(ids).toEqual(['nearlyOut', 'plenty', 'unknown'])
     })
 
@@ -391,21 +391,54 @@ describe('agy management RPC', () => {
         tabModelIds: ['chat_23310', 'tab_flash_lite_preview'],
         imageGenerationModelIds: ['gemini-3.1-flash-image'],
       }), { status: 200 })))
-      const { accounts } = await quotaHarness().management.call('account.list', {}) as {
-        accounts: Array<{ quota: { models: Array<{ id: string }>, modelCount: number } | null }>
+      const { quota } = await quotaHarness().management.call('account.quota', {}) as {
+        quota: { models: Array<{ id: string }>, modelCount: number } | null
       }
-      const ids = accounts[0]!.quota!.models.map((row) => row.id)
+      const ids = quota!.models.map((row) => row.id)
       expect(ids).toEqual(['gemini-3.5-flash'])
-      expect(accounts[0]!.quota!.modelCount).toBe(1)
+      expect(quota!.modelCount).toBe(1)
+    })
+
+    it('never blocks account.list on the upstream quota probe', async () => {
+      // Regression: `account.list` embedded the quota probe, so a slow network
+      // held the whole reply. The client's paired refresh then showed "no
+      // accounts" plus a permanent spinner — a transient blip that looked like
+      // lost data. The probe must not run at all on this path.
+      const harness = quotaHarness()
+      let quotaProbed = false
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        quotaProbed = true
+        // Never resolves within the test: if account.list awaits this, it hangs.
+        return new Promise<Response>(() => {})
+      }))
+      const { accounts } = await harness.management.call('account.list', {}) as {
+        accounts: Array<{ quota: unknown }>
+      }
+      expect(accounts).toHaveLength(1)
+      expect(accounts[0]!.quota).toBeNull()
+      expect(quotaProbed).toBe(false)
+    })
+
+    it('reports no quota panel rather than an error when the probe fails', async () => {
+      // A quota panel that cannot load is a legitimate state, and it must not
+      // surface as an error banner: the accounts list and usage are unaffected.
+      vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down') }))
+      const { quota, account: owner } = await quotaHarness().management.call('account.quota', {}) as {
+        quota: unknown
+        account: string | null
+      }
+      expect(quota).toBeNull()
+      // The owning account is still reported, so the panel can name it.
+      expect(owner).toBe('a@x.com')
     })
 
     it('clamps a fraction outside 0..1 rather than rendering a broken bar', async () => {
       stubDiscovery({ over: 4, under: -3 })
-      const { accounts } = await quotaHarness().management.call('account.list', {}) as {
-        accounts: Array<{ quota: { models: Array<{ id: string, remainingFraction: number | null }> } | null }>
+      const { quota } = await quotaHarness().management.call('account.quota', {}) as {
+        quota: { models: Array<{ id: string, remainingFraction: number | null }> } | null
       }
       const fractions = Object.fromEntries(
-        accounts[0]!.quota!.models.map((row) => [row.id, row.remainingFraction]),
+        quota!.models.map((row) => [row.id, row.remainingFraction]),
       )
       expect(fractions).toEqual({ over: 1, under: 0 })
     })

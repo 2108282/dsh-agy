@@ -428,5 +428,28 @@ export function accountFetch(routing: AccountRouting | undefined): typeof fetch 
     })) as typeof fetch
 }
 
+/**
+ * Wrap a fetch implementation with a TOTAL wall-clock budget.
+ *
+ * The dispatcher's `bodyTimeout`/`headersTimeout` are per-GAP timers, not a
+ * total budget, and `fetchAvailableModels` tries four endpoints in series — so
+ * a slow network can hold a caller for minutes (worst case ~4 x (10s connect +
+ * 30s headers)). Anything gating a user-visible RPC needs a real ceiling.
+ *
+ * Composed with `AbortSignal.any` rather than replacing the caller's signal, so
+ * an explicit abort still wins.
+ *
+ * @param fetchImpl - the routed fetch to wrap.
+ * @param ms - total budget in milliseconds.
+ * @returns a fetch that fails once the budget expires.
+ */
+export function withTotalTimeout(fetchImpl: typeof fetch, ms: number): typeof fetch {
+  return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const budget = AbortSignal.timeout(ms)
+    const signal = init?.signal ? AbortSignal.any([init.signal, budget]) : budget
+    return fetchImpl(input, { ...init, signal })
+  }) as typeof fetch
+}
+
 /** Whether these requests are pinned to an explicit per-account proxy. */
 export { isProxyRouted }

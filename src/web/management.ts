@@ -16,7 +16,7 @@ import { importManySources, upsertImportedAccount } from '../cli/import.ts'
 import { generateFingerprint, recordFingerprintVersion } from '../runtime/fingerprint.ts'
 import { resolveAntigravityVersionBounded } from '../runtime/version.ts'
 import { maskProxyUrl } from '../store/accounts.ts'
-import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs } from '../proxy.ts'
+import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs, withTotalTimeout } from '../proxy.ts'
 import { AGY_PROVIDER } from '../adapter/models.ts'
 import type { DiscoveredModelEntry } from '../adapter/models.ts'
 import { foldWindow } from '../stats.ts'
@@ -26,6 +26,7 @@ import type { AgySessionManager } from '../session.ts'
 import type { ModelVisibility } from '../model-visibility.ts'
 import type { UsageStats } from '../stats.ts'
 import type {
+  AccountQuota,
   AccountState,
   AccountUsageView,
   AccountView,
@@ -85,21 +86,36 @@ function asIndex(payload: unknown): number {
   return index
 }
 
+/**
+ * Total budget for the quota probe embedded in `account.list`.
+ *
+ * Deliberately modest and never fatal: a quota panel that cannot load is a
+ * legitimate page state (`quotaFor` returns null), while a slow probe must not
+ * hold the accounts list hostage. Matches the session manager's own quota
+ * timeout for the same upstream call.
+ */
+const QUOTA_QUERY_BUDGET_MS = 3_000
+
 /** Best-effort quota for one account, via the account's own proxy. */
 async function quotaFor(
   account: { proxy?: string },
   projectId: string | undefined,
   access: string | undefined,
-): Promise<{ modelCount: number; models: QuotaRow[] } | null> {
+): Promise<AccountQuota | null> {
   // Without a usable access token there is nothing to ask; a missing quota
   // panel is a legitimate state, not an error.
   if (access === undefined || access === '') return null
   try {
     const { fetchAvailableModels, chatCallableDiscoveredIds } = await import('../adapter/models.ts')
+    // A hard ceiling: this runs inside `account.list`, which gates the whole
+    // accounts+usage view. `fetchAvailableModels` walks four endpoints in
+    // series on per-gap timers, so without a total budget a slow network held
+    // the RPC for minutes and the UI showed "no accounts" + a permanent
+    // "loading" — a transient blip looked like lost data.
     const discovered = await fetchAvailableModels(
       access,
       projectId,
-      accountFetch({ proxyUrl: account.proxy }),
+      withTotalTimeout(accountFetch({ proxyUrl: account.proxy }), QUOTA_QUERY_BUDGET_MS),
     )
     // Same visibility rule as the model list (`mergeModelCatalog` consumes the
     // same helper): drop the tab_/role/deprecated ids upstream files as
@@ -206,21 +222,31 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         usage: key === undefined ? null : toAccountUsageView(ledger.accounts[key]),
       })
     }
-    // Quota is only meaningful for the account that would serve a request, so
-    // only the active row is queried — polling every account on each list call
-    // would multiply upstream traffic for no extra truth.
-    const session = await sessions.getSession().catch(() => undefined)
-    if (session !== undefined) {
-      const row = rows.find((candidate) => candidate.index === session.index)
-      if (row !== undefined) {
-        row.quota = await quotaFor(
-          session.account,
-          session.account.projectId,
-          session.auth.access,
-        )
-      }
-    }
+    // Quota is deliberately NOT fetched here. It costs an upstream round trip,
+    // and embedding it in this reply meant the accounts list (and, via the
+    // client's paired refresh, the usage tab) could not render until that probe
+    // finished — on a slow network the panel showed "no accounts" behind a
+    // permanent spinner, indistinguishable from data loss. The Model tab asks
+    // for it with `account.quota`, where a missing panel is a valid state.
     return rows
+  }
+
+  /** Quota for the account that would serve a request, or null when unavailable. */
+  const activeQuota = async (): Promise<{
+    account: string | null
+    quota: AccountQuota | null
+  }> => {
+    const session = await sessions.getSession().catch(() => undefined)
+    if (session === undefined) return { account: null, quota: null }
+    // Only the active account is queried: it is the one whose quota decides
+    // whether a request can be served, and polling the whole pool on every view
+    // would multiply upstream traffic for no extra truth.
+    const quota = await quotaFor(
+      session.account,
+      session.account.projectId,
+      session.auth.access,
+    )
+    return { account: session.account.email ?? null, quota }
   }
 
   /** Fold the ledger into the Usage tab's view. */
@@ -296,6 +322,8 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       const indices = Array.isArray(raw) ? raw.map((value) => Number(value)) : undefined
       return { results: await sessions.checkAccounts(indices) }
     },
+
+    'account.quota': async () => activeQuota(),
 
     'account.test': async (payload) => {
       const model = (payload as { model?: unknown })?.model

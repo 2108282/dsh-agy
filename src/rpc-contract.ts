@@ -19,6 +19,17 @@ import type { UsageCounters, UsageSource } from './usage-types.ts'
 /** Account lifecycle state as the UI presents it. */
 export type AccountState = 'active' | 'cooling' | 'verification-required' | 'disabled'
 
+/**
+ * The active account's quota panel: per-model rows from `fetchAvailableModels`.
+ *
+ * A named type because the panel is served by its own `account.quota` call now,
+ * and null is a legitimate value (unqueried, or the endpoint reported nothing).
+ */
+export interface AccountQuota {
+  modelCount: number
+  models: QuotaRow[]
+}
+
 /** One model's quota row (from `fetchAvailableModels`). */
 export interface QuotaRow {
   id: string
@@ -45,8 +56,15 @@ export interface AccountView {
   fingerprintHistory: number
   /** Masked proxy (`protocol//host:port`), never credentials. */
   proxy: string | null
-  /** Populated for the active account only; null when unreported or unqueried. */
-  quota: { modelCount: number; models: QuotaRow[] } | null
+  /**
+   * Always null in an `account.list` reply.
+   *
+   * Quota is no longer embedded here: it costs an upstream round trip, and
+   * gating the accounts list on it meant a slow network showed "no accounts"
+   * with a permanent spinner. The Model tab fetches it separately via
+   * `account.quota`, where a missing panel is a legitimate state.
+   */
+  quota: AccountQuota | null
   /** This account's ledger entry, when it has recorded traffic. */
   usage: AccountUsageView | null
 }
@@ -107,6 +125,10 @@ export interface AgyRpcMethods {
   'account.delete': { payload: { index: number }; result: { ok: true } }
   'account.verify': { payload: { index: number }; result: { ok: boolean; email?: string; error?: string } }
   'account.health': { payload: { indices?: number[] }; result: { results: unknown[] } }
+  'account.quota': {
+    payload: Record<string, never>
+    result: { account: string | null; quota: AccountQuota | null }
+  }
   'account.test': {
     payload: { model: string; index?: number }
     result: { ok: boolean; text?: string; error?: string }

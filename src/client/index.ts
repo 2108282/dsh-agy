@@ -801,21 +801,29 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   }, [])
 
   const refresh = useCallback(async () => {
-    try {
-      const [accountResult, statsResult] = await Promise.all([
-        rpc.call('account.list', {}),
-        rpc.call('stats.get', {}),
-      ])
-      if (!alive.current) return
-      setAccounts(accountResult.accounts)
-      setStats(statsResult)
-      setError(undefined)
-    } catch (caught) {
-      if (!alive.current) return
+    // Deliberately NOT `Promise.all` on both calls. `account.list` can be slow
+    // (it reaches upstream for quota discovery), while `stats.get` is a pure
+    // local file read that cannot be — pairing them meant one slow call blanked
+    // BOTH views, showing "no accounts" and a permanent spinner for data that
+    // was never in doubt. Each settles on its own, so the usage tab renders
+    // even if accounts lag.
+    const [accountOutcome, statsOutcome] = await Promise.allSettled([
+      rpc.call('account.list', {}),
+      rpc.call('stats.get', {}),
+    ])
+    if (!alive.current) return
+    if (accountOutcome.status === 'fulfilled') setAccounts(accountOutcome.value.accounts)
+    if (statsOutcome.status === 'fulfilled') setStats(statsOutcome.value)
+    // Surface a failure, but only after committing the successful halves, so a
+    // partial failure still renders everything it can.
+    const failed = [accountOutcome, statsOutcome].find((outcome) => outcome.status === 'rejected')
+    if (failed?.status === 'rejected') {
+      const caught: unknown = failed.reason
       setError(caught instanceof Error ? caught.message : String(caught))
-    } finally {
-      if (alive.current) setLoaded(true)
+    } else {
+      setError(undefined)
     }
+    if (alive.current) setLoaded(true)
   }, [rpc])
 
   /**
@@ -870,16 +878,37 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     }
   }, [refresh])
 
-  /** Login must open the popup from the click, so the URL is fetched first. */
   /**
-   * The active account's quota, for the Models tab.
+   * The active account's quota, fetched on its own.
    *
-   * Only the active row carries quota — the host queries one account per list
-   * call — so this picks that row rather than inventing a second query.
+   * It used to ride on `account.list`, which made the accounts list wait on an
+   * upstream probe; a slow network then showed "no accounts" behind a permanent
+   * spinner. It is loaded separately now, and only when the Model tab is opened
+   * (see the effect below), so nothing else waits on it.
    */
-  const activeRow = accounts.find((entry) => entry.active)
-  const activeQuota = activeRow?.quota ?? null
-  const activeQuotaAccount = activeRow?.email ?? null
+  const [activeQuota, setActiveQuota] = useState<AccountView['quota']>(null)
+  const [activeQuotaAccount, setActiveQuotaAccount] = useState<string | null>(null)
+
+  const loadQuota = useCallback(async () => {
+    try {
+      const result = await rpc.call('account.quota', {})
+      if (!alive.current) return
+      setActiveQuota(result.quota)
+      setActiveQuotaAccount(result.account)
+    } catch {
+      // A quota panel that cannot load is a legitimate state, never an error
+      // banner: the account list and usage figures are unaffected by it.
+      if (!alive.current) return
+      setActiveQuota(null)
+    }
+  }, [rpc])
+
+  useEffect(() => {
+    // Quota is fetched when — and only when — the Model tab is shown. Nothing
+    // else depends on it, so keeping it off the initial load and off the
+    // accounts path is what stops a slow upstream probe from delaying them.
+    if (tab === 'models') void loadQuota()
+  }, [tab, loadQuota])
 
   const startLogin = useCallback(() => {
     setBusy(true)
