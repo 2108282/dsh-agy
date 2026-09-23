@@ -410,7 +410,11 @@ describe('fingerprint', () => {
     const fp = generateFingerprint()
     expect(fp.deviceId).toMatch(/^[0-9a-f-]{36}$/)
     expect(fp.sessionToken).toMatch(/^[0-9a-f]{32}$/)
-    expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ (windows|darwin)\/\S+$/)
+    // Pinned platform: two independent implementations of this client concluded
+    // the backend expects the darwin/arm64 reference build, and the older pool
+    // mixed in `windows/amd64` / `darwin/amd64` — Go-style tokens an Electron
+    // client does not emit (its `process.platform`/`arch` are win32/x64).
+    expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ darwin\/arm64$/)
     expect(fp.clientMetadata.ideType).toBe('ANTIGRAVITY')
     // Client-Metadata must only transmit ideType (backend rejects extras)
     expect(Object.keys(fp.clientMetadata)).toEqual(['ideType'])

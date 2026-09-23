@@ -214,6 +214,15 @@ function blockToParts(
       // (400). Replay the signature captured for this tool call id on the
       // previous turn; the sentinel is the established bypass when nothing is
       // cached (both reference implementations default to it).
+      //
+      // OPEN QUESTION, deliberately not changed yet: another implementation of
+      // this client stamps the sentinel ONLY on the FIRST functionCall of a model
+      // turn and leaves sibling calls unsigned ("unsigned sibling functionCalls
+      // preserve native parallel-call shape"), and never synthesizes a bypass
+      // signature anywhere else. This path stamps every call. Which is right is
+      // unverified for THIS channel — the sentinel is live-verified to work here,
+      // and a wrong change turns working parallel tool calls into 400s — so it
+      // needs one real multi-tool turn measured before any edit.
       const signature = getThoughtSignature(block.id) ?? THOUGHT_SIGNATURE_SENTINEL
       return [{
         thoughtSignature: signature,
@@ -363,6 +372,13 @@ export function toAgyRequestBody(
     sessionId?: string
     images?: Map<string, AgyResolvedImage>
     multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>
+    /**
+     * The request id, when the caller also stamps it on the wire
+     * (`x-goog-request-id`). Generating it here as well produced TWO different
+     * ids for one request — the body and the header disagreed, a shape no client
+     * produces. Callers that send the header must pass the same value.
+     */
+    requestId?: string
   },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
@@ -402,7 +418,7 @@ export function toAgyRequestBody(
 
   return {
     project: context.projectId || undefined,
-    requestId: generateAntigravityRequestId(),
+    requestId: context.requestId ?? generateAntigravityRequestId(),
     model: options.model,
     userAgent: 'antigravity',
     requestType: 'agent',

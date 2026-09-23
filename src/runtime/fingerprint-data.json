@@ -1,7 +1,7 @@
 {
   "comment": "Hot-updatable fingerprint data. Version pools and client strings must track the real Antigravity product; update this file (or ship an override) when a release ships. Kept out of code so stale versions never get compiled in. The pool is only a last-resort fallback: production passes the resolved version explicitly (see runtime/version.ts), so a stale entry here can no longer reach the wire on its own.",
   "versionPool": ["2.0.0", "1.23.2", "1.22.2"],
-  "platforms": ["windows/amd64", "darwin/arm64", "darwin/amd64"],
+  "platforms": ["darwin/arm64"],
   "sdkClients": [
     "google-cloud-sdk vscode_cloudshelleditor/0.1",
     "google-cloud-sdk vscode/1.86.0",

@@ -158,12 +158,21 @@ function ledgerAccountKey(session: AgyAccountSession): string | undefined {
  * This adapter performs its own dispatch (see the `fetchAgyFirstOk` call in
  * `stream()`); nothing downstream re-adds the header.
  */
-export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
+export function buildRequestHeaders(
+  session: AgyAccountSession,
+  /**
+   * The request id this request already carries in its body. Both places must
+   * hold the same value: two independent `generateAntigravityRequestId()` calls
+   * produced one request whose header and body disagreed, a shape no client
+   * emits.
+   */
+  requestId: string = generateAntigravityRequestId(),
+): Record<string, string> {
   return {
     authorization: `Bearer ${session.auth.access}`,
     'content-type': 'application/json',
     accept: 'text/event-stream',
-    'x-goog-request-id': generateAntigravityRequestId(),
+    'x-goog-request-id': requestId,
     ...session.impersonation,
   }
 }
@@ -374,10 +383,14 @@ export class AgyAdapter extends LlmAdapter {
         const generation = conversationKey !== undefined && conversationAccount !== undefined
           ? currentSessionGeneration(conversationAccount, conversationKey)
           : 0
+        // One id per attempt, shared by the body and the header. A resend under a
+        // bumped session generation is a new upstream request, so it gets a new id.
+        const requestId = generateAntigravityRequestId()
         const body = toAgyRequestBody(options, {
           projectId: session.account.projectId,
           sessionId:
             deriveAntigravitySessionId(session.account.email, conversationKey, generation) ?? undefined,
+          requestId,
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
         })
@@ -387,7 +400,7 @@ export class AgyAdapter extends LlmAdapter {
             '/v1internal:streamGenerateContent?alt=sse',
             {
               method: 'POST',
-              headers: buildRequestHeaders(session),
+              headers: buildRequestHeaders(session, requestId),
               body: JSON.stringify(body),
               signal: options.signal,
             },

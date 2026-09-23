@@ -1161,6 +1161,59 @@ describe('AgyAdapter', () => {
     expect(failures).toEqual([])
   })
 
+  it('sends one request id, and the body and the header agree on it', async () => {
+    // `toAgyRequestBody` and `buildRequestHeaders` each generated their own id, so
+    // one request carried `body.requestId` != `x-goog-request-id` — a shape no
+    // client produces, and invisible to any test that looked at one side only.
+    const seen: Array<{ header: string | null; body: unknown }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({
+        header: new Headers(init?.headers as HeadersInit).get('x-goog-request-id'),
+        body: JSON.parse(String(init?.body)) as { requestId?: string },
+      })
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.header).toMatch(/^agent\/\d+\/[0-9a-f]{8}$/)
+    expect(seen[0]!.body.requestId).toBe(seen[0]!.header)
+  })
+
+  it('gives a resent attempt its own request id', async () => {
+    // The 1M-wall resend is a second upstream request, so it must not repeat the
+    // first one's id — that would look like a replayed request.
+    const seen: Array<{ header: string | null; sessionId?: string }> = []
+    const wall =
+      '{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed for the model: 1048576"}}'
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { request: { sessionId?: string } }
+      seen.push({
+        header: new Headers(init?.headers as HeadersInit).get('x-goog-request-id'),
+        sessionId: body.request.sessionId,
+      })
+      if (seen.length === 1) return new Response(wall, { status: 400 })
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions({ sessionId: 'session-1' as never }))) void _
+
+    expect(seen).toHaveLength(2)
+    expect(seen[0]!.header).toBeDefined()
+    expect(seen[1]!.header).not.toBe(seen[0]!.header)
+    // Same rule for the upstream session: the resend names a fresh one.
+    expect(seen[1]!.sessionId).not.toBe(seen[0]!.sessionId)
+  })
+
   it('sends exactly one client User-Agent on the wire, for a real request', async () => {
     // The `buildRequestHeaders` test above asserts the object it returns; this one
     // asserts what the dispatch actually hands to `fetch`. That distinction is the

@@ -122,7 +122,10 @@ export function getStableHeaders(
   data: FingerprintData = getFingerprintData(),
   version = data.versionPool[0] ?? '',
 ): { 'User-Agent': string; 'X-Goog-Api-Client': string; 'Client-Metadata': string } {
-  const platform = data.platforms[0] ?? 'windows/amd64'
+  // `darwin/arm64` is the reference build the backend expects (see AGENTS.md
+  // "Version Freshness"): pinning it also keeps this fallback from advertising a
+  // platform token the official Electron client would never emit.
+  const platform = data.platforms[0] ?? 'darwin/arm64'
   return {
     // `currentAgyVersion()`, never a literal: the resolved live version or the
     // pinned fallback. A frozen string here would outlive the release it names
