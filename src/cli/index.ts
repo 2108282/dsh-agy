@@ -18,9 +18,10 @@ import type { SecretCodec } from '../store/keyring.ts'
 import { JsonAccountStore, maskProxyUrl } from '../store/accounts.ts'
 import { AgySessionManager } from '../session.ts'
 import { isAgyDisabled } from '../runtime/risk.ts'
+import { resolveAntigravityVersionBounded } from '../runtime/version.ts'
 import { startCallbackServer, openBrowser } from './callback-server.ts'
 import { importManySources, upsertImportedAccount } from './import.ts'
-import { accountFetch, isProxyReachable, normalizeProxyUrl } from '../proxy.ts'
+import { accountFetch, isProxyReachable, normalizeProxyUrl, proxiedFetch } from '../proxy.ts'
 
 /** Package version, read from the shipped package.json — never hard-coded twice. */
 const { version: PACKAGE_VERSION } = JSON.parse(
@@ -108,6 +109,17 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
   const { url, verifier } = await authorizeAntigravity(redirectUri, options.project ?? '')
   console.log(`\nOpen this URL in a browser to authorize:\n\n  ${url}\n`)
 
+  // Resolve the client version while the user is still in the browser. The token
+  // exchange is the one request that MINTS credentials, and sending it with the
+  // pinned fallback advertises a client that may no longer exist — the exact
+  // stale-version anomaly the plugin path resolves away. Bounded and fail-soft:
+  // on timeout the fallback stands, and a login never waits more than this.
+  // Routed like the exchange itself, so a `--proxy` login does not probe direct.
+  const versionProbe = resolveAntigravityVersionBounded(
+    1_500,
+    normalizedProxy ? accountFetch({ proxyUrl: normalizedProxy }) : proxiedFetch,
+  )
+
   let code: string
   let state: string
 
@@ -139,6 +151,7 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
   // Route the exchange over the proxy being bound: it targets Google (never the
   // loopback callback, which is forced direct), and leaving it unproxied would
   // leak the host's real IP at exactly the moment the user asked to isolate it.
+  await versionProbe
   const result = await exchangeAntigravity(code, state, redirectUri, verifier, {
     ...(normalizedProxy ? { proxyUrl: normalizedProxy } : {}),
   })

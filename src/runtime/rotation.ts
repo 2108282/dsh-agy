@@ -48,6 +48,32 @@ export function isFamilyRateLimited(account: ManagedAccount, family: string | un
   return typeof resetAt === 'number' && resetAt > now
 }
 
+/**
+ * Proxy for a pool-level probe that belongs to no single account (the version
+ * feeds): the account that would serve the next request, else the first usable
+ * one.
+ *
+ * These feeds are not account-scoped, but the host's IP is what a user who
+ * configured per-account proxies asked to hide, and a probe on the env/direct
+ * route leaks it at boot. `undefined` means "no account route" — no accounts, or
+ * no usable one — and the caller then uses the env/direct route, which is also
+ * where an unproxied account's traffic goes anyway.
+ *
+ * Deliberately not model-aware: the probe runs once at boot, before any model is
+ * requested.
+ */
+export function pickProbeProxyUrl(
+  accounts: ManagedAccount[],
+  activeIndex: number,
+  now = Date.now(),
+): string | undefined {
+  const usable = (account: ManagedAccount | undefined): boolean =>
+    account !== undefined && account.enabled !== false && !isCoolingDown(account, now)
+  const active = accounts[activeIndex]
+  if (usable(active)) return active!.proxy
+  return accounts.find((account) => usable(account))?.proxy
+}
+
 /** Record a rate-limit reset for one model key, retaining the latest reset time. */
 export function recordRateLimit(account: ManagedAccount, modelKey: string, resetAtMs: number): void {
   const current = account.rateLimitResetTimes?.[modelKey] ?? 0

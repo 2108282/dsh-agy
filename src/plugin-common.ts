@@ -13,7 +13,10 @@ import type { AgyAttachmentStore } from './adapter/adapter.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { ModelVisibility } from './model-visibility.ts'
 import { UsageStats } from './stats.ts'
+import { accountFetch, proxiedFetch } from './proxy.ts'
+import { pickProbeProxyUrl } from './runtime/rotation.ts'
 import { resolveAntigravityVersion } from './runtime/version.ts'
+import type { FetchLike } from './runtime/version.ts'
 import { AgySessionManager } from './session.ts'
 import { JsonAccountStore } from './store/accounts.ts'
 import type { AccountStore } from './store/accounts.ts'
@@ -61,6 +64,27 @@ export async function resolveCodec(ctx: Context): Promise<{ codec: SecretCodec; 
   return resolveMasterKeyCodec(dshHome)
 }
 
+/**
+ * Fire-and-forget version warm-up so fingerprint generation inside the
+ * rate-limit path never waits on a cold feed.
+ *
+ * Routed through `pickProbeProxyUrl`: the release feeds are not account-scoped,
+ * but the host IP is exactly what a per-account-proxy user asked to hide, and a
+ * bare `proxiedFetch` sends this boot-time request directly. Never throws — an
+ * unreadable store or a dead feed must not be the reason plugin boot fails.
+ */
+async function warmVersionCache(store: AccountStore): Promise<void> {
+  let fetchImpl: FetchLike = proxiedFetch
+  try {
+    const storage = await store.load()
+    const proxyUrl = pickProbeProxyUrl(storage.accounts, storage.activeIndex)
+    if (proxyUrl !== undefined) fetchImpl = accountFetch({ proxyUrl })
+  } catch {
+    // Fall through to the env/direct route.
+  }
+  await resolveAntigravityVersion(fetchImpl).catch(() => {})
+}
+
 /** Build the store, session manager, and adapter for one plugin entry. */
 export async function createAgyRuntime(ctx: Context): Promise<{
   store: AccountStore
@@ -69,12 +93,10 @@ export async function createAgyRuntime(ctx: Context): Promise<{
   stats: UsageStats
   modelVisibility: ModelVisibility
 }> {
-  // Warm the version cache (non-blocking) so fingerprint generation inside
-  // the rate-limit path never waits on a cold feed.
-  void resolveAntigravityVersion().catch(() => {})
   const { codec } = await resolveCodec(ctx)
   const dshHome = resolveDshHome()
   const store = new JsonAccountStore({ file: `${dshHome}/agy-accounts.json`, codec })
+  void warmVersionCache(store)
   // The ledger reports the first failure of a run, once. Without it a ledger
   // that cannot be written (read-only $DSH_HOME, ENOSPC) simply stops counting
   // with nothing anywhere to explain why — the failure mode this whole

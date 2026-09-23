@@ -153,13 +153,26 @@ export async function resolveAntigravityCliVersion(fetchImpl: FetchLike = proxie
     ?? AGY_VERSION_FALLBACK
 }
 
-/** Best available version: newest of both sources, cached 6h. */
-export async function resolveAntigravityVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string> {
+/**
+ * The newest version actually OBSERVED on the feeds, or `undefined` when neither
+ * yielded one.
+ *
+ * Distinct from {@link resolveAntigravityVersion}, which substitutes the pinned
+ * fallback at the boundary. A caller that must tell "observed" from "assumed"
+ * cannot use that one — and the freshness gate is exactly such a caller, since
+ * the fallback is the value under test.
+ */
+export async function resolveObservedAgyVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string | undefined> {
   const [ide, cli] = await Promise.all([
     resolveObservedVersion(ideState, IDE_RELEASE_FEED_URL, parseIdeReleaseFeed, fetchImpl),
     resolveObservedVersion(cliState, CLI_RELEASE_URL, parseCliRelease, fetchImpl),
   ])
-  return pickNewestVersion(ide, cli) ?? AGY_VERSION_FALLBACK
+  return pickNewestVersion(ide, cli) ?? undefined
+}
+
+/** Best available version: newest of both sources, cached 6h. */
+export async function resolveAntigravityVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string> {
+  return (await resolveObservedAgyVersion(fetchImpl)) ?? AGY_VERSION_FALLBACK
 }
 
 /**
@@ -167,12 +180,19 @@ export async function resolveAntigravityVersion(fetchImpl: FetchLike = proxiedFe
  * cold version feeds. Resolves undefined on timeout/error so callers fall
  * back to the pinned version pool; the abandoned fetch keeps running and
  * populates the 6h cache for later calls.
+ *
+ * `fetchImpl` routes the probe: the feeds belong to no account, so the caller
+ * decides which egress they use (the CLI passes the login proxy, the plugin
+ * passes the pool's representative account).
  */
-export async function resolveAntigravityVersionBounded(timeoutMs = 750): Promise<string | undefined> {
+export async function resolveAntigravityVersionBounded(
+  timeoutMs = 750,
+  fetchImpl: FetchLike = proxiedFetch,
+): Promise<string | undefined> {
   let timer: NodeJS.Timeout | undefined
   try {
     return await Promise.race([
-      resolveAntigravityVersion().catch(() => undefined),
+      resolveAntigravityVersion(fetchImpl).catch(() => undefined),
       new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), timeoutMs)
       }),
@@ -198,3 +218,14 @@ export function peekCachedAntigravityVersion(): string | undefined {
 
 const ideState: VersionState = { inFlight: null }
 const cliState: VersionState = { inFlight: null }
+
+/**
+ * Drop both feed caches so a test can exercise the cold-start path.
+ *
+ * Deliberately does NOT clear the published version slot: that one is monotonic
+ * process state, and dropping it would let a test's User-Agent move backwards.
+ */
+export function _clearVersionCacheForTest(): void {
+  ideState.cache = undefined
+  cliState.cache = undefined
+}

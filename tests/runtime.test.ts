@@ -13,8 +13,8 @@ import {
   isCoolingDown,
   isFamilyRateLimited,
   pickNextAccountIndex,
+  pickProbeProxyUrl,
   recordRateLimit,
-  SOFT_QUOTA_THRESHOLD,
   VERIFICATION_COOLDOWN_MS,
 } from '../src/runtime/rotation.ts'
 import {
@@ -242,6 +242,33 @@ describe('classifyHttpError', () => {
 })
 
 describe('rotation state machine', () => {
+  describe('probe routing', () => {
+    it('uses the account that would serve the next request', () => {
+      // The version feeds belong to no account, but a probe on the env/direct
+      // route would egress the host IP that a per-account-proxy user asked to
+      // hide, at boot.
+      expect(pickProbeProxyUrl([account(), account()], 0)).toBeUndefined()
+      const routed = [account(), account()]
+      routed[1]!.proxy = 'socks5://127.0.0.1:1080'
+      expect(pickProbeProxyUrl(routed, 1)).toBe('socks5://127.0.0.1:1080')
+      // An unproxied active account means direct, even when a sibling has a proxy:
+      // the probe follows the account that would carry the next request.
+      expect(pickProbeProxyUrl(routed, 0)).toBeUndefined()
+    })
+
+    it('skips a disabled or cooling active account', () => {
+      const off = { ...account(), enabled: false }
+      const cooling = account()
+      cooling.coolingDownUntil = Date.now() + 60_000
+      const usable = account()
+      usable.proxy = 'http://127.0.0.1:3128'
+      expect(pickProbeProxyUrl([off, usable], 0)).toBe('http://127.0.0.1:3128')
+      expect(pickProbeProxyUrl([cooling, usable], 0)).toBe('http://127.0.0.1:3128')
+      expect(pickProbeProxyUrl([off], 0)).toBeUndefined()
+      expect(pickProbeProxyUrl([], 0)).toBeUndefined()
+    })
+  })
+
   it('rotates on rate-limit with backoff', () => {
     const acc = account()
     const decision = decideRotation('rate-limit', acc, 0, undefined, 'rate_limited')
@@ -370,13 +397,6 @@ describe('rotation state machine', () => {
     expect(isCoolingDown(cooled)).toBe(true)
   })
 
-  it('soft quota pre-check avoids burning requests', () => {
-    // The live pre-check is `isFamilyDrained` (quota.ts), exercised in the family
-    // quota helpers below; this asserts the shared threshold it reads.
-    expect(SOFT_QUOTA_THRESHOLD).toBeGreaterThan(0)
-    expect(SOFT_QUOTA_THRESHOLD).toBeLessThan(1)
-  })
-
   it('computes quota cache TTLs by health', () => {
     expect(computeSoftQuotaCacheTtlMs(0.05)).toBe(60_000)
     expect(computeSoftQuotaCacheTtlMs(0.3)).toBe(5 * 60 * 1000)
@@ -495,6 +515,25 @@ describe('identity', () => {
 
     // Neither may another account.
     expect(deriveAntigravitySessionId('other@example.com', conversation, 0)).not.toBe(scoped)
+  })
+
+  it('gives a fork its own upstream session, and its own generation counter', () => {
+    // A DSH fork copies the message history into a NEW session id. If the derived
+    // id depended on the account alone (the pre-fix behaviour, and the shape a
+    // "reuse the parent's identity" shortcut would take), the fork would inherit
+    // the parent's server-side accumulated input and hit the 1M wall early.
+    _clearSessionGenerationsForTest()
+    const account = 'user@example.com'
+    const parent = deriveAntigravitySessionId(account, 'conversation-parent', 0)
+    const fork = deriveAntigravitySessionId(account, 'conversation-fork', 0)
+    expect(fork).not.toBe(parent)
+
+    // The counter is per conversation, so escaping the wall in the parent does not
+    // silently move the fork onto a different upstream session than the one its
+    // turns have been accumulating into.
+    expect(bumpSessionGeneration(account, 'conversation-parent')).toBe(1)
+    expect(currentSessionGeneration(account, 'conversation-fork')).toBe(0)
+    expect(deriveAntigravitySessionId(account, 'conversation-fork', currentSessionGeneration(account, 'conversation-fork'))).toBe(fork)
   })
 
   it('degrades to the per-account id when no conversation is supplied', () => {

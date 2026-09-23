@@ -55,6 +55,7 @@
     "verify:blocks": "tsx scripts/verify-blocks.mts",
     "verify:claude-cap": "tsx scripts/verify-claude-cap.mts",
     "verify:proxy-routing": "tsx scripts/verify-proxy-routing.mts",
+    "verify:version-freshness": "tsx scripts/verify-version-freshness.mts",
     "verify:claude-parts": "tsx scripts/verify-claude-parts.mts"
   },
   "peerDependencies": {
