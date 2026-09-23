@@ -33,6 +33,7 @@ import {
   generateAntigravityRequestId,
 } from '../src/runtime/identity.ts'
 import { _clearVersionCacheForTest, resolveAntigravityVersion } from '../src/runtime/version.ts'
+import { parseQuotaSummary } from '../src/adapter/quota-summary.ts'
 import {
   FAMILY_UNKNOWN,
   familyKeyOf,
@@ -665,6 +666,79 @@ describe('family quota ingestion', () => {
     })
     expect(ingestFamilyQuotas({})).toEqual({})
     expect(ingestFamilyQuotas({ models: undefined })).toEqual({})
+  })
+})
+
+describe('quota summary (5h / weekly windows)', () => {
+  it('parses upstream groups and keeps the group split verbatim', () => {
+    // The group names are upstream's own, and the `3p-*` buckets cover Claude
+    // AND GPT — a split no model-id prefix rule reproduces, which is why it is
+    // carried through rather than re-derived.
+    const groups = parseQuotaSummary({
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.61, resetTime: '2026-09-25T01:22:55Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.16, resetTime: '2026-09-23T19:29:55Z' },
+          ],
+        },
+        {
+          displayName: 'Claude and GPT models',
+          buckets: [
+            { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.73 },
+            { bucketId: '3p-5h', window: '5h', remainingFraction: 0.99 },
+          ],
+        },
+      ],
+    })
+    expect(groups.map((g) => g.name)).toEqual(['Gemini Models', 'Claude and GPT models'])
+    // Shortest window first, regardless of upstream order (weekly came first above).
+    expect(groups[0]!.windows.map((w) => w.window)).toEqual(['5h', 'weekly'])
+    expect(groups[0]!.windows[0]).toEqual({
+      bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.16, resetTime: '2026-09-23T19:29:55Z',
+    })
+    // An omitted resetTime is null (unknown), not a fabricated value.
+    expect(groups[1]!.windows[0]!.resetTime).toBeNull()
+  })
+
+  it('clamps fractions and rejects unusable payloads', () => {
+    const groups = parseQuotaSummary({
+      groups: [
+        {
+          displayName: 'G',
+          buckets: [
+            { bucketId: 'a', window: '5h', remainingFraction: 1.5 },
+            { bucketId: 'b', window: '5h', remainingFraction: -0.2 },
+            { bucketId: 'c', window: '5h', remainingFraction: 'nope' },
+          ],
+        },
+        // A group with no usable bucket is dropped, not rendered as an empty card.
+        { displayName: 'Empty', buckets: [] },
+        { displayName: 'NoBuckets' },
+      ],
+    })
+    expect(groups).toHaveLength(1)
+    expect(groups[0]!.windows.map((w) => w.remainingFraction)).toEqual([1, 0, null])
+    // Malformed containers degrade to "no windows" rather than throwing.
+    expect(parseQuotaSummary(null)).toEqual([])
+    expect(parseQuotaSummary({})).toEqual([])
+    expect(parseQuotaSummary({ groups: 'nope' })).toEqual([])
+  })
+
+  it('accepts only buckets carrying both an id and a window', () => {
+    const groups = parseQuotaSummary({
+      groups: [{
+        displayName: 'G',
+        buckets: [
+          { bucketId: 'ok', window: '5h', remainingFraction: 0.5 },
+          { window: '5h', remainingFraction: 0.5 },
+          { bucketId: 'no-window', remainingFraction: 0.5 },
+          { bucketId: '', window: '5h' },
+        ],
+      }],
+    })
+    expect(groups[0]!.windows.map((w) => w.bucketId)).toEqual(['ok'])
   })
 })
 

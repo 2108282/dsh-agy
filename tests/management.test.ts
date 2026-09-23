@@ -161,6 +161,46 @@ describe('agy management RPC', () => {
     expect(accounts[0]?.usage?.totals.input).toBe(10)
   })
 
+  it('exposes the cached 5h/weekly windows, and null when never measured', async () => {
+    // The windows are read from the cache the session manager refreshes, so the
+    // accounts reply must carry them without an extra upstream call. `null` (not
+    // an empty array) is what tells the UI to say "not measured yet" rather than
+    // render an empty card — an account with no headroom and an account nobody
+    // has probed are opposite facts.
+    const unmeasured = makeHarness({ accounts: [account({ email: 'a@x.com' })] })
+    const before = await unmeasured.management.call('account.list', {}) as {
+      accounts: Array<{ limits: unknown, limitsUpdatedAt: number | null }>
+    }
+    expect(before.accounts[0]?.limits).toBeNull()
+    expect(before.accounts[0]?.limitsUpdatedAt).toBeNull()
+
+    const measured = makeHarness({
+      accounts: [account({
+        email: 'a@x.com',
+        cachedLimits: {
+          updatedAt: 1_700_000_000_000,
+          groups: [{
+            name: 'Gemini Models',
+            windows: [
+              { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.16, resetTime: '2026-09-23T19:29:55Z' },
+              { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.61, resetTime: null },
+            ],
+          }],
+        },
+      })],
+    })
+    const after = await measured.management.call('account.list', {}) as {
+      accounts: Array<{
+        limits: Array<{ name: string, windows: Array<{ window: string, remainingFraction: number | null }> }> | null
+        limitsUpdatedAt: number | null
+      }>
+    }
+    expect(after.accounts[0]?.limits?.[0]?.name).toBe('Gemini Models')
+    expect(after.accounts[0]?.limits?.[0]?.windows.map((w) => w.window)).toEqual(['5h', 'weekly'])
+    expect(after.accounts[0]?.limits?.[0]?.windows[0]?.remainingFraction).toBe(0.16)
+    expect(after.accounts[0]?.limitsUpdatedAt).toBe(1_700_000_000_000)
+  })
+
   it('validates the account index on mutating calls', async () => {
     const { management } = makeHarness()
     await expect(management.call('account.activate', { index: -1 })).rejects.toThrow(/invalid index/)

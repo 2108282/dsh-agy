@@ -14,7 +14,10 @@
  * and stays a real HTTP route: Google redirects a browser to it.
  */
 
+import type { QuotaGroup } from './types.ts'
 import type { UsageCounters, UsageSource } from './usage-types.ts'
+
+export type { QuotaGroup, QuotaWindow } from './types.ts'
 
 /** Account lifecycle state as the UI presents it. */
 export type AccountState = 'active' | 'cooling' | 'verification-required' | 'disabled'
@@ -72,6 +75,20 @@ export interface AccountView {
    * `account.quota`, where a missing panel is a legitimate state.
    */
   quota: AccountQuota | null
+  /**
+   * Grouped 5-hour / weekly windows for this account, or null when never
+   * measured.
+   *
+   * Distinct from `quota`: that is per-MODEL and answers "which model is nearly
+   * drained" for the model picker, while these are upstream's per-GROUP windows
+   * (Gemini vs Claude+GPT) and are what a user reads to see how much of the
+   * rolling budget is left. They come from a different endpoint
+   * (`retrieveUserQuotaSummary`) and are refreshed alongside the per-model quota
+   * by the session manager, so no extra request is issued to show them.
+   */
+  limits: QuotaGroup[] | null
+  /** When `limits` was measured (Unix ms), or null when never. */
+  limitsUpdatedAt: number | null
   /** This account's ledger entry, when it has recorded traffic. */
   usage: AccountUsageView | null
 }

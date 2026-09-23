@@ -5,7 +5,7 @@
  */
 
 import { AgyAuthError, AgyPoolBlockedError } from './types.ts'
-import type { AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails } from './types.ts'
+import type { AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails, QuotaGroup } from './types.ts'
 import { refreshAccessToken } from './oauth/refresh.ts'
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from './oauth/auth.ts'
 import type { AccountStore } from './store/accounts.ts'
@@ -375,6 +375,14 @@ export class AgySessionManager {
    * Refresh stale per-account quota caches (family-scoped, health-based TTL).
    * Failures leave the account unmeasured: ranking treats it as a fallback
    * instead of blocking selection on a hung endpoint.
+   *
+   * Also refreshes the display-only 5h/weekly windows from
+   * `retrieveUserQuotaSummary`. That call is issued IN PARALLEL with
+   * `fetchAvailableModels` under the same timeout, so it adds no latency, and it
+   * carries its own error path: a summary failure leaves the previous windows in
+   * place rather than discarding them or failing the ranking refresh. The
+   * grouping is upstream's (Gemini vs Claude+GPT), which no model-id prefix rule
+   * reproduces, so it is stored verbatim instead of re-derived.
    */
   private async refreshQuotaCache(storage: AccountStorageV4): Promise<void> {
     const now = Date.now()
@@ -389,14 +397,29 @@ export class AgySessionManager {
           const auth = await this.accessTokenFor(account)
           if (!auth) return null
           const { fetchAvailableModels } = await import('./adapter/models.ts')
+          const { fetchQuotaSummary } = await import('./adapter/quota-summary.ts')
           const routed = accountFetch({ proxyUrl: account.proxy })
-          const discovered = await fetchAvailableModels(auth.access, account.projectId, (input, init) => {
+          const bounded = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
             const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
             const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
             return routed(input, { ...init, signal })
-          })
+          }
+          // Both calls share one budget because they run concurrently; awaiting
+          // them in series would double the worst case that the timeout exists
+          // to bound.
+          const [discovered, limitGroups] = await Promise.all([
+            fetchAvailableModels(auth.access, account.projectId, bounded),
+            // Best-effort by construction: a rejection here must not lose the
+            // ranking data, so it resolves to null instead of propagating.
+            fetchQuotaSummary(auth.access, account.projectId, bounded),
+          ])
           const quotas = ingestFamilyQuotas(discovered)
-          return { key, quotas, updatedAt: Date.now() }
+          return {
+            key,
+            quotas,
+            limitGroups,
+            updatedAt: Date.now(),
+          }
         } catch {
           return null
         }
@@ -409,13 +432,23 @@ export class AgySessionManager {
       }
     }))
 
-    const updates = results.filter((r): r is { key: string; quotas: Record<string, CachedQuota>; updatedAt: number } => Boolean(r && Object.keys(r.quotas).length > 0))
+    const updates = results.filter((r): r is {
+      key: string
+      quotas: Record<string, CachedQuota>
+      limitGroups: QuotaGroup[] | null
+      updatedAt: number
+    } => Boolean(r && Object.keys(r.quotas).length > 0))
     if (updates.length > 0) {
       for (const update of updates) {
         const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
         if (target) {
           target.cachedQuota = update.quotas
           target.cachedQuotaUpdatedAt = update.updatedAt
+          // Only overwrite windows when this refresh actually got some; a null
+          // means "the summary call failed", not "the account has no limits".
+          if (update.limitGroups !== null && update.limitGroups.length > 0) {
+            target.cachedLimits = { groups: update.limitGroups, updatedAt: update.updatedAt }
+          }
         }
       }
       try {
@@ -425,6 +458,9 @@ export class AgySessionManager {
             if (target) {
               target.cachedQuota = update.quotas
               target.cachedQuotaUpdatedAt = update.updatedAt
+              if (update.limitGroups !== null && update.limitGroups.length > 0) {
+                target.cachedLimits = { groups: update.limitGroups, updatedAt: update.updatedAt }
+              }
             }
           }
         })

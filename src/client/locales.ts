@@ -33,6 +33,10 @@ export const zh = {
   emptyAccounts: '还没有账号。切到「凭据」标签导入，或点击上方「登录」。',
 
   detailTitle: '已选账号',
+  limitsTitle: '限额',
+  limitsUnavailable: '尚未测量。配额按账号定期刷新后显示。',
+  quotaWindow5h: '5 小时',
+  quotaWindowWeekly: '每周',
   fieldProject: '项目',
   fieldProxy: '代理',
   fieldFingerprint: '指纹',
@@ -157,6 +161,10 @@ export const en: Record<AgyLocaleKey, string> = {
   emptyAccounts: 'No accounts yet. Import one from the Credentials tab, or use Sign in above.',
 
   detailTitle: 'Selected account',
+  limitsTitle: 'Limits',
+  limitsUnavailable: 'Not measured yet. Windows appear after the quota refresh runs for this account.',
+  quotaWindow5h: '5 hours',
+  quotaWindowWeekly: 'Weekly',
   fieldProject: 'Project',
   fieldProxy: 'Proxy',
   fieldFingerprint: 'Fingerprint',

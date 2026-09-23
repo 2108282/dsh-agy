@@ -228,6 +228,12 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         fingerprintHistory: (account.fingerprintHistory ?? []).length,
         proxy: account.proxy ? maskProxyUrl(account.proxy) : null,
         quota: null,
+        // Read from the cache the session manager already refreshes alongside the
+        // per-model quota, so showing the windows costs no request. Null means
+        // "never measured" and renders as an explicit placeholder rather than a
+        // zero, which would read as an exhausted account.
+        limits: account.cachedLimits?.groups ?? null,
+        limitsUpdatedAt: account.cachedLimits?.updatedAt ?? null,
         usage: key === undefined ? null : toAccountUsageView(ledger.accounts[key]),
       })
     }

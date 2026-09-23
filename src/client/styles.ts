@@ -248,6 +248,30 @@ const CSS = `
 .agy-disclosure-meta { margin-left: auto; font: var(--dsw-font-xxxs-11);
   color: var(--dsw-alias-label-tertiary, #8f959e); font-variant-numeric: tabular-nums; }
 
+/* ── 5h / weekly limits ────────────────────────────────────────────────────
+   One group per upstream group (Gemini, Claude+GPT), each with its windows.
+   The rows are a fixed 4-column grid so the bars and the percentages line up
+   across groups: label / bar / percentage / reset countdown. */
+.agy-limits { display: flex; flex-direction: column; gap: 10px; padding: 4px 0; }
+.agy-limit-group { display: flex; flex-direction: column; gap: 2px; }
+.agy-limit-group-name {
+  font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-label-secondary, #61666b);
+  padding-bottom: 2px;
+}
+.agy-limit-row {
+  display: grid; grid-template-columns: 58px minmax(0,1fr) 40px minmax(0,auto);
+  align-items: center; gap: 10px; padding: 4px 0;
+  font: var(--dsw-font-xxs-12);
+}
+.agy-limit-k { color: var(--dsw-alias-label-secondary, #61666b); }
+.agy-limit-track { height: 6px; border-radius: 3px; overflow: hidden;
+  background: var(--dsw-alias-border-l2, rgba(0,0,0,.12)); }
+.agy-limit-track i { display: block; height: 100%; border-radius: 3px; }
+.agy-limit-p { text-align: right; font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary, #1f2329); }
+.agy-limit-reset { text-align: right; font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary, #8f959e); }
+
 /* ── Quota rows ──────────────────────────────────────────────────────────── */
 .agy-quota-row {
   display: grid; grid-template-columns: minmax(0,1fr) 96px minmax(0,auto);

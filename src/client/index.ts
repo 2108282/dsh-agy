@@ -189,6 +189,22 @@ function stateLabel(state: AccountView['state'], t: T): string {
 }
 
 /**
+ * Localized label for an upstream quota window token.
+ *
+ * Upstream sends `5h` / `weekly` today. The tokens are mapped rather than
+ * printed so the panel follows the UI language, and an UNRECOGNIZED token falls
+ * back to its raw value: upstream may add a window, and showing `30d` is better
+ * than a blank or a wrong localized label.
+ */
+function windowLabel(window: string, t: T): string {
+  switch (window) {
+    case '5h': return t('quotaWindow5h')
+    case 'weekly': return t('quotaWindowWeekly')
+    default: return window
+  }
+}
+
+/**
  * A wall-clock moment for a state label (a cooldown end).
  *
  * Time-of-day alone is enough while the wall is today; past midnight it must
@@ -388,6 +404,8 @@ function AccountDetail(props: {
   const { account, busy, handlers, t } = props
   const [proxyDraft, setProxyDraft] = useState('')
   const usage = account.usage
+  // One clock reading per render, so every reset label agrees (as the quota list does).
+  const now = Date.now()
 
   // The verification challenge, when the upstream raised one. The state badge
   // says the account is parked; THIS is the only place that says how to un-park
@@ -436,6 +454,41 @@ function AccountDetail(props: {
     button(t('actionExport'), () => { handlers.onExport(account.index) }, { disabled: busy }),
     button(t('actionRegenerateFingerprint'), () => { handlers.onRegenerateFingerprint(account.index) }, { disabled: busy })))
 
+  /**
+   * The 5-hour / weekly windows, placed ABOVE the cumulative usage card.
+   *
+   * Ordering is deliberate: these are the figures a user actually acts on
+   * (the rolling budget still available), while cumulative usage is a
+   * retrospective total that only grows. Putting the actionable number first is
+   * the whole point of the panel.
+   *
+   * A window with no reported fraction renders its bar empty and its percentage
+   * as an em dash — "unknown" must not look like "0% left". A null `limits`
+   * means the account has never been measured (the session manager only fills
+   * this on a pool with more than one enabled account), and says so rather than
+   * showing an empty card.
+   */
+  const limitsBlock = card(t('limitsTitle'),
+    account.limits === null || account.limits.length === 0
+      ? h('div', { className: 'agy-empty' }, t('limitsUnavailable'))
+      : h('div', { className: 'agy-limits' },
+        ...account.limits.map((group) => h('div', { className: 'agy-limit-group', key: group.name },
+          h('div', { className: 'agy-limit-group-name' }, group.name),
+          ...group.windows.map((window) => {
+            const fraction = window.remainingFraction
+            return h('div', { className: 'agy-limit-row', key: window.bucketId },
+              h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),
+              h('span', { className: 'agy-limit-track' },
+                fraction === null
+                  ? null
+                  : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
+              // An unreported fraction is an em dash, never "0%": unknown
+              // headroom and no headroom are opposite facts.
+              h('span', { className: 'agy-limit-p' }, fraction === null ? t('noProject') : `${Math.round(fraction * 100)}%`),
+              h('span', { className: 'agy-limit-reset' },
+                window.resetTime === null ? null : untilText(window.resetTime, t, now)))
+          })))))
+
   const usageBlock = usage === null ? null : card(
     t('usageCumulative'),
     metrics([
@@ -474,7 +527,7 @@ function AccountDetail(props: {
     }, { disabled: busy || account.proxy === null }),
     button(t('actionTestProxy'), () => { handlers.onTestProxy(account.index) }, { disabled: busy })))
 
-  return h('div', { className: 'agy-detail' }, identity, actions, usageBlock, proxyBlock)
+  return h('div', { className: 'agy-detail' }, identity, actions, limitsBlock, usageBlock, proxyBlock)
 }
 
 function AccountsTab(props: {

@@ -53,6 +53,45 @@ export interface CachedQuota {
   modelCount?: number
 }
 
+/**
+ * One window of one `QuotaGroup`, as `retrieveUserQuotaSummary` reports it.
+ *
+ * Declared here (the dependency-free leaf) because it is PERSISTED on the
+ * account; the parser that produces it lives in `adapter/quota-summary.ts`, which
+ * imports this module rather than the reverse.
+ */
+export interface QuotaWindow {
+  /** Upstream's own bucket id, e.g. `gemini-5h`, `3p-weekly`. Kept verbatim. */
+  bucketId: string
+  /** Upstream's window token: `5h` or `weekly` today. */
+  window: string
+  /** 0..1, or null when upstream omitted the fraction (unknown, not empty). */
+  remainingFraction: number | null
+  /** RFC3339 reset moment, or null when upstream omitted it. */
+  resetTime: string | null
+}
+
+/** One group of models sharing a 5-hour and a weekly window. */
+export interface QuotaGroup {
+  /** Upstream's group label, e.g. `Gemini Models`. */
+  name: string
+  windows: QuotaWindow[]
+}
+
+/**
+ * The grouped 5-hour / weekly windows, cached per account.
+ *
+ * Deliberately SEPARATE from `cachedQuota`: that map is per-model and feeds the
+ * rotation/ranking path (`familyQuotaFor`, `isFamilyDrained`), while this is
+ * per-GROUP and display-only. Merging them would put two different shapes under
+ * one key and let a display refresh influence scheduling.
+ */
+export interface CachedLimits {
+  groups: QuotaGroup[]
+  /** When this snapshot was taken (Unix ms). */
+  updatedAt: number
+}
+
 /** One account in the pool. `refresh` is the packed `refreshToken|projectId|managedProjectId` string. */
 export interface ManagedAccount {
   id?: string
@@ -75,6 +114,8 @@ export interface ManagedAccount {
   fingerprintHistory?: FingerprintVersion[]
   cachedQuota?: Record<string, CachedQuota>
   cachedQuotaUpdatedAt?: number
+  /** Grouped 5h/weekly windows, display-only (see `CachedLimits`). */
+  cachedLimits?: CachedLimits
   /** Per-account proxy URL (e.g. http://user:pass@host:8080 or socks5://host:1080). Undefined = follow env. */
   proxy?: string
 }
