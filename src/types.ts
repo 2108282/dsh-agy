@@ -106,6 +106,17 @@ export interface ManagedAccount {
   rateLimitResetTimes?: Record<string, number>
   coolingDownUntil?: number
   cooldownReason?: CooldownReason
+  /**
+   * When the CURRENT cooldown began (Unix ms).
+   *
+   * Separate from `coolingDownUntil`, which is its END: the duration is a
+   * backoff computed from the consecutive-failure count, so the start cannot be
+   * recovered from the end. Persisted because the reason is only useful with an
+   * age attached — "network-error" alone cannot distinguish a blip from seconds
+   * ago from one that has been sitting there for days. Cleared together with
+   * `cooldownReason` when the window expires.
+   */
+  cooldownSetAt?: number
   verificationRequired?: boolean
   verificationRequiredAt?: number
   verificationRequiredReason?: string

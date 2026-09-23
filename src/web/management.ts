@@ -19,6 +19,7 @@ import { maskProxyUrl } from '../store/accounts.ts'
 import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs, withTotalTimeout } from '../proxy.ts'
 import { AGY_PROVIDER } from '../adapter/models.ts'
 import type { DiscoveredModelEntry } from '../adapter/models.ts'
+import { clearExpiredState } from '../runtime/rotation.ts'
 import { foldWindowBreakdown } from '../stats.ts'
 import { THINKING_BUDGET_MAX, THINKING_BUDGET_MIN } from '../thinking-budget.ts'
 import type { UsageCounters, UsageSource } from '../stats.ts'
@@ -201,6 +202,13 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
   const listAccounts = async (): Promise<AccountView[]> => {
     const storage = await store.load()
     const now = Date.now()
+    // Expire stale cooldown state BEFORE rendering. `clearExpiredState` otherwise
+    // only runs inside `pickAccount`, i.e. only when a request is actually made,
+    // so a management read showed a reason for a window that had already lapsed —
+    // the badge said "active" while the detail row still said "network-error",
+    // contradicting itself on one screen. Purely in-memory here: the next real
+    // mutation persists it, and a read must not write.
+    for (const account of storage.accounts) clearExpiredState(account, now)
     const ledger = stats.snapshot()
     const rows: AccountView[] = []
     for (const [index, account] of storage.accounts.entries()) {
@@ -222,6 +230,11 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
           ? new Date(account.coolingDownUntil).toISOString()
           : null,
         cooldownReason: account.cooldownReason ?? null,
+        // Only while the window is live: `clearExpiredState` above already drops
+        // both fields for an expired one, so this cannot outlive its reason.
+        cooldownSetAt: account.cooldownSetAt === undefined
+          ? null
+          : new Date(account.cooldownSetAt).toISOString(),
         /**
          * Appeal link from an upstream verification challenge. Surfaced, never
          * followed automatically: only the account owner can complete it, and the

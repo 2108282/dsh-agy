@@ -275,6 +275,50 @@ function untilText(iso: string | null, t: T, now: number): string {
   return t('quotaResetIn', { value })
 }
 
+/**
+ * Localized label for a cooldown reason.
+ *
+ * Falls back to the raw token so a reason added on the host side still renders
+ * something legible rather than blank.
+ */
+function cooldownReasonLabel(reason: string, t: T): string {
+  switch (reason) {
+    case 'network-error': return t('cooldownReasonNetworkError')
+    case 'quota-exhausted': return t('cooldownReasonQuotaExhausted')
+    case 'validation-required': return t('cooldownReasonValidationRequired')
+    case 'project-error': return t('cooldownReasonProjectError')
+    default: return reason
+  }
+}
+
+/**
+ * How long ago a past moment was (the mirror of `untilText`).
+ *
+ * Reuses the same `rel*` magnitudes so the two read consistently, but adds a
+ * direction suffix: a bare magnitude beside a cooldown could equally mean when
+ * it started or when it ends. The suffix and every magnitude come from the
+ * dictionary, so nothing here is language-specific.
+ */
+function agoText(iso: string | null, t: T, now: number): string {
+  if (iso === null) return '—'
+  const at = new Date(iso).getTime()
+  if (Number.isNaN(at)) return '—'
+  const diff = now - at
+  // A clock skew or a just-written stamp reads as "just now" rather than a
+  // negative age.
+  if (diff < MINUTE_MS) return t('relJustNow')
+  const value = diff < HOUR_MS
+    ? t('relMinutes', { n: Math.floor(diff / MINUTE_MS) })
+    : diff < DAY_MS
+      ? t('relHours', { n: Math.floor(diff / HOUR_MS) })
+      : diff < 30 * DAY_MS
+        ? t('relDays', { n: Math.floor(diff / DAY_MS) })
+        : diff < 365 * DAY_MS
+          ? t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
+          : t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
+  return t('relAgo', { value })
+}
+
 // ─── building blocks ─────────────────────────────────────────────────────────
 
 /**
@@ -436,7 +480,13 @@ function AccountDetail(props: {
         count: account.fingerprintHistory,
         date: new Date(account.fingerprint.createdAt).toLocaleDateString(),
       })],
-    [t('fieldCooldownReason'), account.cooldownReason ?? t('noProject')],
+    // The age matters as much as the reason: "network error" alone reads the
+    // same whether it happened seconds or days ago, which is exactly how a stale
+    // value went unnoticed. The host clears expired state before rendering, so
+    // this row and the state badge cannot disagree.
+    [t('fieldCooldownReason'), account.cooldownReason === null
+      ? t('noProject')
+      : `${cooldownReasonLabel(account.cooldownReason, t)} · ${agoText(account.cooldownSetAt, t, now)}`],
     [t('fieldSources'), usage === null
       ? t('noProject')
       : t('sourcesSummary', {

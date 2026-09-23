@@ -53,7 +53,21 @@ export interface AccountView {
   state: AccountState
   /** ISO timestamp while cooling, else null. */
   cooldownUntil: string | null
+  /**
+   * Why the account is cooling, or null when it is not.
+   *
+   * Null for an expired window: the host clears stale cooldown state before
+   * rendering, so this field and `state` cannot disagree.
+   */
   cooldownReason: string | null
+  /**
+   * When the current cooldown began, as an ISO timestamp (null when not cooling).
+   *
+   * The reason alone is not actionable without its age: "network-error" reads
+   * the same whether it happened seconds or days ago, and the cooldown END
+   * cannot yield the start because the duration is a backoff.
+   */
+  cooldownSetAt: string | null
   /**
    * Appeal link from an upstream verification challenge, when one was supplied.
    * The account is parked, not disabled, and recovers without user action.

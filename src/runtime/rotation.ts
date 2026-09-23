@@ -94,6 +94,9 @@ export function clearExpiredState(account: ManagedAccount, now = Date.now()): vo
   if (account.coolingDownUntil && account.coolingDownUntil <= now) {
     account.coolingDownUntil = undefined
     account.cooldownReason = undefined
+    // The age is only meaningful while the window it describes is live; leaving
+    // it behind would let a stale timestamp pair with a future cooldown.
+    account.cooldownSetAt = undefined
   }
 }
 
@@ -156,6 +159,7 @@ export function decideRotation(
           : FULL_QUOTA_COOLDOWN_MS
         account.coolingDownUntil = now + Math.max(cooldownMs, 60_000)
         account.cooldownReason = 'quota-exhausted'
+        account.cooldownSetAt = now
         return { action: 'cool', backoffMs: Math.max(cooldownMs, 60_000) }
       }
       // Per-minute rate limit: prefer the server's real reset (capped), then
@@ -191,6 +195,7 @@ export function decideRotation(
       // so the UI can tell the user what happened.
       account.coolingDownUntil = now + VERIFICATION_COOLDOWN_MS
       account.cooldownReason = 'validation-required'
+      account.cooldownSetAt = now
       account.verificationRequired = true
       account.verificationRequiredAt = now
       account.verificationRequiredReason = 'validation-required'
@@ -199,11 +204,13 @@ export function decideRotation(
     case 'network-error': {
       account.coolingDownUntil = now + backoffMs
       account.cooldownReason = 'network-error'
+      account.cooldownSetAt = now
       return { action: 'rotate', backoffMs }
     }
     case 'project-error': {
       account.coolingDownUntil = now + backoffMs
       account.cooldownReason = 'project-error'
+      account.cooldownSetAt = now
       return { action: 'cool', backoffMs }
     }
     case 'request-error': {

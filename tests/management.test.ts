@@ -14,11 +14,20 @@ function account(overrides: Partial<ManagedAccount> = {}): ManagedAccount {
   return { refresh: 'refresh-a', addedAt: 1, lastUsed: 1, email: 'a@x.com', ...overrides }
 }
 
-/** In-memory account store; `mutate` runs against the live array like the real one. */
+/**
+ * In-memory account store; `mutate` runs against the live array like the real one.
+ *
+ * `load` returns a COPY, matching both real implementations (`JsonAccountStore`
+ * re-parses the file; `InMemoryAccountStore` uses `structuredClone`). Handing out
+ * the live array made an in-place edit by a READER visible to the test, which
+ * reported a persistence bug production cannot have — and would equally hide a
+ * real one, since a caller mutating the result of `load()` would appear to
+ * succeed here and be silently discarded there.
+ */
 function makeStore(accounts: ManagedAccount[], activeIndex = 0): AccountStore {
   const storage: AccountStorageV4 = { version: 4, accounts, activeIndex }
   return {
-    load: async () => storage,
+    load: async () => structuredClone(storage),
     mutate: async (fn) => fn(storage),
   } as unknown as AccountStore
 }
@@ -357,6 +366,69 @@ describe('agy management RPC', () => {
         .rejects.toThrow(/level is required/)
       await expect(management.call('thinking.set', { level: 'high', budget: '100' }))
         .rejects.toThrow(/must be a number/)
+    })
+  })
+
+  describe('cooldown display', () => {
+    it('reports no reason once the cooldown window has expired', async () => {
+      // Regression: `clearExpiredState` only ran inside `pickAccount`, i.e. only
+      // when a request was actually made, so a management read rendered a reason
+      // for a window that had already lapsed. The badge compared
+      // `coolingDownUntil > now` itself and said "active" while the detail row
+      // still said "network-error" — a self-contradiction on one screen, and it
+      // sat on a real account for hours.
+      const harness = makeHarness({
+        accounts: [account({
+          email: 'a@x.com',
+          coolingDownUntil: Date.now() - 60_000, // expired a minute ago
+          cooldownReason: 'network-error',
+          cooldownSetAt: Date.now() - 120_000,
+        })],
+      })
+      const { accounts } = await harness.management.call('account.list', {}) as {
+        accounts: Array<{ state: string, cooldownReason: string | null, cooldownUntil: string | null, cooldownSetAt: string | null }>
+      }
+      expect(accounts[0]?.state).toBe('active')
+      // The row must agree with the badge.
+      expect(accounts[0]?.cooldownReason).toBeNull()
+      expect(accounts[0]?.cooldownUntil).toBeNull()
+      expect(accounts[0]?.cooldownSetAt).toBeNull()
+    })
+
+    it('reports the reason and its start while the window is live', async () => {
+      const started = Date.now() - 30_000
+      const harness = makeHarness({
+        accounts: [account({
+          email: 'a@x.com',
+          coolingDownUntil: Date.now() + 60_000,
+          cooldownReason: 'network-error',
+          cooldownSetAt: started,
+        })],
+      })
+      const { accounts } = await harness.management.call('account.list', {}) as {
+        accounts: Array<{ state: string, cooldownReason: string | null, cooldownSetAt: string | null }>
+      }
+      expect(accounts[0]?.state).toBe('cooling')
+      expect(accounts[0]?.cooldownReason).toBe('network-error')
+      // The START travels, because the reason's age is the actionable half and
+      // the end cannot yield it (the duration is a backoff).
+      expect(accounts[0]?.cooldownSetAt).toBe(new Date(started).toISOString())
+    })
+
+    it('does not write to the store just because it rendered', async () => {
+      // The expiry above is applied to an in-memory copy: a read must not mutate
+      // persisted state.
+      const harness = makeHarness({
+        accounts: [account({
+          email: 'a@x.com',
+          coolingDownUntil: Date.now() - 60_000,
+          cooldownReason: 'network-error',
+        })],
+      })
+      await harness.management.call('account.list', {})
+      const persisted = (await harness.store.load()).accounts[0]!
+      expect(persisted.cooldownReason).toBe('network-error')
+      expect(persisted.coolingDownUntil).toBeGreaterThan(0)
     })
   })
 
