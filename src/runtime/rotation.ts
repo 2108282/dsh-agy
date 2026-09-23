@@ -170,6 +170,13 @@ export function decideRotation(
     }
     case 'auth-failure': {
       // Terminal: account credentials are dead; never auto-recover.
+      //
+      // One `invalid_grant` is enough, and that is a decision: the code means the
+      // refresh token no longer works, and rotating/re-probing a dead credential
+      // only burns requests. Another implementation demands repeated
+      // confirmation, but it has more failure modes to tell apart (its own
+      // decrypt path, a swappable OAuth app); here a false positive costs one
+      // `dsh-agy verify`, which re-enables the account on success.
       account.verificationRequired = true
       account.verificationRequiredAt = now
       account.verificationRequiredReason = 'auth-failure'
