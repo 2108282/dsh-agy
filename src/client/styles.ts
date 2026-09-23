@@ -92,13 +92,43 @@ const CSS = `
    full-bleed rectangle reads as a slab and fights the card's own radius. */
 .agy-rows { display: flex; flex-direction: column; gap: 2px; }
 /* Master/detail: the account list beside the selected account's detail, so a
-   row and the panel it opens stay in view together. Collapses to one column
-   when the settings panel is narrow. */
-.agy-split { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: 12px; align-items: start; }
-@media (max-width: 720px) { .agy-split { grid-template-columns: 1fr; } }
+ * row and the panel it opens stay in view together.
+ *
+ * The collapse MUST be a CONTAINER query, not a viewport one. This section
+ * renders inside the Settings panel, which is ~600px wide even on a large
+ * display, so the former @media (max-width: 720px) never fired: the split
+ * stayed two-column everywhere and the 300px master column squeezed the detail
+ * to ~280px. That is the reported symptom (the panel "feels too narrow"): the
+ * account email truncated to "a1…" and the latency value wrapped onto three
+ * lines. The measured constraint is the PANEL's width, so the query must follow
+ * it.
+ *
+ * The containment lives on a dedicated wrapper, NOT on .agy-root:
+ * container-type: inline-size applies layout containment, which makes the
+ * element a containing block for fixed-position descendants — and the host's
+ * Tooltip (used by the thinking-budget fields) positions its bubble with
+ * position: fixed. Scoping it here keeps that behaviour intact.
+ */
+.agy-split-wrap { container-type: inline-size; }
+.agy-split { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
+@container (min-width: 700px) {
+  .agy-split { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); }
+}
+/* Cap the master list so a large pool cannot push the detail it opens below the
+   fold — the reason the split exists at all. Scoped to the split: the Models tab
+   shares .agy-rows for its own long list and must keep growing freely. */
+.agy-split .agy-rows { max-height: 300px; overflow-y: auto; }
 .agy-rowitem {
-  display: grid; grid-template-columns: minmax(0,1fr) auto;
-  align-items: center; gap: 12px;
+  /* Flex-wrap, NOT the former grid-template-columns: minmax(0,1fr) auto.
+     A grid's 1fr may shrink to zero, so the identity column yielded all its
+     width to the action cluster: at the 300px master column the row's ~167px of
+     state badge + Verify/Delete left ~45px for the email (which needs ~177px),
+     truncating every address to "a1…" even though the row had room to grow
+     downward. With a flex BASIS the actions wrap to a second line instead of
+     squeezing the name, and margin-left: auto keeps them right-aligned on the
+     same line whenever they do fit. */
+  display: flex; flex-wrap: wrap;
+  align-items: center; gap: 4px 12px;
   margin: 0 2px; padding: 10px 8px; box-sizing: border-box;
   min-height: 36px; border-radius: 12px; background: transparent;
 }
@@ -113,7 +143,7 @@ const CSS = `
   outline: 2px solid var(--dsw-alias-label-primary, #1f2329);
   outline-offset: -2px;
 }
-.agy-rowmain { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.agy-rowmain { min-width: 0; flex: 1 1 160px; display: flex; flex-direction: column; gap: 3px; }
 .agy-rowtitle { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .agy-rowname {
   font: var(--dsw-font-xs-strong-13); color: var(--dsw-alias-label-primary, #1f2329);
@@ -123,7 +153,9 @@ const CSS = `
   font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.agy-rowactions { display: flex; align-items: center; gap: 6px; flex: none; }
+/* margin-left: auto right-aligns the cluster while it shares a line with the
+   identity, and becomes inert once flex-wrap moves it to its own line. */
+.agy-rowactions { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
 /* Per-model test: a quiet text button, not a capsule — one per row of a long
    list, so a solid Button would read as five competing primary actions. */
 .agy-rowtest {

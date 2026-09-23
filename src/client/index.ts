@@ -534,20 +534,19 @@ function AccountsTab(props: {
       { size: 'sm', variant: 'danger', disabled: busy }))))
 
   return h('div', { className: 'agy-root' },
-    // Master/detail side by side, as the dashboard it replaces had it. Stacked
-    // vertically, selecting a row further down the list pushed the detail it
-    // just opened below the fold — the selection and its result could not be
-    // seen at once.
-    h('div', { className: 'agy-split' },
-      card(t('colAccount'), h('div', { className: 'agy-rows' }, ...rows),
-        `${accounts.length}`),
-      // `key` remounts the detail per account so its proxy draft cannot carry
-      // over: without it React reuses the instance and a draft typed for one
-      // account was still in the box after selecting another, one Save away
-      // from writing A's proxy to B.
-      current === undefined
-        ? null
-        : h(AccountDetail, { key: String(current.index), account: current, busy, handlers, t })))
+    // The container-query wrapper the `.agy-split` breakpoint measures; see
+    // styles.ts for why this is a container query rather than a viewport one.
+    h('div', { className: 'agy-split-wrap' },
+      h('div', { className: 'agy-split' },
+        card(t('colAccount'), h('div', { className: 'agy-rows' }, ...rows),
+          `${accounts.length}`),
+        // `key` remounts the detail per account so its proxy draft cannot carry
+        // over: without it React reuses the instance and a draft typed for one
+        // account was still in the box after selecting another, one Save away
+        // from writing A's proxy to B.
+        current === undefined
+          ? null
+          : h(AccountDetail, { key: String(current.index), account: current, busy, handlers, t }))))
 }
 
 /**
@@ -793,8 +792,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
   )
 
   return h('div', { className: 'agy-root' },
-    rangePicker, summary, timing, byModel, byAccount,
-    hint(t('ledgerNote')))
+    rangePicker, summary, timing, byModel, byAccount)
 }
 
 // ─── Credentials tab ─────────────────────────────────────────────────────────

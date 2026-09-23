@@ -132,6 +132,44 @@ describe('usage table stylesheet', () => {
     expect(metricRule).not.toBeNull()
     expect(metricRule?.[1]).not.toMatch(/border-(right|left)/)
   })
+
+  it('keeps the CSS template body free of backticks', () => {
+    // The stylesheet is one template literal, so a backtick inside a comment
+    // ENDS it and the rest of the CSS is parsed as TypeScript ("Expected ';' but
+    // found ...", reported at a line far from the real cause). Easy to
+    // reintroduce when quoting a property name in prose, and it has happened
+    // repeatedly. Only the body matters — the delimiters and the surrounding
+    // TypeScript (other template literals in this file) legitimately contain
+    // backticks, so counting the whole file would be meaningless.
+    const start = css.indexOf('const CSS = `') + 'const CSS = `'.length
+    const end = css.indexOf('`', start)
+    expect(start, 'the CSS template literal must exist').toBeGreaterThan('const CSS = `'.length)
+    expect(css.slice(start, end), 'no backtick may appear inside the CSS body').not.toContain('`')
+  })
+
+  it('sizes the master/detail split from the panel, not the viewport', () => {
+    // Regression: the collapse used `@media (max-width: 720px)`, but this
+    // section renders inside a ~600px Settings panel, so the query never fired
+    // and the 320px master column squeezed the detail to ~270px on every
+    // desktop. The breakpoint must be a CONTAINER query — the measured
+    // constraint is the panel's inline size.
+    expect(css).toMatch(/\.agy-split-wrap\s*\{[^}]*container-type:\s*inline-size/)
+    expect(css).toMatch(/@container\s*\(min-width:[^)]*\)/)
+    expect(css).not.toMatch(/@media[^{]*\{\s*\.agy-split/)
+  })
+
+  it('lets an account row wrap instead of squeezing the identity', () => {
+    // Regression: the row was a two-column grid, whose `1fr` may collapse to
+    // zero — the ~167px action cluster left ~45px for the email, truncating
+    // every address to "a1…". A flex basis wraps the actions to a second line.
+    // The flex-wrap declaration is what matters; the comment above the rule
+    // quotes the old grid declaration, so only actual declarations are checked.
+    const rowRule = /\.agy-rowitem\s*\{([^}]*)\}/.exec(css)
+    expect(rowRule).not.toBeNull()
+    const declarations = (rowRule?.[1] ?? '').replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(declarations).toMatch(/flex-wrap:\s*wrap/)
+    expect(declarations).not.toMatch(/grid-template-columns/)
+  })
 })
 
 describe('model list ordering', () => {
