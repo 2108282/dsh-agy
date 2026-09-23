@@ -36,7 +36,7 @@ describe('AgySessionManager', () => {
     expect(session).toBeDefined()
     expect(session!.auth.access).toBe('at')
     expect(session!.impersonation['User-Agent']).toMatch(/^antigravity\/\d+\.\d+\.\d+/)
-    expect(session!.impersonation['Client-Metadata']).toContain('ANTIGRAVITY')
+    expect(session!.impersonation.clientMetadata.ideType).toContain('ANTIGRAVITY')
   })
 
   it('uses the persistent fingerprint when the account has one', async () => {
@@ -520,7 +520,7 @@ describe('usage-driven selection', () => {
       const second = impersonationHeadersFor(account('a@x'))
       expect(first).toEqual(second)
       expect(first['User-Agent']).toMatch(/^antigravity\/\d+\.\d+\.\d+ \S+$/)
-      expect(first['Client-Metadata']).toContain('ANTIGRAVITY')
+      expect(first.clientMetadata.ideType).toContain('ANTIGRAVITY')
       vi.unstubAllEnvs()
     }
   })
@@ -1051,8 +1051,12 @@ describe('impersonationHeadersFor', () => {
     expect(stable).toEqual({
       'User-Agent': 'antigravity/1.0.0 windows/amd64',
       'X-Goog-Api-Client': 'c',
-      'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
+      clientMetadata: { ideType: 'ANTIGRAVITY' },
     })
+    // The metadata is a BODY message and must not leak back into the headers: an
+    // object value spread into a `HeadersInit` is the shape that produced the
+    // comma-joined User-Agent this suite already guards against.
+    expect(Object.keys(stable).sort()).toEqual(['User-Agent', 'X-Goog-Api-Client', 'clientMetadata'])
   })
 })
 

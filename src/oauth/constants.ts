@@ -124,14 +124,32 @@ export async function fetchAgyFirstOk(
 }
 
 /**
- * Pinned Antigravity client version, used only until the runtime resolver has
- * published a fresh one (see {@link setResolvedAgyVersion}).
+ * Pinned Antigravity version, used only until the runtime resolver has published
+ * a fresh one (see {@link setResolvedAgyVersion}).
  *
  * A stale version string is the most detectable fingerprint anomaly, so this
  * value is a cold-start floor, not the version anything should normally send.
- * It tracks the release feed's newest entries; refresh it when the feed moves.
+ * It tracks the release feed's newest entry; refresh it when the feed moves.
+ *
+ * NAMESPACE: this is the **Antigravity CLI** line (`google-antigravity/antigravity-cli`),
+ * not the IDE or hub line, because that is the product this client claims to be
+ * (`docs/official-identity.json`). The three lines are separate version
+ * namespaces — IDE `2.0.0`, hub `2.15.1`, CLI `1.2.9` — so comparing them
+ * numerically is meaningless and mixing them advertises a version that does not
+ * exist for the product we name.
  */
-export const AGY_VERSION_FALLBACK = '2.0.0'
+export const AGY_VERSION_FALLBACK = '1.2.9'
+
+/**
+ * `ClientMetadata.platform` value: the proto enum NAME, as protobuf-JSON emits it.
+ *
+ * The official enumeration is `PLATFORM_UNSPECIFIED | DARWIN_AMD64 | DARWIN_ARM64
+ * | LINUX_AMD64 | LINUX_ARM64 | WINDOWS_AMD64` (read from the installed official
+ * CLI's own descriptor). The earlier `"MACOS"` that this backend rejected with
+ * `INVALID_ARGUMENT` was an invalid *value*, not a forbidden field — a
+ * distinction that mattered, because it had been read as "send `ideType` only".
+ */
+export const AGY_PLATFORM_ENUM = 'DARWIN_ARM64'
 
 /**
  * Newest Antigravity version the runtime resolver has observed, or undefined
@@ -176,8 +194,12 @@ export function antigravityUserAgent(version = currentAgyVersion(), platform = '
   return `antigravity/${version} ${platform}`
 }
 
-/** Client-Metadata payload for bootstrap calls — ideType only (backend enum
- * validation rejects freely-added platform/pluginType; AGENTS.md invariant). */
-export function getAgyBootstrapClientMetadata(): string {
-  return '{"ideType":"ANTIGRAVITY"}'
-}
+/**
+ * `ClientMetadata.ideType` value.
+ *
+ * `ANTIGRAVITY` is retained rather than switched to the enumeration's newer
+ * `GEMINI_CLI`: the CLI's own `IdeType` is injected through its auth provider and
+ * has not been captured, so the established working value is kept and the
+ * alternative recorded (`docs/official-identity.json`) rather than guessed at.
+ */
+export const AGY_IDE_TYPE = 'ANTIGRAVITY'

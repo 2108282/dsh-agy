@@ -8,9 +8,11 @@ import type { AccountRouting, TokenExchangeFailure, TokenExchangeResult } from '
 import { calculateTokenExpiry } from './auth.ts'
 import {
   AGY_ENDPOINT_FALLBACKS,
+  AGY_IDE_TYPE,
+  AGY_PLATFORM_ENUM,
   OAUTH_TOKEN_URL,
   OAUTH_USERINFO_URL,
-  getAgyBootstrapClientMetadata,
+  currentAgyVersion,
   getAgyBootstrapUserAgent,
   resolveAgyClientCredentials,
 } from './constants.ts'
@@ -57,12 +59,28 @@ interface LoadCodeAssistData {
   subscriptionInfo?: unknown
 }
 
-/** Build the metadata payload shared by loadCodeAssist and onboardUser.
- * Only `ideType` is sent: `platform`/`pluginType` values are rejected by the
- * backend's enum validation (verified live: INVALID_ARGUMENT on "MACOS"), and
- * the official clients send ideType alone (OmniRoute capture). */
+/**
+ * Build the metadata payload shared by loadCodeAssist and onboardUser.
+ *
+ * This is the `ClientMetadata` BODY message (`docs/official-identity.json`), and
+ * it replaces the `Client-Metadata` header this client used to send in addition:
+ * neither official binary contains that header name, while `LoadCodeAssistRequest.metadata`
+ * and `OnboardUserRequest.metadata` are both typed
+ * `google.internal.cloud.code.v1internal.ClientMetadata` in the official
+ * descriptor.
+ *
+ * The old "send `ideType` only" rule was a misreading of a real measurement: the
+ * live `INVALID_ARGUMENT` was on the VALUE `"MACOS"`, which is not in the
+ * `Platform` enum (`DARWIN_AMD64 | DARWIN_ARM64 | LINUX_AMD64 | LINUX_ARM64 |
+ * WINDOWS_AMD64`). A bad enum value is not a forbidden field. `AGY_PLATFORM_ENUM`
+ * carries a valid one.
+ */
 function bootstrapMetadata(): Record<string, string> {
-  return { ideType: 'ANTIGRAVITY' }
+  return {
+    ideType: AGY_IDE_TYPE,
+    ideVersion: currentAgyVersion(),
+    platform: AGY_PLATFORM_ENUM,
+  }
 }
 
 function extractProjectId(data: LoadCodeAssistData): string {
@@ -118,7 +136,6 @@ export async function loadCodeAssist(
     Authorization: `Bearer ${accessToken}`,
     'Content-Type': 'application/json',
     'User-Agent': getAgyBootstrapUserAgent(),
-    'Client-Metadata': getAgyBootstrapClientMetadata(),
   }
 
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
@@ -171,7 +188,6 @@ export async function onboardAndDiscoverProject(
     Authorization: `Bearer ${accessToken}`,
     'Content-Type': 'application/json',
     'User-Agent': getAgyBootstrapUserAgent(),
-    'Client-Metadata': getAgyBootstrapClientMetadata(),
   }
   const metadata = bootstrapMetadata()
 

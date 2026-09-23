@@ -2,11 +2,26 @@
 
 /**
  * Device fingerprint persisted per account (rate-limit mitigation).
- * Client-Metadata must only transmit ideType: the backend's enum validation
- * rejects freely-added platform/pluginType fields (AGENTS.md invariant).
+ *
+ * Mirrors `google.internal.cloud.code.v1internal.ClientMetadata`, read out of the
+ * installed official CLI's own descriptor (`docs/official-identity.json`). The
+ * message has eight fields; only the three below are populated, because the rest
+ * (`pluginVersion`, `updateChannel`, `duetProject`, `pluginType`, `ideName`) have
+ * no captured value and a wrong value is a worse anomaly than an absent one.
+ *
+ * This is the BODY message (`metadata`), not a header. Nothing here is sent as a
+ * `Client-Metadata` header: neither official binary contains that header name.
  */
 export interface ClientMetadata {
   ideType: string
+  /** Client version for the claimed product line (the CLI's, not the IDE's). */
+  ideVersion?: string
+  /**
+   * `ClientMetadata.platform` enum NAME (`DARWIN_ARM64`), which is a DIFFERENT
+   * vocabulary from the UA's `darwin/arm64` token — both exist, and conflating
+   * them is how `"MACOS"` came to be sent and rejected.
+   */
+  platform?: string
 }
 
 export interface Fingerprint {
@@ -167,11 +182,17 @@ export interface AgyAccountSession {
   auth: OAuthAuthDetails
   account: ManagedAccount
   index: number
-  /** Fingerprint + randomized impersonation headers for this request. */
+  /**
+   * Impersonation headers for this request.
+   *
+   * `clientMetadata` rides alongside rather than inside: it is a BODY message
+   * (`metadata` on the control-plane calls), because the `Client-Metadata` header
+   * this used to be is present in neither official binary.
+   */
   impersonation: {
     'User-Agent': string
     'X-Goog-Api-Client': string
-    'Client-Metadata': string
+    clientMetadata: ClientMetadata
   }
 }
 

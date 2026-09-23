@@ -142,6 +142,12 @@ function ledgerAccountKey(session: AgyAccountSession): string | undefined {
 /**
  * Build the impersonation headers for one request.
  *
+ * There is NO request-id header. `x-goog-request-id` used to be sent here and is
+ * present in neither official binary; the id the backend correlates on is the
+ * body's `requestId` field, which this request already carries. An invented
+ * header is a shape no official client emits, which is precisely the anomaly the
+ * impersonation set exists to avoid.
+ *
  * `User-Agent` carries the Antigravity client string and NOTHING else. The
  * harness's `attributionHeaders()` is deliberately not merged in: it returns a
  * lowercase `user-agent` key, so spreading it alongside the camel-case
@@ -158,22 +164,20 @@ function ledgerAccountKey(session: AgyAccountSession): string | undefined {
  * This adapter performs its own dispatch (see the `fetchAgyFirstOk` call in
  * `stream()`); nothing downstream re-adds the header.
  */
-export function buildRequestHeaders(
-  session: AgyAccountSession,
-  /**
-   * The request id this request already carries in its body. Both places must
-   * hold the same value: two independent `generateAntigravityRequestId()` calls
-   * produced one request whose header and body disagreed, a shape no client
-   * emits.
-   */
-  requestId: string = generateAntigravityRequestId(),
-): Record<string, string> {
+export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
   return {
     authorization: `Bearer ${session.auth.access}`,
     'content-type': 'application/json',
     accept: 'text/event-stream',
-    'x-goog-request-id': requestId,
-    ...session.impersonation,
+    // Exactly the two impersonation HEADERS, named individually rather than
+    // spread. `session.impersonation.clientMetadata` is a body message and must
+    // not become a header — and it is deliberately not added to this envelope
+    // either: the only `metadata` field the official descriptor evidences is on
+    // the control-plane calls (`LoadCodeAssistRequest`/`OnboardUserRequest`), so
+    // on this generate request the identity carrier is the body's existing
+    // `userAgent`/`requestType` pair.
+    'User-Agent': session.impersonation['User-Agent'],
+    'X-Goog-Api-Client': session.impersonation['X-Goog-Api-Client'],
   }
 }
 
@@ -383,8 +387,8 @@ export class AgyAdapter extends LlmAdapter {
         const generation = conversationKey !== undefined && conversationAccount !== undefined
           ? currentSessionGeneration(conversationAccount, conversationKey)
           : 0
-        // One id per attempt, shared by the body and the header. A resend under a
-        // bumped session generation is a new upstream request, so it gets a new id.
+        // One id per attempt, carried by the body. A resend under a bumped
+        // session generation is a new upstream request, so it gets a new id.
         const requestId = generateAntigravityRequestId()
         const body = toAgyRequestBody(options, {
           projectId: session.account.projectId,
@@ -400,7 +404,7 @@ export class AgyAdapter extends LlmAdapter {
             '/v1internal:streamGenerateContent?alt=sse',
             {
               method: 'POST',
-              headers: buildRequestHeaders(session, requestId),
+              headers: buildRequestHeaders(session),
               body: JSON.stringify(body),
               signal: options.signal,
             },

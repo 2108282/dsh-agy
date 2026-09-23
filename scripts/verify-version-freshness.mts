@@ -97,7 +97,7 @@ if (observed === undefined) {
   process.exit(2)
 }
 
-console.log(`live feed (ide line): ${observed}`)
+console.log(`live feed (cli line): ${observed}`)
 console.log(`compiled fallback: ${declaredFallback}`)
 console.log(`versionPool: ${poolVersions.join(', ')}`)
 

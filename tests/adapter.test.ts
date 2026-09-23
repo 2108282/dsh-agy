@@ -988,7 +988,7 @@ describe('buildRequestHeaders', () => {
     const headers = new Headers(buildRequestHeaders(session({
       'User-Agent': 'antigravity/2.0.0 darwin/arm64',
       'X-Goog-Api-Client': 'google-cloud-sdk vscode/1.96.0',
-      'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
+      clientMetadata: { ideType: 'ANTIGRAVITY' },
     })))
 
     expect(headers.get('user-agent')).toBe('antigravity/2.0.0 darwin/arm64')
@@ -997,17 +997,23 @@ describe('buildRequestHeaders', () => {
     expect(headers.get('user-agent')).not.toContain(',')
   })
 
-  it('keeps the remaining impersonation fields and the request id', () => {
+  it('carries the two impersonation headers and nothing invented', () => {
     const headers = buildRequestHeaders(session({
       'User-Agent': 'antigravity/2.0.0 darwin/arm64',
       'X-Goog-Api-Client': 'google-cloud-sdk vscode/1.96.0',
-      'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
+      clientMetadata: { ideType: 'ANTIGRAVITY' },
     }))
 
     expect(headers.authorization).toBe('Bearer at')
     expect(headers['X-Goog-Api-Client']).toBe('google-cloud-sdk vscode/1.96.0')
-    expect(headers['Client-Metadata']).toBe('{"ideType":"ANTIGRAVITY"}')
-    expect(headers['x-goog-request-id']).toMatch(/^agent\/\d+\/[0-9a-f]{8}$/)
+    // Neither of these is an official shape: `Client-Metadata` and
+    // `x-goog-request-id` are both absent from BOTH official binaries, and the
+    // request id the backend correlates on is the body's `requestId` field.
+    expect(Object.keys(headers).sort()).toEqual(
+      ['User-Agent', 'X-Goog-Api-Client', 'accept', 'authorization', 'content-type'],
+    )
+    // The metadata message is not a header and must not be spread as one.
+    expect(headers).not.toHaveProperty('clientMetadata')
   })
 })
 
@@ -1022,7 +1028,7 @@ describe('AgyAdapter', () => {
       impersonation: {
         'User-Agent': 'antigravity/1.18.3 darwin/arm64',
         'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
-        'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
+        clientMetadata: { ideType: 'ANTIGRAVITY' },
       },
       ...overrides,
     }
@@ -1161,10 +1167,13 @@ describe('AgyAdapter', () => {
     expect(failures).toEqual([])
   })
 
-  it('sends one request id, and the body and the header agree on it', async () => {
-    // `toAgyRequestBody` and `buildRequestHeaders` each generated their own id, so
-    // one request carried `body.requestId` != `x-goog-request-id` — a shape no
-    // client produces, and invisible to any test that looked at one side only.
+  it('carries the request id in the body, and sends no request-id header', async () => {
+    // The id used to be stamped in two places. `toAgyRequestBody` and
+    // `buildRequestHeaders` each generated their own, so one request carried
+    // `body.requestId` != `x-goog-request-id` — a shape no client produces, and
+    // invisible to any test that looked at one side only. The body's field is the
+    // one that survived, because `x-goog-request-id` is present in neither
+    // official binary.
     const seen: Array<{ header: string | null; body: unknown }> = []
     vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       seen.push({
@@ -1181,20 +1190,20 @@ describe('AgyAdapter', () => {
     for await (const _ of adapter.stream(generateOptions())) void _
 
     expect(seen).toHaveLength(1)
-    expect(seen[0]!.header).toMatch(/^agent\/\d+\/[0-9a-f]{8}$/)
-    expect(seen[0]!.body.requestId).toBe(seen[0]!.header)
+    expect((seen[0]!.body as { requestId?: string }).requestId).toMatch(/^agent\/\d+\/[0-9a-f]{8}$/)
+    expect(seen[0]!.header).toBeNull()
   })
 
   it('gives a resent attempt its own request id', async () => {
     // The 1M-wall resend is a second upstream request, so it must not repeat the
     // first one's id — that would look like a replayed request.
-    const seen: Array<{ header: string | null; sessionId?: string }> = []
+    const seen: Array<{ requestId?: string; sessionId?: string }> = []
     const wall =
       '{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed for the model: 1048576"}}'
     vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { request: { sessionId?: string } }
+      const body = JSON.parse(String(init?.body)) as { requestId?: string; request: { sessionId?: string } }
       seen.push({
-        header: new Headers(init?.headers as HeadersInit).get('x-goog-request-id'),
+        requestId: body.requestId,
         sessionId: body.request.sessionId,
       })
       if (seen.length === 1) return new Response(wall, { status: 400 })
@@ -1208,8 +1217,8 @@ describe('AgyAdapter', () => {
     for await (const _ of adapter.stream(generateOptions({ sessionId: 'session-1' as never }))) void _
 
     expect(seen).toHaveLength(2)
-    expect(seen[0]!.header).toBeDefined()
-    expect(seen[1]!.header).not.toBe(seen[0]!.header)
+    expect(seen[0]!.requestId).toBeDefined()
+    expect(seen[1]!.requestId).not.toBe(seen[0]!.requestId)
     // Same rule for the upstream session: the resend names a fresh one.
     expect(seen[1]!.sessionId).not.toBe(seen[0]!.sessionId)
   })

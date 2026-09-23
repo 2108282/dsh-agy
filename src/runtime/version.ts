@@ -154,8 +154,17 @@ export async function resolveAntigravityCliVersion(fetchImpl: FetchLike = proxie
 }
 
 /**
- * The newest version actually OBSERVED on the feeds, or `undefined` when neither
- * yielded one.
+ * The newest version actually OBSERVED on the claimed product's feed, or
+ * `undefined` when it yielded nothing.
+ *
+ * Reads the **CLI feed only**. This used to take the numeric max across the IDE
+ * and CLI feeds, which is a category error: the three Antigravity lines are
+ * separate version namespaces (IDE 2.x, hub 2.15.x, CLI 1.2.x), so "newest"
+ * across them compares unrelated numbers and picks whichever line happens to
+ * count higher. Since this client claims to be the CLI
+ * (`docs/official-identity.json`), the CLI feed is the only one that can
+ * describe the version we are entitled to advertise; the IDE resolver stays
+ * exported for the freshness gate's cross-check, never for the wire.
  *
  * Distinct from {@link resolveAntigravityVersion}, which substitutes the pinned
  * fallback at the boundary. A caller that must tell "observed" from "assumed"
@@ -163,14 +172,10 @@ export async function resolveAntigravityCliVersion(fetchImpl: FetchLike = proxie
  * the fallback is the value under test.
  */
 export async function resolveObservedAgyVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string | undefined> {
-  const [ide, cli] = await Promise.all([
-    resolveObservedVersion(ideState, IDE_RELEASE_FEED_URL, parseIdeReleaseFeed, fetchImpl),
-    resolveObservedVersion(cliState, CLI_RELEASE_URL, parseCliRelease, fetchImpl),
-  ])
-  return pickNewestVersion(ide, cli) ?? undefined
+  return (await resolveObservedVersion(cliState, CLI_RELEASE_URL, parseCliRelease, fetchImpl)) ?? undefined
 }
 
-/** Best available version: newest of both sources, cached 6h. */
+/** Best available version: the claimed product line, cached 6h. */
 export async function resolveAntigravityVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string> {
   return (await resolveObservedAgyVersion(fetchImpl)) ?? AGY_VERSION_FALLBACK
 }
@@ -205,7 +210,7 @@ export async function resolveAntigravityVersionBounded(
 /** Synchronously peek at a fresh cached version (no network). */
 export function peekCachedAntigravityVersion(): string | undefined {
   const now = Date.now()
-  for (const state of [ideState, cliState]) {
+  for (const state of [cliState, ideState]) {
     if (state.cache && now - state.cache.fetchedAt < VERSION_CACHE_TTL_MS) {
       // A fresh cache is an observation too — publish it so a synchronous peek
       // (the fingerprint failure path) reaches User-Agent builders without I/O.

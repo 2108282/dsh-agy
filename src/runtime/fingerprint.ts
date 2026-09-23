@@ -14,7 +14,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { currentAgyVersion } from '../oauth/constants.ts'
+import { AGY_IDE_TYPE, AGY_PLATFORM_ENUM, currentAgyVersion } from '../oauth/constants.ts'
 import type { ClientMetadata, Fingerprint, FingerprintVersion } from '../types.ts'
 import fingerprintData from './fingerprint-data.json'
 
@@ -82,10 +82,14 @@ export function generateFingerprint(
     sessionToken: randomBytes(16).toString('hex'),
     userAgent: `antigravity/${version} ${platform}`,
     apiClient: randomFrom(data.sdkClients),
-    // Client-Metadata must only transmit ideType (backend enum validation
-    // rejects freely-added platform/pluginType; AGENTS.md invariant).
+    // The metadata message, not a header (see `ClientMetadata` in types.ts). The
+    // version is stamped here as well as in the UA because the official message
+    // carries `ide_version` — a UA the SDK overwrites would otherwise be the only
+    // place this client states its version.
     clientMetadata: {
       ideType: randomFrom(data.ideTypes),
+      ideVersion: version,
+      platform: AGY_PLATFORM_ENUM,
     },
     createdAt: Date.now(),
   }
@@ -99,17 +103,26 @@ export function generateFingerprint(
  * platform per request. Kept as the pool-level primitive that
  * {@link getStableHeaders} and the fingerprint tests are built on.
  */
+/** The impersonation surface a fingerprint produces: two headers and the body message. */
+export interface ImpersonationHeaders {
+  'User-Agent': string
+  'X-Goog-Api-Client': string
+  clientMetadata: ClientMetadata
+}
+
 export function getRandomizedHeaders(
   data: FingerprintData = getFingerprintData(),
   version = randomFrom(data.versionPool),
-): { 'User-Agent': string; 'X-Goog-Api-Client': string; 'Client-Metadata': string } {
+): ImpersonationHeaders {
   const platform = randomFrom(data.platforms)
   return {
     'User-Agent': `antigravity/${version} ${platform}`,
     'X-Goog-Api-Client': randomFrom(data.sdkClients),
-    'Client-Metadata': JSON.stringify({
+    clientMetadata: {
       ideType: randomFrom(data.ideTypes),
-    }),
+      ideVersion: version,
+      platform: AGY_PLATFORM_ENUM,
+    },
   }
 }
 
@@ -121,30 +134,40 @@ export function getRandomizedHeaders(
 export function getStableHeaders(
   data: FingerprintData = getFingerprintData(),
   version = data.versionPool[0] ?? '',
-): { 'User-Agent': string; 'X-Goog-Api-Client': string; 'Client-Metadata': string } {
-  // `darwin/arm64` is the reference build the backend expects (see AGENTS.md
-  // "Version Freshness"): pinning it also keeps this fallback from advertising a
-  // platform token the official Electron client would never emit.
+): ImpersonationHeaders {
+  // `darwin/arm64` is the UA's platform TOKEN, a different vocabulary from the
+  // `DARWIN_ARM64` enum the metadata message takes. The UA token has no official
+  // confirmation (see docs/official-identity.json); the enum does.
   const platform = data.platforms[0] ?? 'darwin/arm64'
+  // `currentAgyVersion()`, never a literal: the resolved live version or the
+  // pinned fallback. A frozen string here would outlive the release it names
+  // (that staleness is the detectable signal this module exists to avoid).
+  const resolved = version || currentAgyVersion()
   return {
-    // `currentAgyVersion()`, never a literal: the resolved live version or the
-    // pinned fallback. A frozen string here would outlive the release it names
-    // (that staleness is the detectable signal this module exists to avoid).
-    'User-Agent': `antigravity/${version || currentAgyVersion()} ${platform}`,
+    'User-Agent': `antigravity/${resolved} ${platform}`,
     'X-Goog-Api-Client': data.sdkClients[0] ?? '',
-    'Client-Metadata': JSON.stringify({
-      ideType: data.ideTypes[0] ?? 'ANTIGRAVITY',
-    }),
+    clientMetadata: {
+      ideType: data.ideTypes[0] ?? AGY_IDE_TYPE,
+      ideVersion: resolved,
+      platform: AGY_PLATFORM_ENUM,
+    },
   }
 }
 
-/** Rewrite the version inside a fingerprint UA; reports whether it changed. */
+/**
+ * Rewrite the version inside a fingerprint UA; reports whether it changed.
+ *
+ * Carries the metadata message's `ideVersion` along: they state the same fact,
+ * and letting them drift is how one account comes to look like two clients.
+ */
 export function updateFingerprintVersion(fingerprint: Fingerprint, version: string): boolean {
   const pattern = /^(antigravity\/)([\d.]+)/
   const match = fingerprint.userAgent.match(pattern)
-  if (!match || match[2] === version) return false
-  fingerprint.userAgent = fingerprint.userAgent.replace(pattern, `$1${version}`)
-  return true
+  const uaChanged = match !== null && match[2] !== version
+  if (uaChanged) fingerprint.userAgent = fingerprint.userAgent.replace(pattern, `$1${version}`)
+  const metaChanged = fingerprint.clientMetadata.ideVersion !== version
+  if (metaChanged) fingerprint.clientMetadata.ideVersion = version
+  return uaChanged || metaChanged
 }
 
 /** Append a fingerprint to the account history (bounded), then use it as current. */

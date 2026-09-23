@@ -129,15 +129,10 @@ export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSess
     return {
       'User-Agent': fingerprint.userAgent,
       'X-Goog-Api-Client': fingerprint.apiClient,
-      'Client-Metadata': JSON.stringify(fingerprint.clientMetadata),
+      clientMetadata: fingerprint.clientMetadata,
     }
   }
-  const headers = getStableHeaders(getFingerprintData(), currentAgyVersion())
-  return {
-    'User-Agent': headers['User-Agent'],
-    'X-Goog-Api-Client': headers['X-Goog-Api-Client'],
-    'Client-Metadata': headers['Client-Metadata'],
-  }
+  return getStableHeaders(getFingerprintData(), currentAgyVersion())
 }
 
 export class AgySessionManager {
@@ -870,8 +865,8 @@ export class AgySessionManager {
         authorization: `Bearer ${session.auth.access}`,
         'content-type': 'application/json',
         accept: 'text/event-stream',
-        'x-goog-request-id': requestId,
-        ...session.impersonation,
+        'User-Agent': session.impersonation['User-Agent'],
+        'X-Goog-Api-Client': session.impersonation['X-Goog-Api-Client'],
       }
       const routing = { proxyUrl: session.account.proxy, streaming: true }
       const response = await fetchAgyFirstOk(

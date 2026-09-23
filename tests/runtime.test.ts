@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   classifyFetchError,
   classifyHttpError,
@@ -32,7 +32,7 @@ import {
   deriveAntigravitySessionId,
   generateAntigravityRequestId,
 } from '../src/runtime/identity.ts'
-import { resolveAntigravityVersion } from '../src/runtime/version.ts'
+import { _clearVersionCacheForTest, resolveAntigravityVersion } from '../src/runtime/version.ts'
 import {
   FAMILY_UNKNOWN,
   familyKeyOf,
@@ -410,21 +410,32 @@ describe('fingerprint', () => {
     const fp = generateFingerprint()
     expect(fp.deviceId).toMatch(/^[0-9a-f-]{36}$/)
     expect(fp.sessionToken).toMatch(/^[0-9a-f]{32}$/)
-    // Pinned platform: two independent implementations of this client concluded
-    // the backend expects the darwin/arm64 reference build, and the older pool
-    // mixed in `windows/amd64` / `darwin/amd64` — Go-style tokens an Electron
-    // client does not emit (its `process.platform`/`arch` are win32/x64).
+    // Platform pinned. The official `ClientMetadata.Platform` enum read out of the
+    // installed CLI is `PLATFORM_UNSPECIFIED | DARWIN_AMD64 | DARWIN_ARM64 |
+    // LINUX_AMD64 | LINUX_ARM64 | WINDOWS_AMD64`, so these Go-style tokens ARE the
+    // official vocabulary for the enum — while the UA's own `darwin/arm64` token is
+    // a separate, still-uncaptured thing (docs/official-identity.json).
     expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ darwin\/arm64$/)
     expect(fp.clientMetadata.ideType).toBe('ANTIGRAVITY')
-    // Client-Metadata must only transmit ideType (backend rejects extras)
-    expect(Object.keys(fp.clientMetadata)).toEqual(['ideType'])
+    // The metadata is the official `ClientMetadata` message: only fields whose
+    // vocabulary is captured, so `pluginVersion`/`ideName`/... stay absent rather
+    // than guessed.
+    expect(fp.clientMetadata.ideVersion).toBe(fp.userAgent.replace(/^antigravity\//, '').replace(/ .*$/, ''))
+    expect([
+      'PLATFORM_UNSPECIFIED', 'DARWIN_AMD64', 'DARWIN_ARM64',
+      'LINUX_AMD64', 'LINUX_ARM64', 'WINDOWS_AMD64',
+    ]).toContain(fp.clientMetadata.platform)
+    // Not the UA's token: conflating the two vocabularies is how `"MACOS"` — not a
+    // member of that enum — came to be sent and rejected with INVALID_ARGUMENT.
+    expect(fp.clientMetadata.platform).not.toBe('darwin/arm64')
+    expect(Object.keys(fp.clientMetadata).sort()).toEqual(['ideType', 'ideVersion', 'platform'])
   })
 
   it('randomizes per-request headers across the pools', () => {
     const seen = new Set<string>()
     for (let i = 0; i < 40; i++) {
       const headers = getRandomizedHeaders()
-      expect(headers['Client-Metadata']).toContain('"ideType":"ANTIGRAVITY"')
+      expect(headers.clientMetadata.ideType).toContain('ANTIGRAVITY')
       seen.add(headers['X-Goog-Api-Client'])
     }
     expect(seen.size).toBeGreaterThan(1)
@@ -462,8 +473,8 @@ describe('fingerprint', () => {
     const first = getStableHeaders()
     const second = getStableHeaders()
     expect(first).toEqual(second)
-    expect(first['Client-Metadata']).toContain('"ideType"')
-    expect(Object.keys(first).sort()).toEqual(['Client-Metadata', 'User-Agent', 'X-Goog-Api-Client'])
+    expect(first.clientMetadata.ideType).toBe('ANTIGRAVITY')
+    expect(Object.keys(first).sort()).toEqual(['User-Agent', 'X-Goog-Api-Client', 'clientMetadata'])
   })
 })
 
@@ -584,18 +595,28 @@ describe('session accumulation wall', () => {
 
 describe('version resolver', () => {
   afterEach(() => vi.unstubAllGlobals())
+  // The 6h cache is process state, so an earlier test's resolution would answer
+  // this one and the assertion below would never reach the stub.
+  beforeEach(() => _clearVersionCacheForTest())
 
-  it('picks the newest semver from sources', async () => {
+  it('takes the version from the claimed product line, not the highest number', async () => {
+    // The resolver used to return the numeric max across BOTH feeds. The three
+    // Antigravity lines are separate namespaces (IDE 2.x, hub 2.15.x, CLI 1.2.x),
+    // so "max" compares unrelated numbers: the IDE feed's 1.20.1 wins here and this
+    // client would advertise a version that does not exist for the CLI it claims to
+    // be (docs/official-identity.json). Red-capable: the old logic returns 1.20.1.
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.includes('antigravity-auto-updater')) {
         return new Response(JSON.stringify([{ version: '1.15.0' }, { version: '1.20.1' }]), { status: 200 })
       }
-      return new Response(JSON.stringify({ tag_name: 'v1.19.0' }), { status: 200 })
+      // No leading `v`: that is the shape the real feed returns (`tag: "1.2.9"`),
+      // and a `v`-prefixed tag is not what this parser accepts.
+      return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
     const version = await resolveAntigravityVersion(fetchImpl)
-    expect(version).toBe('1.20.1')
+    expect(version).toBe('1.19.0')
   })
 
   it('falls back to the pinned version when sources fail', async () => {

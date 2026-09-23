@@ -339,10 +339,10 @@ describe('bootstrap UA version freshness', () => {
       return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
-    expect(await resolveAntigravityVersion(fetchImpl)).toBe('1.20.1')
+    expect(await resolveAntigravityVersion(fetchImpl)).toBe('1.19.0')
     // Resolution must reach the bootstrap UA without any call site passing it.
-    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/1.20.1')
-    expect(antigravityUserAgent()).toBe('antigravity/1.20.1 darwin/arm64')
+    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/1.19.0')
+    expect(antigravityUserAgent()).toBe('antigravity/1.19.0 darwin/arm64')
   })
 
   it('reports nothing observed when the feeds yield nothing', async () => {
