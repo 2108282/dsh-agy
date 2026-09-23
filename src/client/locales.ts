@@ -77,6 +77,7 @@ export const zh = {
 
   usageCumulative: '用量 · 累计',
   usageTitle: '用量',
+  usageUnitAside: '单位：token',
   kpiInput: '输入',
   kpiOutput: '输出',
   kpiCacheRead: '缓存读',
@@ -97,7 +98,7 @@ export const zh = {
   colOutput: '输出',
   colCacheRead: '缓存读',
   colShare: '占比',
-  colToken: 'Token',
+  colToken: 'Token 总量',
   colFailed: '失败',
   colRateLimited: '限流',
   colRotations: '轮换',
@@ -198,6 +199,7 @@ export const en: Record<AgyLocaleKey, string> = {
 
   usageCumulative: 'Usage · cumulative',
   usageTitle: 'Usage',
+  usageUnitAside: 'token counts',
   kpiInput: 'Input',
   kpiOutput: 'Output',
   kpiCacheRead: 'Cache read',
@@ -218,7 +220,7 @@ export const en: Record<AgyLocaleKey, string> = {
   colOutput: 'Output',
   colCacheRead: 'Cache read',
   colShare: 'Share',
-  colToken: 'Tokens',
+  colToken: 'Total tokens',
   colFailed: 'Failed',
   colRateLimited: 'Rate ltd',
   colRotations: 'Rotations',

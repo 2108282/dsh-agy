@@ -105,10 +105,45 @@ function createRpc(connection: ConnectionLike): AgyRpcClient {
 // ─── formatting ──────────────────────────────────────────────────────────────
 
 /** Compact token text: 1.2M / 284K / 512. */
-function tokenText(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}K`
-  return String(value)
+/** Token-count units, largest first. */
+const TOKEN_UNITS: ReadonlyArray<readonly [number, string]> = [
+  [1_000_000_000_000, 'T'],
+  [1_000_000_000, 'B'],
+  [1_000_000, 'M'],
+  [1_000, 'K'],
+]
+
+/**
+ * Compact token count: `1.2M` / `284K` / `512`. Counts below 1000 render in
+ * full — a suffix starts at 1K.
+ *
+ * The unit is chosen from the value ROUNDED TO ITS DISPLAYED PRECISION, and
+ * promoted when that rounding would reach 1000 (which belongs to the next unit).
+ * Deciding from the raw magnitude let rounding contradict the suffix: 999_999
+ * printed as `1000K`, 99999 as `100.0K` while 100000 was `100K`, and 9999999 as
+ * `10.0M` while 10000000 was `10M`.
+ *
+ * Exported for a direct unit test: the boundaries are exactly where this broke.
+ * @param value - token count.
+ * @returns the display string.
+ */
+export function tokenText(value: number): string {
+  if (value < 1_000) return String(value)
+  /** One decimal below 100 (`1.2M`), none at or above (`284K`). */
+  const render = (scaled: number, suffix: string): string =>
+    `${scaled < 100 ? scaled.toFixed(1) : String(Math.round(scaled))}${suffix}`
+
+  // Largest unit the value reaches; a smaller index is a larger unit.
+  const start = TOKEN_UNITS.findIndex(([divisor]) => value >= divisor)
+  for (let index = start; index >= 0; index--) {
+    const [divisor, suffix] = TOKEN_UNITS[index]!
+    const scaled = Math.round((value / divisor) * 10) / 10
+    // Rounding overflow belongs to the next unit up, not to `1000<suffix>`.
+    if (scaled < 1_000) return render(scaled, suffix)
+  }
+  // Beyond the largest unit: render it anyway rather than mislabel the value.
+  const [divisor, suffix] = TOKEN_UNITS[0]!
+  return render(Math.round((value / divisor) * 10) / 10, suffix)
 }
 
 function formatDuration(ms: number): string {
@@ -658,7 +693,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
       ? stats.week
       : range === 'month' ? stats.month : stats.all
   const hit = cacheHitPercent(counters)
-  const maxRequests = Math.max(1, ...stats.models.map((row) => row.counters.requests))
+  const totalRequests = Math.max(1, stats.models.reduce((sum, row) => sum + row.counters.requests, 0))
 
   // The primitives catalog names `Pill` for view switchers and filters: it owns
   // the active/inactive fill pair, so no local chip skin is needed.
@@ -673,6 +708,8 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
       ? null
       : h('span', { className: 'agy-aside' }, t('since', { date: new Date(stats.since).toLocaleDateString() })))
 
+  // The unit is stated once, on the card that carries every token figure:
+  // otherwise a bare "Input 284K" is unreadable without knowing the axis.
   const summary = card(t('usageTitle'), metrics([
     metric(t('colRequests'), String(counters.requests), t('kpiRequestsDetail', {
       succeeded: counters.succeeded,
@@ -682,7 +719,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     metric(t('colOutput'), counters.output, t('kpiOutputDetail')),
     metric(t('colCacheRead'), counters.cacheRead,
       hit === null ? t('kpiNoBilledInput') : t('kpiCacheHit', { percent: hit })),
-  ]))
+  ]), t('usageUnitAside'))
 
   const timing = card(t('fieldLatency'), defs([
     [t('fieldCacheWrite'), tokenText(counters.cacheWrite)],
@@ -709,7 +746,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
         h('td', { className: 'agy-num' },
           h('span', { className: 'agy-bar' },
             h('span', { className: 'agy-track' },
-              h('i', { style: { width: `${Math.round((row.counters.requests / maxRequests) * 100)}%` } })))))))),
+              h('i', { style: { width: `${Math.round((row.counters.requests / totalRequests) * 100)}%` } })))))))),
     t('byModelAside'))
 
   const byAccount = stats.accounts.length === 0 ? null : card(t('byAccount'),

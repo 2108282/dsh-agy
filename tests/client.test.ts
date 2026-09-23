@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
-import { apply, orderModels } from '../src/client/index.ts'
+import { apply, orderModels, tokenText } from '../src/client/index.ts'
 import { en, zh } from '../src/client/locales.ts'
 import type { ModelView } from '../src/rpc-contract.ts'
 
@@ -140,5 +140,35 @@ describe('model list ordering', () => {
     const input = [m('a', false), m('b', true)]
     orderModels(input)
     expect(input.map((entry) => entry.id)).toEqual(['a', 'b'])
+  })
+})
+
+describe('token count formatting', () => {
+  it('starts a unit suffix at 1K and keeps full precision below it', () => {
+    expect(tokenText(0)).toBe('0')
+    expect(tokenText(512)).toBe('512')
+    expect(tokenText(999)).toBe('999')
+    expect(tokenText(1_000)).toBe('1.0K')
+    expect(tokenText(1_500)).toBe('1.5K')
+    expect(tokenText(284_000)).toBe('284K')
+    expect(tokenText(1_200_000)).toBe('1.2M')
+  })
+
+  it('promotes the unit when rounding would reach 1000 of it', () => {
+    // Regression: the unit came from the raw magnitude while the decimals came
+    // from a different threshold, so rounding produced a number outside its own
+    // unit — `1000K` instead of `1.0M`.
+    expect(tokenText(999_999)).toBe('1.0M')
+    expect(tokenText(999_999_999)).toBe('1.0B')
+    expect(tokenText(999_999_999_999)).toBe('1.0T')
+  })
+
+  it('keeps decimals consistent across a unit boundary', () => {
+    // Regression: 99999 was `100.0K` while 100000 was `100K`, and 9999999 was
+    // `10.0M` while 10000000 was `10M` — the same magnitude, formatted two ways.
+    expect(tokenText(99_999)).toBe('100K')
+    expect(tokenText(100_000)).toBe('100K')
+    expect(tokenText(9_999_999)).toBe('10.0M')
+    expect(tokenText(10_000_000)).toBe('10.0M')
   })
 })
