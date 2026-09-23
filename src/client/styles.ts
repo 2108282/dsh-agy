@@ -146,8 +146,10 @@ const CSS = `
 
 /* ── Metric strip ────────────────────────────────────────────────────────── */
 .agy-metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); }
-.agy-metric { padding: 12px 0; border-right: 0.5px solid var(--dsw-alias-border-l1, rgba(0,0,0,.04)); }
-.agy-metric:last-child { border-right: 0; }
+/* No vertical rules between cells: the columns read as separated already by
+   the gap and their own left alignment, and the dividers turned a metric strip
+   into a spreadsheet grid. */
+.agy-metric { padding: 12px 0; }
 .agy-metric-k { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* The theme's own role carries family + size + line-height + weight; the
    metric only tightens the tracking. */
@@ -223,6 +225,14 @@ const CSS = `
 .agy-table tr:last-child td { border-bottom: 0; }
 .agy-table tbody tr:hover td { background: var(--dsw-alias-bg-layer-2, #f4f5f7); }
 .agy-num { text-align: right; font-variant-numeric: tabular-nums; }
+/* Numeric HEADERS must right-align too, and .agy-num alone cannot do it: the
+   .agy-table th rule above is specificity 0-1-1 and outranks the bare .agy-num
+   class (0-1-0), so every numeric th stayed left while its td cells
+   right-aligned — the header label sat at the column's left edge with its
+   figure out at the right, which is what read as "the data is skewed right".
+   Matching the cell class on the header element (0-2-1) wins instead of
+   escalating with !important. */
+.agy-table th.agy-num { text-align: right; }
 /* Inline emphasis on a table cell: a strong role, not a heavier size. */
 .agy-strong { color: var(--dsw-alias-label-primary, #1f2329); font-weight: 500; }
 .agy-mail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

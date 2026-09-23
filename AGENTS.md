@@ -61,6 +61,8 @@ redirects a browser to it with a GET.
   - All copy goes through the `agy` locale namespace (`locales.ts`); the `zh` dictionary is the key source of truth, and a test enforces zh/en key and placeholder parity **plus** that no key is unused and no CJK literal appears outside the dictionaries.
   - A destructive store write is never behind an empty input: an empty proxy draft used to reach `account.proxy`, whose empty string means "delete the proxy", so Save silently cleared it. Clearing is its own explicit action.
   - The account list and its detail panel are a two-column master/detail (`agy-split`); stacking them pushed the opened detail below the fold.
+  - `.agy-num` cannot right-align a numeric `<th>` on its own: `.agy-table th { text-align: left }` is specificity 0-1-1 and beats the bare class (0-1-0), so headers must be matched as `.agy-table th.agy-num` — the symptom is a header label at the column's left edge above a figure at its right, which reads as "the data is skewed right".
+  - A card-head aside is only acceptable when it says something no column header does — `单位：token` and `输入 / 输出 / 缓存读` merely restated the headers directly beneath them and were removed.
   - The devDependency on `@deepseek-ai/dsh-client-ui-primitives` is pinned to the generation the Desktop host bundles (`^0.1.5-rc.1`); an older range resolves to types that predate `Switch`/`Tag`/`Pill`.
 - **Model Visibility (`model-visibility.ts`)**:
   - Blacklist, never whitelist: only explicitly disabled models are hidden, so a model the server adds later still appears.

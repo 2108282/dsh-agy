@@ -259,13 +259,13 @@ function untilText(iso: string | null, t: T, now: number): string {
  * is safe for buttons outside rows, where there is no ancestor handler.
  */
 function button(label: string, onClick: () => void, options: {
-  variant?: 'primary' | 'danger'
+  variant?: 'danger' | 'toolbar'
   size?: 'sm'
   disabled?: boolean
   title?: string
 } = {}): ReactNode {
   return h(Button, {
-    variant: options.variant === 'primary' ? 'primary' : 'outline',
+    variant: options.variant === 'toolbar' ? 'toolbar' : 'outline',
     size: options.size === 'sm' ? 'sm' : 'md',
     ...(options.disabled === true ? { disabled: true } : {}),
     ...(options.title === undefined ? {} : { title: options.title }),
@@ -388,7 +388,6 @@ function AccountDetail(props: {
   const { account, busy, handlers, t } = props
   const [proxyDraft, setProxyDraft] = useState('')
   const usage = account.usage
-  const models = usage?.models ?? []
 
   // The verification challenge, when the upstream raised one. The state badge
   // says the account is parked; THIS is the only place that says how to un-park
@@ -439,30 +438,15 @@ function AccountDetail(props: {
 
   const usageBlock = usage === null ? null : card(
     t('usageCumulative'),
-    h('div', null,
-      metrics([
-        metric(t('kpiInput'), usage.totals.input, t('kpiInputDetail')),
-        metric(t('kpiOutput'), usage.totals.output, t('kpiOutputDetail')),
-        metric(t('kpiCacheRead'), usage.totals.cacheRead, t('kpiCacheHit', { percent: cacheHitPercent(usage.totals) ?? 0 })),
-        metric(t('kpiRequests'), String(usage.totals.requests), t('kpiRequestsDetail', {
-          succeeded: usage.totals.succeeded,
-          failed: usage.totals.failed,
-        })),
-      ]),
-      // Per-model usage stays a table: a metric grid is the right shape for it.
-      models.length === 0 ? null : h('div', { className: 'agy-table-wrap' },
-        table(h('tr', null,
-          h('th', null, t('colModel')),
-          h('th', { className: 'agy-num', style: { width: '46px' } }, t('colRequests')),
-          h('th', { className: 'agy-num', style: { width: '60px' } }, t('colInput')),
-          h('th', { className: 'agy-num', style: { width: '60px' } }, t('colOutput')),
-          h('th', { className: 'agy-num', style: { width: '60px' } }, t('colCacheRead'))),
-        models.map((row) => h('tr', { key: row.model },
-          h('td', { className: 'agy-strong' }, row.model),
-          h('td', { className: 'agy-num' }, String(row.counters.requests)),
-          h('td', { className: 'agy-num' }, tokenText(row.counters.input)),
-          h('td', { className: 'agy-num' }, tokenText(row.counters.output)),
-          h('td', { className: 'agy-num' }, tokenText(row.counters.cacheRead)))))))
+    metrics([
+      metric(t('kpiInput'), usage.totals.input, t('kpiInputDetail')),
+      metric(t('kpiOutput'), usage.totals.output, t('kpiOutputDetail')),
+      metric(t('kpiCacheRead'), usage.totals.cacheRead, t('kpiCacheHit', { percent: cacheHitPercent(usage.totals) ?? 0 })),
+      metric(t('kpiRequests'), String(usage.totals.requests), t('kpiRequestsDetail', {
+        succeeded: usage.totals.succeeded,
+        failed: usage.totals.failed,
+      })),
+    ]),
   )
 
   // Saving only ever writes a non-empty draft: the empty string is the store's
@@ -746,8 +730,11 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
       ? null
       : h('span', { className: 'agy-aside' }, t('since', { date: new Date(stats.since).toLocaleDateString() })))
 
-  // The unit is stated once, on the card that carries every token figure:
-  // otherwise a bare "Input 284K" is unreadable without knowing the axis.
+  // The card states no unit aside, and the by-model card no longer recaps its
+  // own columns: both duplicated the column headers directly beneath them (a
+  // "unit: token" label above the token columns, and an "input / output / cache
+  // read" recap above those same three headers), so the reader parsed the same
+  // words twice per card.
   const summary = card(t('usageTitle'), metrics([
     metric(t('colRequests'), String(counters.requests), t('kpiRequestsDetail', {
       succeeded: counters.succeeded,
@@ -757,7 +744,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     metric(t('colOutput'), counters.output, t('kpiOutputDetail')),
     metric(t('colCacheRead'), counters.cacheRead,
       hit === null ? t('kpiNoBilledInput') : t('kpiCacheHit', { percent: hit })),
-  ]), t('usageUnitAside'))
+  ]))
 
   const timing = card(t('fieldLatency'), defs([
     [t('fieldCacheWrite'), tokenText(counters.cacheWrite)],
@@ -785,7 +772,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
           h('span', { className: 'agy-bar' },
             h('span', { className: 'agy-track' },
               h('i', { style: { width: `${Math.round((row.counters.requests / totalRequests) * 100)}%` } })))))))),
-    t('byModelAside'))
+  )
 
   const byAccount = stats.accounts.length === 0 ? null : card(t('byAccount'),
     h('div', { className: 'agy-table-wrap' },
@@ -803,7 +790,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
         h('td', { className: 'agy-num' }, String(row.totals.failed)),
         h('td', { className: 'agy-num' }, String(row.totals.rateLimited)),
         h('td', { className: 'agy-num' }, String(row.totals.rotations)))))),
-    t('byAccountAside'))
+  )
 
   return h('div', { className: 'agy-root' },
     rangePicker, summary, timing, byModel, byAccount,
@@ -1214,7 +1201,14 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         h('div', { className: 'agy-sub' }, t('subtitle'))),
       h('div', { className: 'agy-toolbar' },
         button(t('refresh'), () => { void refresh() }, { size: 'sm', disabled: busy }),
-        button(t('login'), startLogin, { size: 'sm', variant: 'primary', disabled: busy }))),
+        // `primary` is the host's INVERTED capsule — under the dark theme
+        // `--dsw-alias-button-primary-fill` resolves through `brand-primary` to
+        // `--dsw-static-neutral-bluish-50` (#f9fafb), i.e. a near-white pill with
+        // near-black text. That is correct for a page's single primary action,
+        // but this is one of two equal-weight header/utility actions sitting
+        // beside Refresh, where a white slab reads as a rendering fault. The
+        // `toolbar` family is the host's own token set for exactly this slot.
+        button(t('login'), startLogin, { size: 'sm', variant: 'toolbar', disabled: busy }))),
     h('div', { className: 'agy-tabs' },
       tabButton('accounts', t('tabAccounts'), accounts.length),
       tabButton('models', t('tabModels'), models.length > 0 ? models.length : undefined),

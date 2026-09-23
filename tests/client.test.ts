@@ -110,6 +110,30 @@ describe('agy section i18n', () => {
   })
 })
 
+describe('usage table stylesheet', () => {
+  const css = readFileSync(new URL('../src/client/styles.ts', import.meta.url), 'utf8')
+
+  it('right-aligns numeric headers with a selector that beats the th rule', () => {
+    // Regression: a numeric <th> carries `.agy-num`, but `.agy-table th
+    // { text-align: left }` is specificity 0-1-1 and outranks the bare class
+    // (0-1-0), so headers stayed left-aligned above right-aligned cells — the
+    // figure looked shoved to the right of its own label. The fix must be a
+    // compound selector (0-2-1), not an `!important` escalation.
+    expect(css).toContain('.agy-table th.agy-num { text-align: right; }')
+    // Pin the trap itself, so the selector above cannot be "simplified" back to
+    // the bare class without this test going red.
+    expect(css).toMatch(/\.agy-table th\s*\{[^}]*text-align:\s*left/)
+  })
+
+  it('draws no vertical rules between metric cells', () => {
+    // The usage summary's four cells are separated by the grid; a border-right
+    // turned the strip into a spreadsheet grid and was removed.
+    const metricRule = /\.agy-metric\s*\{([^}]*)\}/.exec(css)
+    expect(metricRule).not.toBeNull()
+    expect(metricRule?.[1]).not.toMatch(/border-(right|left)/)
+  })
+})
+
 describe('model list ordering', () => {
   const m = (id: string, disabled: boolean) => ({ id, name: id, disabled })
 
