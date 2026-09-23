@@ -169,6 +169,25 @@ export interface AgyRpcMethods {
     payload: Record<string, never>
     result: { account: string | null; quota: AccountQuota | null }
   }
+  /**
+   * Refresh and return the 5h/weekly windows for every enabled account.
+   *
+   * Separate from `account.list` because that reply is deliberately probe-free;
+   * the client renders the list immediately and merges these in on arrival.
+   * Server-side this is TTL-gated, so it does not re-probe per view. It works for
+   * a pool of ANY size — including a single account, which the scheduling quota
+   * refresh skips (measuring that one could block the only account).
+   */
+  'account.limits': {
+    payload: Record<string, never>
+    result: {
+      limits: Array<{
+        index: number
+        groups: QuotaGroup[] | null
+        updatedAt: number | null
+      }>
+    }
+  }
   'account.test': {
     payload: { model: string; index?: number }
     result: { ok: boolean; text?: string; error?: string }

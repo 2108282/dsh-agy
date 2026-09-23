@@ -354,6 +354,34 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
 
     'account.quota': async () => activeQuota(),
 
+    /**
+     * Refresh and return the 5h/weekly windows for every enabled account.
+     *
+     * A SEPARATE call rather than a field on `account.list`, because that reply
+     * is deliberately probe-free (see the note above its return): folding an
+     * upstream call into it made the whole accounts+usage view wait on the
+     * network and show "no accounts" behind a spinner. Here the client renders
+     * the list from `account.list` immediately and merges these in when they
+     * arrive, so a slow probe costs a placeholder, not the page.
+     *
+     * Server-side this is TTL-gated, so the upstream call happens at most once
+     * per window rather than once per view.
+     */
+    'account.limits': async () => {
+      const storage = await store.load()
+      // Best-effort: a failed refresh leaves whatever was cached, so this reply
+      // is always the current best knowledge rather than an error.
+      await sessions.refreshLimits(storage).catch(() => undefined)
+      const fresh = await store.load()
+      return {
+        limits: fresh.accounts.map((account, index) => ({
+          index,
+          groups: account.cachedLimits?.groups ?? null,
+          updatedAt: account.cachedLimits?.updatedAt ?? null,
+        })),
+      }
+    },
+
     'account.test': async (payload) => {
       const model = (payload as { model?: unknown })?.model
       if (typeof model !== 'string' || model === '') fail('model is required')

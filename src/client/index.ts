@@ -1162,6 +1162,43 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   }, [rpc])
 
   /**
+   * Refresh the 5h/weekly windows and merge them into the account rows.
+   *
+   * A separate call from `account.list` because that reply is deliberately
+   * probe-free — folding an upstream call into it once made the whole view wait
+   * on the network. Here the rows render immediately from `account.list` and the
+   * windows fill in when they arrive, so a slow probe costs a placeholder.
+   *
+   * It also works for a pool of ANY size: the scheduling quota refresh is skipped
+   * for a single enabled account (measuring that one could block the only
+   * account), so this endpoint is the only thing that fills `cachedLimits` there.
+   */
+  const loadLimits = useCallback(async () => {
+    try {
+      const result = await rpc.call('account.limits', {})
+      if (!alive.current) return
+      const byIndex = new Map(result.limits.map((entry) => [entry.index, entry]))
+      setAccounts((current) => current.map((account) => {
+        const entry = byIndex.get(account.index)
+        // Leave the row untouched when this refresh learned nothing, so a failed
+        // probe cannot erase windows that were already showing.
+        if (entry === undefined || entry.groups === null) return account
+        return { ...account, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
+      }))
+    } catch {
+      // Display-only: a failed refresh leaves the existing windows in place and
+      // must never surface as an error banner over the accounts list.
+    }
+  }, [rpc])
+
+  useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => {
+    // Only on the tab that shows them, and after the rows exist so the merge has
+    // something to write into.
+    if (tab === 'accounts' && accounts.length > 0) void loadLimits()
+  }, [tab, accounts.length, loadLimits])
+
+  /**
    * The model list loads separately: it is the one call that may reach upstream
    * (model discovery), so the page must render even when it is slow or fails.
    *
@@ -1195,7 +1232,6 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     // account existed yet at mount, and one was added afterwards).
     if (tab === 'models' && models.length === 0) void loadModels()
   }, [tab, models.length, loadModels])
-
   /** Run one mutating call, then reload; failures land in the banner. */
   const act = useCallback(async (run: () => Promise<unknown>) => {
     setBusy(true)
