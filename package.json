@@ -58,7 +58,8 @@
     "verify:version-freshness": "tsx scripts/verify-version-freshness.mts",
     "verify:official-identity": "tsx scripts/verify-official-identity.mts",
     "verify:metadata-acceptance": "tsx scripts/verify-metadata-acceptance.mts",
-    "verify:claude-parts": "tsx scripts/verify-claude-parts.mts"
+    "verify:claude-parts": "tsx scripts/verify-claude-parts.mts",
+    "verify:thinking-config": "tsx scripts/verify-thinking-config.mts"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
