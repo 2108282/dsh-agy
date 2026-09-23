@@ -96,6 +96,16 @@ export interface AgyAdapterOptions {
   ): Promise<void>
   /** Report a clean stream completion (resets the failure counter). */
   markSuccess?(session: AgyAccountSession): Promise<void>
+  /**
+   * Configured token budget for a reasoning level (see `thinking-budget.ts`).
+   *
+   * Supplied as a resolver rather than a snapshot so an edit in the settings UI
+   * applies to the next request without rebuilding the adapter.
+   *
+   * @param level - the lowercased effort id (`low`/`medium`/`high`).
+   * @returns the budget to send, or undefined to let the level stand alone.
+   */
+  thinkingBudgetFor?(level: string): number | undefined
   /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
   resolveAttachments?(): AgyAttachmentStore | undefined
   /**
@@ -395,6 +405,9 @@ export class AgyAdapter extends LlmAdapter {
           sessionId:
             deriveAntigravitySessionId(session.account.email, conversationKey, generation) ?? undefined,
           requestId,
+          ...(this.options.thinkingBudgetFor === undefined
+            ? {}
+            : { thinkingBudgetFor: this.options.thinkingBudgetFor }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
         })

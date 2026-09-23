@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAgyManagement } from '../src/web/management.ts'
 import { UsageStats, noopStatsLock } from '../src/stats.ts'
 import { ModelVisibility } from '../src/model-visibility.ts'
+import { ThinkingBudgetStore } from '../src/thinking-budget.ts'
 import type { AccountStore } from '../src/store/accounts.ts'
 import type { AgySessionManager } from '../src/session.ts'
 import type { AccountStorageV4, ManagedAccount } from '../src/types.ts'
@@ -80,11 +81,19 @@ function makeHarness(options: {
     },
   } as unknown as AgySessionManager
   let notifications = 0
+  // A real store on a scratch file, so the RPC exercises the same persistence the
+  // host uses rather than a stub that could accept anything.
+  const thinkingFile = join(mkdtempSync(join(tmpdir(), 'agy-thinking-rpc-')), 'agy-thinking.json')
+  const thinkingBudget = new ThinkingBudgetStore({ file: thinkingFile })
   const management = createAgyManagement({
     store,
     sessions,
     stats,
     modelVisibility: visibility,
+    thinkingBudget: {
+      all: () => thinkingBudget.all(),
+      set: (level, value) => thinkingBudget.setBudget(level, value),
+    },
     notifyModelsChanged: () => { notifications += 1 },
     listAllModels: async () => options.models ?? [
       { id: 'model-a', name: 'Model A' },
@@ -291,6 +300,63 @@ describe('agy management RPC', () => {
       const harness = makeHarness({ session: undefined })
       await expect(harness.management.call('model.list', {}))
         .rejects.toThrow(/No agy account configured/)
+    })
+  })
+
+  describe('thinking budget', () => {
+    it('starts empty and reports the measured interval', async () => {
+      // Empty is the meaningful default: no level has a budget, so every request
+      // keeps sending `thinkingLevel` exactly as before this setting existed.
+      const { management } = makeHarness()
+      const result = await management.call('thinking.get', {}) as {
+        budgets: Record<string, number>
+        min: number
+        max: number
+      }
+      expect(result.budgets).toEqual({})
+      // The interval is the measured one, and it travels with the values so the
+      // UI cannot drift from what upstream accepts.
+      expect(result.min).toBe(-1)
+      expect(result.max).toBe(65535)
+    })
+
+    it('sets and clears one level, round-tripping through the reply', async () => {
+      const { management } = makeHarness()
+      const set = await management.call('thinking.set', { level: 'high', budget: 16000 }) as {
+        budgets: Record<string, number>
+      }
+      expect(set.budgets).toEqual({ high: 16000 })
+      const read = await management.call('thinking.get', {}) as { budgets: Record<string, number> }
+      expect(read.budgets).toEqual({ high: 16000 })
+
+      // Clearing is its own action: `null` and an omitted value both mean "let
+      // upstream decide", which is distinct from setting 0.
+      const cleared = await management.call('thinking.set', { level: 'high', budget: null }) as {
+        budgets: Record<string, number>
+      }
+      expect(cleared.budgets).toEqual({})
+      const omitted = await management.call('thinking.set', { level: 'low', budget: 1000 })
+      expect((omitted as { budgets: Record<string, number> }).budgets).toEqual({ low: 1000 })
+      const alsoCleared = await management.call('thinking.set', { level: 'low' }) as {
+        budgets: Record<string, number>
+      }
+      expect(alsoCleared.budgets).toEqual({})
+    })
+
+    it('rejects out-of-range values with the upstream interval in the message', async () => {
+      // Upstream answers 400 naming this range, so rejecting it here turns a
+      // per-request failure into a save-time message.
+      const { management } = makeHarness()
+      await expect(management.call('thinking.set', { level: 'high', budget: 65536 }))
+        .rejects.toThrow(/65535/)
+      await expect(management.call('thinking.set', { level: 'high', budget: -2 }))
+        .rejects.toThrow(/-1/)
+      await expect(management.call('thinking.set', { level: 'nope', budget: 100 }))
+        .rejects.toThrow(/unknown thinking level/)
+      await expect(management.call('thinking.set', { level: '', budget: 100 }))
+        .rejects.toThrow(/level is required/)
+      await expect(management.call('thinking.set', { level: 'high', budget: '100' }))
+        .rejects.toThrow(/must be a number/)
     })
   })
 

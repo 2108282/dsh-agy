@@ -12,6 +12,7 @@ import { AgyAdapter } from './adapter/adapter.ts'
 import type { AgyAttachmentStore } from './adapter/adapter.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { ModelVisibility } from './model-visibility.ts'
+import { ThinkingBudgetStore } from './thinking-budget.ts'
 import { UsageStats } from './stats.ts'
 import { probeFetch, proxiedFetch } from './proxy.ts'
 import { pickProbeProxyUrl } from './runtime/rotation.ts'
@@ -92,6 +93,7 @@ export async function createAgyRuntime(ctx: Context): Promise<{
   adapter: AgyAdapter
   stats: UsageStats
   modelVisibility: ModelVisibility
+  thinkingBudget: ThinkingBudgetStore
 }> {
   const { codec } = await resolveCodec(ctx)
   const dshHome = resolveDshHome()
@@ -110,6 +112,7 @@ export async function createAgyRuntime(ctx: Context): Promise<{
     },
   })
   const modelVisibility = new ModelVisibility()
+  const thinkingBudget = new ThinkingBudgetStore()
   const sessions = new AgySessionManager({
     store,
     recordUsage: (record) => { stats.record(record) },
@@ -127,6 +130,7 @@ export async function createAgyRuntime(ctx: Context): Promise<{
     noteRequestStarted: (account) => sessions.noteRequestStarted(account),
     noteRequestSettled: (account) => sessions.noteRequestSettled(account),
     modelVisibility,
+    thinkingBudgetFor: (level) => thinkingBudget.budgetFor(level),
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })
   // Persist the ledger on normal termination. `exit` covers both a graceful
@@ -138,7 +142,7 @@ export async function createAgyRuntime(ctx: Context): Promise<{
   // throttle window (5s) of counts on an interrupted process. The timer in
   // UsageStats already bounds that loss, and statistics are diagnostics.
   process.once('exit', () => { stats.flushSync() })
-  return { store, sessions, adapter, stats, modelVisibility }
+  return { store, sessions, adapter, stats, modelVisibility, thinkingBudget }
 }
 
 export { AGY_PROVIDER }

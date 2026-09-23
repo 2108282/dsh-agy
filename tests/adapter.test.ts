@@ -986,6 +986,62 @@ describe('models', () => {
     const invalid = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'ultra' as any }), {})
     expect(invalid.request.generationConfig?.thinkingConfig).toBeUndefined()
   })
+
+  it('replaces the level with a configured budget, never sends both', () => {
+    // Measured: when BOTH ride together the LEVEL wins —
+    // `{thinkingLevel:"low",thinkingBudget:16000}` spends what `low` alone spends
+    // (~180 thoughts against ~330 for the budget alone), and
+    // `{thinkingLevel:"high",thinkingBudget:1000}` tracks `high` (~316 vs ~173).
+    // Sending both would make the configured number silently inert, so the
+    // budget must take the level's place.
+    const budgetFor = (level: string): number | undefined =>
+      level === 'high' ? 16000 : undefined
+    const withBudget = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'high' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(withBudget.request.generationConfig?.thinkingConfig)
+      .toEqual({ thinkingBudget: 16000, includeThoughts: true })
+
+    // A level with no configured budget keeps the level token.
+    const noBudget = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'low' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(noBudget.request.generationConfig?.thinkingConfig)
+      .toEqual({ thinkingLevel: 'low', includeThoughts: true })
+
+    // No resolver at all behaves exactly as before the feature existed.
+    const absent = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'high' as any }),
+      {},
+    )
+    expect(absent.request.generationConfig?.thinkingConfig)
+      .toEqual({ thinkingLevel: 'high', includeThoughts: true })
+  })
+
+  it('keeps the off-paths off even when a budget is configured', () => {
+    // `session-title` and an explicit none/off must still send `thinkingBudget:0`:
+    // they exist to protect a tight maxTokens cap, and a user-configured level
+    // budget is about how much thinking a NORMAL turn gets.
+    const budgetFor = (): number => 16000
+    const title = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', purpose: 'session-title' as any, reasoningEffort: 'high' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(title.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+    const off = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'off' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(off.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+    // Id-bound models still never carry a config, budget or not.
+    const idBound = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.6-flash-high', reasoningEffort: 'high' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(idBound.request.generationConfig?.thinkingConfig).toBeUndefined()
+  })
 })
 
 describe('buildRequestHeaders', () => {

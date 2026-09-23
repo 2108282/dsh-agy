@@ -20,6 +20,7 @@ import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs, wit
 import { AGY_PROVIDER } from '../adapter/models.ts'
 import type { DiscoveredModelEntry } from '../adapter/models.ts'
 import { foldWindowBreakdown } from '../stats.ts'
+import { THINKING_BUDGET_MAX, THINKING_BUDGET_MIN } from '../thinking-budget.ts'
 import type { UsageCounters, UsageSource } from '../stats.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { AgySessionManager } from '../session.ts'
@@ -35,6 +36,7 @@ import type {
   QuotaRow,
   RangeBreakdown,
   StatsView,
+  ThinkingBudgets,
 } from '../rpc-contract.ts'
 
 /** One pending OAuth authorization, keyed by its raw state. */
@@ -48,6 +50,16 @@ export interface AgyManagementOptions {
   sessions: AgySessionManager
   stats: UsageStats
   modelVisibility: ModelVisibility
+  /**
+   * The global reasoning-level budget map (see `thinking-budget.ts`).
+   *
+   * A plain accessor pair rather than the store instance, so this module depends
+   * only on the two operations it exposes and cannot reach the rest of the store.
+   */
+  thinkingBudget: {
+    all: () => ThinkingBudgets
+    set: (level: string, value: number | undefined) => ThinkingBudgets
+  }
   /**
    * The adapter's *unfiltered* model catalog.
    *
@@ -161,6 +173,7 @@ function toAccountUsageView(
 
 export function createAgyManagement(options: AgyManagementOptions): AgyManagement {
   const { store, sessions, stats, modelVisibility, listAllModels, baseUrl, notifyModelsChanged } = options
+  const thinkingBudget = options.thinkingBudget
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
   const pendingAuth = new Map<string, PendingAuth>()
@@ -508,6 +521,31 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       // Push the change to every open client so the picker updates live.
       notifyModelsChanged()
       return { modelId, disabled }
+    },
+
+    'thinking.get': async () => ({
+      budgets: thinkingBudget.all(),
+      min: THINKING_BUDGET_MIN,
+      max: THINKING_BUDGET_MAX,
+    }),
+
+    'thinking.set': async (payload) => {
+      const body = payload as { level?: unknown; budget?: unknown } | undefined
+      const level = body?.level
+      if (typeof level !== 'string' || level === '') fail('level is required')
+      // `undefined` and explicit null BOTH clear the entry: the field means "let
+      // upstream choose", and a JSON null is how a cleared input arrives.
+      const raw = body?.budget
+      if (raw !== undefined && raw !== null && typeof raw !== 'number') fail('budget must be a number')
+      const value = raw === undefined || raw === null ? undefined : raw
+      try {
+        const budgets = thinkingBudget.set(level, value)
+        return { budgets }
+      } catch (error) {
+        // Surface the range/name violation as a caller-correctable message
+        // rather than an unlabelled RPC failure.
+        fail(error instanceof Error ? error.message : String(error))
+      }
     },
 
     'stats.get': async () => statsView(),

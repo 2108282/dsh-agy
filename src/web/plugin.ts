@@ -92,13 +92,18 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     return () => {}
   }
 
-  const { store, sessions, adapter, stats, modelVisibility } = await createAgyRuntime(ctx)
+  const { store, sessions, adapter, stats, modelVisibility, thinkingBudget } = await createAgyRuntime(ctx)
   const baseUrl = `http://${host}:${port}`
   const management = createAgyManagement({
     store,
     sessions,
     stats,
     modelVisibility,
+    // Expose only the two operations the RPC needs, not the whole store.
+    thinkingBudget: {
+      all: () => thinkingBudget.all(),
+      set: (level, value) => thinkingBudget.setBudget(level, value),
+    },
     // The adapter's *unfiltered* catalog, so a hidden model still appears in
     // the settings list alongside the switch that un-hides it.
     listAllModels: () => adapter.listAllModels(),

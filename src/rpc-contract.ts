@@ -14,10 +14,12 @@
  * and stays a real HTTP route: Google redirects a browser to it.
  */
 
+import type { ThinkingBudgets } from './thinking-types.ts'
 import type { QuotaGroup } from './types.ts'
 import type { UsageCounters, UsageSource } from './usage-types.ts'
 
 export type { QuotaGroup, QuotaWindow } from './types.ts'
+export type { ThinkingBudgets, ThinkingLevel } from './thinking-types.ts'
 
 /** Account lifecycle state as the UI presents it. */
 export type AccountState = 'active' | 'cooling' | 'verification-required' | 'disabled'
@@ -199,6 +201,30 @@ export interface AgyRpcMethods {
   'model.setDisabled': {
     payload: { modelId: string; disabled: boolean }
     result: { modelId: string; disabled: boolean }
+  }
+  /**
+   * The global reasoning-level budgets (see `thinking-budget.ts`).
+   *
+   * One map rather than per-model entries: only `*-tiered` models send a
+   * `thinkingConfig` at all, and the level a user picks is already the model
+   * selector's `reasoningEffort`. So the only missing piece is the token value
+   * behind each level, which is the same three numbers for every such model.
+   */
+  'thinking.get': {
+    payload: Record<string, never>
+    result: { budgets: ThinkingBudgets; min: number; max: number }
+  }
+  /**
+   * Set or clear one level's budget.
+   *
+   * Omitting `budget` (or passing null) CLEARS it, which is a distinct action:
+   * the request then sends `thinkingLevel` and lets upstream choose, which is
+   * the shipped default. A number outside the accepted interval is rejected
+   * here rather than sent, because upstream answers 400 naming that range.
+   */
+  'thinking.set': {
+    payload: { level: string; budget?: number | null }
+    result: { budgets: ThinkingBudgets }
   }
   'stats.get': { payload: Record<string, never>; result: StatsView }
 }

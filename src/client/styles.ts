@@ -245,6 +245,14 @@ const CSS = `
 }
 .agy-disclosure[data-open="true"] .agy-caret { transform: rotate(90deg); }
 .agy-disclosure-body { padding-bottom: 8px; }
+/* One row per reasoning level: label, then the budget input. The input is
+   width-capped so the empty state reads as "no value set" rather than as a wide
+   field waiting to be filled. */
+.agy-thinking-row {
+  display: grid; grid-template-columns: 64px minmax(0, 200px);
+  align-items: center; gap: 10px; padding: 5px 0;
+}
+.agy-thinking-k { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary, #61666b); }
 .agy-disclosure-meta { margin-left: auto; font: var(--dsw-font-xxxs-11);
   color: var(--dsw-alias-label-tertiary, #8f959e); font-variant-numeric: tabular-nums; }
 

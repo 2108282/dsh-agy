@@ -379,6 +379,19 @@ export function toAgyRequestBody(
      * produces. Callers that send the header must pass the same value.
      */
     requestId?: string
+    /**
+     * A configured token budget for a reasoning level, or undefined to leave the
+     * level's own budget to upstream.
+     *
+     * When this returns a number the budget REPLACES `thinkingLevel` rather than
+     * joining it, because measurement shows the level wins when both are sent:
+     * `{thinkingLevel:"low", thinkingBudget:16000}` spends what `low` alone
+     * spends (~180 thoughts, against ~330 for the budget alone), and
+     * `{thinkingLevel:"high", thinkingBudget:1000}` likewise tracks `high`
+     * (~316 vs ~173). Sending both would therefore make a configured number
+     * silently inert, which is worse than not offering the setting.
+     */
+    thinkingBudgetFor?: (level: string) => number | undefined
   },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
@@ -412,7 +425,12 @@ export function toAgyRequestBody(
     if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
       generationConfig.thinkingConfig = { thinkingBudget: 0 }
     } else if (effort && LEVEL_THINKING_LEVELS.has(effort)) {
-      generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+      // A configured number for this level takes the place of the level token:
+      // both together would let the level win (see `thinkingBudgetFor`).
+      const configured = context.thinkingBudgetFor?.(effort)
+      generationConfig.thinkingConfig = configured === undefined
+        ? { thinkingLevel: effort, includeThoughts: true }
+        : { thinkingBudget: configured, includeThoughts: true }
     }
   }
 

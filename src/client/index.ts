@@ -29,7 +29,8 @@ import {
 import type { StateDotState, TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
-import type { AccountView, AgyRpcClient, ModelView, StatsView } from '../rpc-contract.ts'
+import type { AccountView, AgyRpcClient, ModelView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
+import { THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -185,6 +186,21 @@ function stateLabel(state: AccountView['state'], t: T): string {
     case 'cooling': return t('stateCooling')
     case 'verification-required': return t('stateVerificationRequired')
     case 'disabled': return t('stateDisabled')
+  }
+}
+
+/**
+ * Localized label for a reasoning level.
+ *
+ * Falls back to the raw id so a level added upstream is still usable rather than
+ * rendering blank.
+ */
+function levelLabel(level: string, t: T): string {
+  switch (level) {
+    case 'low': return t('thinkingLevelLow')
+    case 'medium': return t('thinkingLevelMedium')
+    case 'high': return t('thinkingLevelHigh')
+    default: return level
   }
 }
 
@@ -637,9 +653,11 @@ function ModelsTab(props: {
   onToggle: (modelId: string, disabled: boolean) => void
   /** Fire one test call against this exact model on the active account. */
   onTestModel: (modelId: string) => void
+  /** RPC carrier for the thinking-budget block, which loads its own state. */
+  rpc: AgyRpcClient
   t: T
 }): ReactNode {
-  const { models, account, quota, quotaAccount, pending, testing, onToggle, onTestModel, t } = props
+  const { models, account, quota, quotaAccount, pending, testing, onToggle, onTestModel, rpc, t } = props
   const [quotaOpen, setQuotaOpen] = useState(false)
 
   // Hooks MUST run unconditionally: an early `return` above any hook changes
@@ -715,7 +733,125 @@ function ModelsTab(props: {
     hint(t('modelsHelp')),
     quotaBlock === null ? null : card(
       quotaAccount === null ? t('quotaTitle') : `${t('quotaTitle')} · ${quotaAccount}`,
-      quotaBlock))
+      quotaBlock),
+    h(ThinkingBudgetCard, { rpc, t }))
+}
+
+/**
+ * The global reasoning-level token budgets.
+ *
+ * One row per level rather than per model: only `*-tiered` models send a
+ * `thinkingConfig` at all, and the level itself is already chosen in DSH's model
+ * selector. So this supplies the missing VALUE behind each level — the same three
+ * numbers for every such model.
+ *
+ * An EMPTY input is the meaningful default: the request then sends
+ * `thinkingLevel` and lets upstream pick, which is exactly the behaviour before
+ * this setting existed. That is why the field is not a `number` input with a
+ * zero fallback, and why clearing it is a real action rather than "set to 0"
+ * (measured: `0` reduces thinking but does not reliably disable it).
+ */
+function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+  const { rpc, t } = props
+  const [budgets, setBudgets] = useState<ThinkingBudgets>({})
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [open, setOpen] = useState(false)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const [loaded, setLoaded] = useState(false)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+
+  const load = useCallback((): void => {
+    void (async () => {
+      try {
+        const result = await rpc.call('thinking.get', {})
+        if (!alive.current) return
+        setBudgets(result.budgets)
+        // Drafts mirror the stored values as strings, so an in-progress edit is
+        // never clobbered by a reload and an empty box stays empty.
+        setDrafts(Object.fromEntries(
+          THINKING_LEVELS.map((level) => [level, result.budgets[level] === undefined ? '' : String(result.budgets[level])]),
+        ))
+        setError(undefined)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        if (alive.current) setLoaded(true)
+      }
+    })()
+  }, [rpc])
+
+  // Loaded on first open, not on mount: the Models tab renders on every visit to
+  // the panel, and this is a settings read nobody needs until the block is shown.
+  useEffect(() => {
+    if (open && !loaded) load()
+  }, [open, loaded, load])
+
+  const save = (level: string, raw: string): void => {
+    const trimmed = raw.trim()
+    // An empty box means "no budget for this level", which the host clears.
+    const value = trimmed === '' ? null : Number(trimmed)
+    if (value !== null && !Number.isInteger(value)) {
+      setError(t('thinkingInvalid'))
+      return
+    }
+    void (async () => {
+      try {
+        const result = await rpc.call('thinking.set', { level, budget: value })
+        if (!alive.current) return
+        setBudgets(result.budgets)
+        setError(undefined)
+      } catch (caught) {
+        // The host rejects an out-of-range value with the exact interval, so its
+        // message is more useful than a generic one.
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      }
+    })()
+  }
+
+  const configured = THINKING_LEVELS.filter((level) => budgets[level] !== undefined).length
+  const block = h('div', { className: 'agy-disclosure', 'data-open': open },
+    h('button', {
+      type: 'button',
+      className: 'agy-disclosure-toggle',
+      'aria-expanded': open,
+      onClick: () => { setOpen(!open) },
+    },
+    h('span', { className: 'agy-caret' }),
+    h('span', null, t('thinkingTitle')),
+    h('span', { className: 'agy-disclosure-meta' },
+      configured === 0 ? t('thinkingDefaultAll') : t('thinkingConfigured', { count: configured }))),
+    open
+      ? h('div', { className: 'agy-disclosure-body' },
+        error === undefined ? null : h('div', { className: 'agy-error' }, error),
+        ...THINKING_LEVELS.map((level) => h('div', { className: 'agy-thinking-row', key: level },
+          h('span', { className: 'agy-thinking-k' }, levelLabel(level, t)),
+          h(Input, {
+            value: drafts[level] ?? '',
+            // The placeholder states what EMPTY does, not a number: a grey `1000`
+            // would read as "leaving this blank gives you 1000", which is the
+            // opposite of the real behaviour.
+            placeholder: t('thinkingAuto'),
+            inputMode: 'numeric',
+            onChange: (event: { target: { value: string } }) => {
+              setDrafts((current) => ({ ...current, [level]: event.target.value }))
+            },
+            onBlur: (event: { target: { value: string } }) => {
+              const next = event.target.value
+              const stored = budgets[level] === undefined ? '' : String(budgets[level])
+              if (next.trim() !== stored) save(level, next)
+            },
+          }))),
+        h('p', { className: 'agy-hint' },
+          t('thinkingHint', { min: THINKING_BUDGET_MIN, max: THINKING_BUDGET_MAX })))
+      : null)
+
+  return card(t('thinkingTitle'), block)
 }
 
 // ─── Usage tab ───────────────────────────────────────────────────────────────
@@ -1195,6 +1331,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
           quotaAccount: activeQuotaAccount,
           pending: toggling,
           testing: modelTesting,
+          rpc,
           t,
           /**
            * Optimistic, per-model toggle.
