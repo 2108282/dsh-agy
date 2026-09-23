@@ -128,9 +128,11 @@ npm pack --dry-run           # Verify packaged files before release (npm ships w
 
 ## DSH / Toolchain Pitfalls (from decommissioned ENGINEERING-NOTES)
 
-- `ctx.get(name)` defaults to **strict**: returns `undefined` for services whose fiber isn't ACTIVE yet (webServer activates later than llm). Prefer splitting a plugin entrypoint so it applies only once its injected deps are ACTIVE (`inject:['llm','webServer']`).
+- `ctx.get(name)` defaults to **strict**: returns `undefined` for services whose fiber isn't ACTIVE yet (webServer activates later than llm). Split a plugin entrypoint so it applies only once its injected deps are ACTIVE.
+- **NEVER put a composition-specific service in the static `inject`.** A statically injected service that never appears leaves the entry permanently pending, and the loader treats a pending entry as a FAILED PROFILE, not a skipped one — `dsh-agy/web`'s static `webServer` broke `dsh-tui` startup outright (`1 entry did not activate`). Reach such services with `ctx.inject([...])` so a non-Web profile boots with the feature inert. `webServer`, `connection`, `webStartup`, and `attachments` all qualify.
 - This Cordis fork has **no optional injection syntax** (`{required,optional}`) — optional deps must use `ctx.get` + timing checks.
 - A profile's `file:` dependency is a **copy, not a symlink** — after changing source, re-sync with `rm -rf node_modules/<pkg> && pnpm install --offline` or the profile runs stale artifacts.
+- A `file:` tarball install is keyed by its **path**, not its contents: rebuilding to the same filename makes pnpm report "Already up to date" and keep the previous build. Give each dev build a content-addressed name (`dsh-agy-<version>-dev.<sha>.tgz`) or the profile silently keeps running stale code.
 - `proper-lockfile` throws ENOENT on a nonexistent target file — atomically pre-create the empty store document (0600, tmp+rename) before locking.
 - `tsdown` `allowImportingTsExtensions` is mutually exclusive with `tsc` JS output (TS5096); JSON imports bundle directly into the mjs.
 - `LlmError.code` drives DSH retry: the default retry policy only honors `RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE`; `QUOTA` is terminal. The adapter does **not** silent-retry — each call is one provider attempt.
