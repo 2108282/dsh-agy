@@ -897,14 +897,12 @@ describe('models', () => {
     expect(resolved38.name).toBe('Gemini 3.8 Flash')
     expect(resolved38.reasoning).toBeDefined()
     expect(resolved38.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
-    expect(String(resolved38.reasoning!.defaultEffort)).toBe('medium')
     expect(resolved38.inputModalities).toEqual(['text', 'image'])
 
     const resolved = resolveAgyModel('agy', 'gemini-3.7-flash-tiered')
     expect(resolved.name).toBe('Gemini 3.7 Flash')
     expect(resolved.reasoning).toBeDefined()
     expect(resolved.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
-    expect(String(resolved.reasoning!.defaultEffort)).toBe('medium')
     expect(resolved.inputModalities).toEqual(['text', 'image'])
 
     const tiered36 = resolveAgyModel('agy', 'gemini-3.6-flash-tiered')
@@ -925,6 +923,36 @@ describe('models', () => {
     for (const id of ['gemini-3.6-flash-high', 'gemini-2.5-flash', 'brand-new-model']) {
       expect(resolveAgyModel('agy', id).reasoning).toBeUndefined()
     }
+  })
+
+  it('declares no default reasoning effort, so the selector keeps an adaptive option', () => {
+    // Regression guard. `defaultEffort` is not a cosmetic default: the harness
+    // resolves `effective = requested ?? reasoning.defaultEffort` AND builds the
+    // selector's options as
+    //   `...defaultEffort === void 0 ? [providerDefault] : []`
+    // so declaring one both forces an effort onto every request and deletes the
+    // only choice meaning "let the model decide" — the selector then has no
+    // adaptive entry at all, and `translate.ts` always emits `thinkingConfig`.
+    // Every tiered model must therefore leave it unset.
+    for (const id of ['gemini-3.8-flash-tiered', 'gemini-3.7-flash-tiered', 'gemini-3.9-flash-tiered']) {
+      const resolved = resolveAgyModel('agy', id)
+      expect(resolved.reasoning, `${id} should expose reasoning`).toBeDefined()
+      expect(
+        resolved.reasoning!.defaultEffort,
+        `${id} must not pin a default effort (it would remove the adaptive option)`,
+      ).toBeUndefined()
+      // The three explicit levels stay selectable next to the adaptive option.
+      expect(resolved.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+    }
+  })
+
+  it('omits thinkingConfig entirely when no effort is requested (adaptive path)', () => {
+    // Companion to the guard above: with no `defaultEffort` in play, an omitted
+    // effort must produce NO thinkingConfig, which is what lets the upstream run
+    // its own adaptive budget. If this ever emits a level, the adaptive option
+    // is broken at the wire even though the selector still lists it.
+    const adaptive = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered' }), {})
+    expect(adaptive.request.generationConfig?.thinkingConfig).toBeUndefined()
   })
 
   it('maps reasoningEffort to thinkingConfig for tiered models only', () => {
