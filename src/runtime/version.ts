@@ -220,7 +220,11 @@ const ideState: VersionState = { inFlight: null }
 const cliState: VersionState = { inFlight: null }
 
 /**
- * Drop both feed caches so a test can exercise the cold-start path.
+ * Drop both feeds' cached state so a test can exercise the cold-start path.
+ *
+ * `inFlight` is cleared with the cache: a test that lets a probe hang leaves its
+ * single-flight promise pending, and the next test's resolve would return THAT
+ * promise instead of issuing its own request — silently testing nothing.
  *
  * Deliberately does NOT clear the published version slot: that one is monotonic
  * process state, and dropping it would let a test's User-Agent move backwards.
@@ -228,4 +232,6 @@ const cliState: VersionState = { inFlight: null }
 export function _clearVersionCacheForTest(): void {
   ideState.cache = undefined
   cliState.cache = undefined
+  ideState.inFlight = null
+  cliState.inFlight = null
 }

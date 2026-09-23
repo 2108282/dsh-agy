@@ -443,6 +443,20 @@ export function accountFetch(routing: AccountRouting | undefined): typeof fetch 
 }
 
 /**
+ * Fetch for a POOL-LEVEL probe: a request that belongs to no single account
+ * (the Antigravity release feeds) but still egresses the host.
+ *
+ * `undefined` means the env/direct route, which is also where an unproxied
+ * account's traffic goes. Given a URL it routes there, so a per-account-proxy
+ * user does not leak the real IP on a boot-time or failure-path probe. Both
+ * probe sites (plugin boot, the rate-limit fingerprint path) go through here so
+ * the routing rule cannot drift between them.
+ */
+export function probeFetch(proxyUrl: string | undefined): typeof fetch {
+  return proxyUrl === undefined || proxyUrl === '' ? proxiedFetch : accountFetch({ proxyUrl })
+}
+
+/**
  * Wrap a fetch implementation with a TOTAL wall-clock budget.
  *
  * The dispatcher's `bodyTimeout`/`headersTimeout` are per-GAP timers, not a

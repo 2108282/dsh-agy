@@ -38,11 +38,11 @@ import {
   recordFingerprintVersion,
   updateFingerprintVersion,
 } from './runtime/fingerprint.ts'
-import { deriveAntigravitySessionId } from './runtime/identity.ts'
+import { deriveAntigravitySessionId, generateAntigravityRequestId } from './runtime/identity.ts'
 import { fingerprintMode } from './runtime/risk.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
 import { currentAgyVersion } from './oauth/constants.ts'
-import { accountFetch, isProxyUnreachableError, proxiedFetch } from './proxy.ts'
+import { accountFetch, isProxyUnreachableError, probeFetch, proxiedFetch } from './proxy.ts'
 import { describeFetchError } from './runtime/classify.ts'
 import type { Fingerprint } from './types.ts'
 
@@ -724,8 +724,11 @@ export class AgySessionManager {
     // which picks a RANDOM entry from `versionPool`: whatever is chosen here is
     // frozen into the account's identity for its lifetime, so a cold start with an
     // unreachable feed could otherwise advertise a two-minor-old client forever.
+    // The probe rides the FAILING account's egress: the feeds belong to no account,
+    // but the request still egresses the host, and the boot-time probe already
+    // routes this way (see `probeFetch`).
     const fpResolvedVersion = kind === 'rate-limit'
-      ? (fpCachedVersion ?? (await resolveAntigravityVersionBounded()) ?? currentAgyVersion())
+      ? (fpCachedVersion ?? (await resolveAntigravityVersionBounded(750, probeFetch(session.account.proxy))) ?? currentAgyVersion())
       : currentAgyVersion()
 
     await this.store.mutate((storage) => {
@@ -847,6 +850,9 @@ export class AgySessionManager {
       const { toAgyRequestBody } = await import('./adapter/translate.ts')
       const { fetchAgyFirstOk } = await import('./oauth/constants.ts')
       const { parseAgySse } = await import('./adapter/parse.ts')
+      // Same id in the body and the header, exactly as the generation path does:
+      // a diagnostic request should not carry a shape the real one never sends.
+      const requestId = generateAntigravityRequestId()
       const body = toAgyRequestBody(
         {
           provider: 'agy',
@@ -854,12 +860,17 @@ export class AgySessionManager {
           messages: [{ id: 'test-1', role: 'user', content: [{ type: 'text', text: prompt }] }],
           maxTokens,
         } as never,
-        { projectId: session.account.projectId, sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined },
+        {
+          projectId: session.account.projectId,
+          sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
+          requestId,
+        },
       )
       const headers = {
         authorization: `Bearer ${session.auth.access}`,
         'content-type': 'application/json',
         accept: 'text/event-stream',
+        'x-goog-request-id': requestId,
         ...session.impersonation,
       }
       const routing = { proxyUrl: session.account.proxy, streaming: true }

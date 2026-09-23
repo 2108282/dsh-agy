@@ -13,7 +13,7 @@ import type { AgyAttachmentStore } from './adapter/adapter.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { ModelVisibility } from './model-visibility.ts'
 import { UsageStats } from './stats.ts'
-import { accountFetch, proxiedFetch } from './proxy.ts'
+import { probeFetch, proxiedFetch } from './proxy.ts'
 import { pickProbeProxyUrl } from './runtime/rotation.ts'
 import { resolveAntigravityVersion } from './runtime/version.ts'
 import type { FetchLike } from './runtime/version.ts'
@@ -78,7 +78,7 @@ async function warmVersionCache(store: AccountStore): Promise<void> {
   try {
     const storage = await store.load()
     const proxyUrl = pickProbeProxyUrl(storage.accounts, storage.activeIndex)
-    if (proxyUrl !== undefined) fetchImpl = accountFetch({ proxyUrl })
+    fetchImpl = probeFetch(proxyUrl)
   } catch {
     // Fall through to the env/direct route.
   }

@@ -511,9 +511,9 @@ describe('usage-driven selection', () => {
   it('serves deterministic fallback headers without a fingerprint, in either mode', () => {
     // The pre-fingerprint fallback used to re-randomize platform per call in the
     // default `dynamic` mode, so one account's consecutive requests could claim
-    // `windows/amd64` and then `darwin/arm64`. An OS that changes between two
-    // requests of one session is a stronger anomaly than a stale version, so the
-    // fallback is now deterministic regardless of mode.
+    // two different platforms. An OS that changes between two requests of one
+    // session is a stronger anomaly than a stale version, so the fallback is now
+    // deterministic regardless of mode — and the platform is pinned outright.
     for (const mode of ['dynamic', 'stable']) {
       vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', mode)
       const first = impersonationHeadersFor(account('a@x'))
@@ -1364,5 +1364,40 @@ describe('fingerprint version freshness', () => {
       _setFingerprintDataForTest(undefined)
       vi.unstubAllGlobals()
     }
+  }, 5_000)
+
+  it('probes the version feeds through the failing account egress', async () => {
+    // The feeds belong to no account, but the request still egresses the host: a
+    // per-account-proxy user must not leak the real IP on the failure path. The
+    // boot-time probe already routed this way; this one was left on the env/direct
+    // route, which is the drift `probeFetch` now prevents.
+    _clearVersionCacheForTest()
+    const probed: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      probed.push((init as { dispatcher?: unknown } | undefined)?.dispatcher)
+      // Never answer: the bounded resolve gives up, and all we assert is WHICH
+      // egress carried the attempt.
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    }))
+
+    // A REAL loopback listener: `proxiedFetch` TCP-fast-fails before it reaches
+    // `fetch`, so a closed port would never exercise the routing at all.
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    await withProxyFixture(async (proxyUrl) => {
+      const store = new InMemoryAccountStore(storage([{ ...account('a@x'), proxy: proxyUrl }]))
+      const sessions = new AgySessionManager({ store })
+      const session = await sessions.getSession('gemini-3-flash')
+      await sessions.reportFailure('rate-limit', session!, { model: 'gemini-3-flash' })
+
+      expect(probed.length).toBeGreaterThan(0)
+      expect(probed[0]).not.toBeUndefined()
+      expect(probed[0]).toBe(await dispatcherForAsync(proxyUrl))
+    })
   }, 5_000)
 })
