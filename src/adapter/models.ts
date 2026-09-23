@@ -184,6 +184,18 @@ export async function fetchAvailableModels(
   throw lastError instanceof Error ? lastError : new Error('fetchAvailableModels: all endpoints failed')
 }
 
+/**
+ * The discovered ids a chat session may actually use: upstream's `models` minus
+ * the `tab_`/role/deprecated set (see `hiddenDiscoveredIds`).
+ *
+ * Exported so surfaces other than the selector (the quota panel) present the
+ * same list. `mergeModelCatalog` consumes it too, so the two cannot drift.
+ */
+export function chatCallableDiscoveredIds(dynamic: DiscoveredModels): string[] {
+  const hidden = hiddenDiscoveredIds(dynamic)
+  return Object.keys(dynamic.models ?? {}).filter((id) => isChatCallableModelId(id) && !hidden.has(id))
+}
+
 /** Merge dynamic ids with catalog metadata; non-chat and superseded ids are dropped, unknown ids keep minimal info. */
 export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   const entries: LlmModelInfo[] = []

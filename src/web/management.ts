@@ -18,6 +18,7 @@ import { resolveAntigravityVersionBounded } from '../runtime/version.ts'
 import { maskProxyUrl } from '../store/accounts.ts'
 import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs } from '../proxy.ts'
 import { AGY_PROVIDER } from '../adapter/models.ts'
+import type { DiscoveredModelEntry } from '../adapter/models.ts'
 import { foldWindow } from '../stats.ts'
 import type { UsageCounters, UsageSource } from '../stats.ts'
 import type { AccountStore } from '../store/accounts.ts'
@@ -94,13 +95,20 @@ async function quotaFor(
   // panel is a legitimate state, not an error.
   if (access === undefined || access === '') return null
   try {
-    const { fetchAvailableModels } = await import('../adapter/models.ts')
+    const { fetchAvailableModels, chatCallableDiscoveredIds } = await import('../adapter/models.ts')
     const discovered = await fetchAvailableModels(
       access,
       projectId,
       accountFetch({ proxyUrl: account.proxy }),
     )
-    const models = Object.entries(discovered.models ?? {})
+    // Same visibility rule as the model list (`mergeModelCatalog` consumes the
+    // same helper): drop the tab_/role/deprecated ids upstream files as
+    // non-chat. Without this the quota panel listed `chat_23310`, `tab_*`
+    // previews and the image model — ids that can never serve a chat request.
+    const all = discovered.models ?? {}
+    const models = chatCallableDiscoveredIds(discovered)
+      .map((id) => [id, all[id]] as const)
+      .filter((entry): entry is [string, DiscoveredModelEntry] => entry[1] !== undefined)
     if (models.length === 0) return null
     const rows: QuotaRow[] = models
       .map(([id, model]) => ({

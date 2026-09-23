@@ -372,6 +372,33 @@ describe('agy management RPC', () => {
       expect(ids).toEqual(['nearlyOut', 'plenty', 'unknown'])
     })
 
+    it('hides the non-chat ids the model list hides', async () => {
+      // Regression, visible in a real account's quota panel: `chat_23310`,
+      // `tab_flash_lite_preview` and `gemini-3.1-flash-image` were listed even
+      // though none of them can serve a chat request. The quota panel now
+      // consumes the same visibility rule as the model list.
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+        models: {
+          'gemini-3.5-flash': { quotaInfo: { remainingFraction: 1 } },
+          // tab_-prefixed: dropped by the prefix rule alone.
+          'tab_flash_lite_preview': { quotaInfo: { remainingFraction: 1 } },
+          // tab_-less tab id: only the payload's role list knows it is a tab
+          // model (live accounts really do return `chat_20706`-style ids).
+          'chat_23310': { quotaInfo: { remainingFraction: 1 } },
+          // image role: only the payload's role list knows it.
+          'gemini-3.1-flash-image': { quotaInfo: { remainingFraction: 1 } },
+        },
+        tabModelIds: ['chat_23310', 'tab_flash_lite_preview'],
+        imageGenerationModelIds: ['gemini-3.1-flash-image'],
+      }), { status: 200 })))
+      const { accounts } = await quotaHarness().management.call('account.list', {}) as {
+        accounts: Array<{ quota: { models: Array<{ id: string }>, modelCount: number } | null }>
+      }
+      const ids = accounts[0]!.quota!.models.map((row) => row.id)
+      expect(ids).toEqual(['gemini-3.5-flash'])
+      expect(accounts[0]!.quota!.modelCount).toBe(1)
+    })
+
     it('clamps a fraction outside 0..1 rather than rendering a broken bar', async () => {
       stubDiscovery({ over: 4, under: -3 })
       const { accounts } = await quotaHarness().management.call('account.list', {}) as {

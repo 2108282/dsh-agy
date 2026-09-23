@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
 import { apply, orderModels } from '../src/client/index.ts'
 import { en, zh } from '../src/client/locales.ts'
+import type { ModelView } from '../src/rpc-contract.ts'
 
 /** Minimal client context: locale, connection (RPC transport), and the slot registry. */
 function makeContext(options: { withConnection?: boolean } = {}) {

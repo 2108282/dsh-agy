@@ -553,6 +553,15 @@ function ModelsTab(props: {
   const { models, account, quota, quotaAccount, pending, testing, onToggle, onTestModel, t } = props
   const [quotaOpen, setQuotaOpen] = useState(false)
 
+  // Hooks MUST run unconditionally: an early `return` above any hook changes
+  // this component's hook count between renders, and React's renderer state —
+  // keyed by call order — desyncs and throws mid-render. The exception unmounts
+  // the whole Settings tree: a white panel that no tab click can revive, only a
+  // restart. This fired whenever `models.length` crossed the 0/non-0 boundary
+  // between two renders (startup loads models async; a refresh that loses the
+  // account empties it), which is why it looked like a random crash.
+  const ordered = useMemo(() => orderModels(models), [models])
+
   if (models.length === 0) {
     return card(t('modelsTitle'), h('div', { className: 'agy-empty' }, t('emptyModels')))
   }
@@ -560,10 +569,6 @@ function ModelsTab(props: {
   const quotaModels = quota?.models ?? []
   // One clock reading per render, so every reset label in the list agrees.
   const now = Date.now()
-
-  // Disabled models sink to the bottom (see `orderModels`), so the models you
-  // switched off never push the live ones around.
-  const ordered = useMemo(() => orderModels(models), [models])
 
   // One normal row per model. A row is a plain grid, not a table: the switch is
   // the affordance and a table's column rules would fight the card's rhythm.
