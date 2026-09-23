@@ -680,6 +680,26 @@ function rangeLabel(id: RangeId, t: T): string {
   }
 }
 
+/**
+ * Fixed widths for the numeric columns, shared by BOTH breakdown tables.
+ *
+ * They must be identical across the two tables. `table-layout: fixed` gives the
+ * auto-width first column whatever is left, so two different width sums put the
+ * numeric columns of the two tables at different x positions — the by-account
+ * table's numbers sat 48px right of the by-model table's, which is what made a
+ * long account row look like it was shoving the figures sideways. Sharing one
+ * vector keeps every numeric column vertically aligned down the page.
+ *
+ * Last entry is wider because it carries the share bar (by model) as well as a
+ * plain count (by account, "rotations").
+ */
+const NUM_COL_WIDTHS = ['48px', '56px', '56px', '56px', '64px'] as const
+
+/** One right-aligned numeric header cell at column position `index`. */
+function numHeader(index: number, label: string): ReactNode {
+  return h('th', { className: 'agy-num', style: { width: NUM_COL_WIDTHS[index] } }, label)
+}
+
 function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
   const { t } = props
   const [range, setRange] = useState<RangeId>('today')
@@ -732,11 +752,11 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     h('div', { className: 'agy-table-wrap' },
       table(h('tr', null,
         h('th', null, t('colModel')),
-        h('th', { className: 'agy-num', style: { width: '46px' } }, t('colRequests')),
-        h('th', { className: 'agy-num', style: { width: '56px' } }, t('colInput')),
-        h('th', { className: 'agy-num', style: { width: '56px' } }, t('colOutput')),
-        h('th', { className: 'agy-num', style: { width: '56px' } }, t('colCacheRead')),
-        h('th', { className: 'agy-num', style: { width: '64px' } }, t('colShare'))),
+        numHeader(0, t('colRequests')),
+        numHeader(1, t('colInput')),
+        numHeader(2, t('colOutput')),
+        numHeader(3, t('colCacheRead')),
+        numHeader(4, t('colShare'))),
       stats.models.map((row) => h('tr', { key: row.model },
         h('td', { className: 'agy-strong' }, h('span', { className: 'agy-mail' }, row.model)),
         h('td', { className: 'agy-num' }, String(row.counters.requests)),
@@ -753,11 +773,11 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     h('div', { className: 'agy-table-wrap' },
       table(h('tr', null,
         h('th', null, t('colAccount')),
-        h('th', { className: 'agy-num', style: { width: '46px' } }, t('colRequests')),
-        h('th', { className: 'agy-num', style: { width: '58px' } }, t('colToken')),
-        h('th', { className: 'agy-num', style: { width: '42px' } }, t('colFailed')),
-        h('th', { className: 'agy-num', style: { width: '42px' } }, t('colRateLimited')),
-        h('th', { className: 'agy-num', style: { width: '42px' } }, t('colRotations'))),
+        numHeader(0, t('colRequests')),
+        numHeader(1, t('colToken')),
+        numHeader(2, t('colFailed')),
+        numHeader(3, t('colRateLimited')),
+        numHeader(4, t('colRotations'))),
       stats.accounts.map((row) => h('tr', { key: row.account },
         h('td', { className: 'agy-strong' }, h('span', { className: 'agy-mail' }, row.account)),
         h('td', { className: 'agy-num' }, String(row.totals.requests)),
