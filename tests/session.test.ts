@@ -1034,6 +1034,82 @@ describe('testCall routing (issue #29)', () => {
   })
 })
 
+describe('pinned test call (management "Test call" per account row)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  /**
+   * Answer the token endpoint per account and record which bearer each stream
+   * call carried, so the test can prove WHICH account was probed.
+   *
+   * The marker is decoded from the form body because `URLSearchParams`
+   * percent-encodes the `@` in a real refresh token (`rt-b@x` -> `rt-b%40x`).
+   * Only `streamGenerateContent` is recorded: the pool path also calls
+   * `fetchAvailableModels`, which is not the call under test.
+   */
+  function stubStream(accounts: ManagedAccount[]): { store: InMemoryAccountStore, streams: string[] } {
+    const streams: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = decodeURIComponent(String(init?.body ?? ''))
+      if (url.includes('token')) {
+        const which = body.includes('rt-b@x') ? 'b' : 'a'
+        return new Response(JSON.stringify({ access_token: `at-${which}`, expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('streamGenerateContent')) {
+        streams.push(String((init?.headers as Record<string, string> | undefined)?.authorization ?? ''))
+      }
+      return new Response('data: [{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}]\n\ndata: [DONE]\n', {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }))
+    return { store: new InMemoryAccountStore(storage(accounts, 0)), streams }
+  }
+
+  it('tests the requested account, not the affinity/active one', async () => {
+    // Regression: the clicked row's index was dropped on the way to the host, so
+    // the probe ran on whichever account affinity picked (here index 0) while its
+    // result was shown — and recorded — against the row the user clicked.
+    const { store, streams } = stubStream([account('a@x'), account('b@x')])
+    const sessions = new AgySessionManager({ store })
+
+    const result = await sessions.testCall('gemini-3.6-flash-high', { accountIndex: 1 })
+    expect(result.ok).toBe(true)
+    expect(streams).toEqual(['Bearer at-b'])
+  })
+
+  it('does not move the pool cursor for a test call', async () => {
+    // A one-shot probe is not "using" the account: repointing activeIndex would
+    // steer the next real conversation onto the account that was merely tested.
+    const { store } = stubStream([account('a@x'), account('b@x')])
+    const sessions = new AgySessionManager({ store })
+    await sessions.testCall('gemini-3.6-flash-high', { accountIndex: 1 })
+    expect((await store.load()).activeIndex).toBe(0)
+  })
+
+  it('reports a missing or disabled pinned account instead of falling back', async () => {
+    // Falling back would answer a question nobody asked and attribute the result
+    // to the wrong account, which is the bug this pin exists to prevent.
+    const { store } = stubStream([account('a@x'), { ...account('b@x'), enabled: false }])
+    const sessions = new AgySessionManager({ store })
+    const missing = await sessions.testCall('gemini-3.6-flash-high', { accountIndex: 9 })
+    expect(missing.ok).toBe(false)
+    expect(missing.error).toMatch(/not found/)
+
+    const disabled = await sessions.testCall('gemini-3.6-flash-high', { accountIndex: 1 })
+    expect(disabled.ok).toBe(false)
+    expect(disabled.error).toMatch(/disabled/)
+  })
+
+  it('still ranks the pool when no index is given', async () => {
+    const { store, streams } = stubStream([account('a@x'), account('b@x')])
+    const sessions = new AgySessionManager({ store })
+    const result = await sessions.testCall('gemini-3.6-flash-high')
+    expect(result.ok).toBe(true)
+    expect(streams).toHaveLength(1)
+  })
+})
+
 describe('project-healing routing (issue #29)', () => {
   afterEach(() => vi.unstubAllGlobals())
 

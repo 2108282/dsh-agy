@@ -1342,6 +1342,94 @@ describe('AgyAdapter', () => {
     await expect(broken.listModels('agy')).rejects.toThrow('store corrupt')
   })
 
+  it('hides disabled models from listModels but keeps them in listAllModels', async () => {
+    // This pairing is the model-toggle contract: the selector reads listModels
+    // (filtered), while the settings page reads listAllModels (unfiltered) so a
+    // hidden model is still listed next to the switch that un-hides it.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ models: {} }), { status: 200 })))
+    const hidden = new Set(['gemini-2.5-flash'])
+    const adapter = new AgyAdapter({
+      getSession: async () => undefined,
+      reportFailure: async () => {},
+      modelVisibility: { disabledFor: () => hidden },
+    })
+    const visible = await adapter.listModels('agy')
+    const all = await adapter.listAllModels()
+    expect(all.some((model) => model.id === 'gemini-2.5-flash')).toBe(true)
+    expect(visible.some((model) => model.id === 'gemini-2.5-flash')).toBe(false)
+    expect(visible.length).toBe(all.length - 1)
+  })
+
+  it('returns the full catalog when nothing is disabled', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ models: {} }), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => undefined,
+      reportFailure: async () => {},
+      modelVisibility: { disabledFor: () => new Set<string>() },
+    })
+    const visible = await adapter.listModels('agy')
+    const all = await adapter.listAllModels()
+    expect(visible.map((model) => model.id)).toEqual(all.map((model) => model.id))
+  })
+
+  it('records one usage sample per generation, with its token buckets', async () => {
+    const recorded: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":120,"cachedContentTokenCount":20,"candidatesTokenCount":7}}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (sample) => { recorded.push(sample as Record<string, unknown>) },
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(recorded).toHaveLength(1)
+    const sample = recorded[0] as {
+      ok: boolean
+      model?: string
+      account?: string
+      usage?: { input: number, output: number, cacheRead: number }
+    }
+    expect(sample.ok).toBe(true)
+    expect(sample.account).toBe('a@b.c')
+    // Buckets stay disjoint: input is uncached only (120 total minus 20 cached).
+    expect(sample.usage).toMatchObject({ input: 100, output: 7, cacheRead: 20 })
+  })
+
+  it('records a failed attempt without token usage', async () => {
+    const recorded: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('quota', { status: 403 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (sample) => { recorded.push(sample as Record<string, unknown>) },
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toThrow()
+
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0]?.ok).toBe(false)
+    expect(recorded[0]?.usage).toBeUndefined()
+  })
+
+  it('never lets a usage-recording failure break a generation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: () => { throw new Error('ledger exploded') },
+    })
+    const chunks: unknown[] = []
+    for await (const chunk of adapter.stream(generateOptions())) chunks.push(chunk)
+    expect(chunks.length).toBeGreaterThan(0)
+  })
+
   it('converts quota-exhausted pool blockage into terminal QUOTA error', async () => {
     const resetAt = Date.now() + 86400000
     const adapter = new AgyAdapter({

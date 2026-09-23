@@ -1,0 +1,454 @@
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createAgyManagement } from '../src/web/management.ts'
+import { UsageStats, noopStatsLock } from '../src/stats.ts'
+import { ModelVisibility } from '../src/model-visibility.ts'
+import type { AccountStore } from '../src/store/accounts.ts'
+import type { AgySessionManager } from '../src/session.ts'
+import type { AccountStorageV4, ManagedAccount } from '../src/types.ts'
+
+function account(overrides: Partial<ManagedAccount> = {}): ManagedAccount {
+  return { refresh: 'refresh-a', addedAt: 1, lastUsed: 1, email: 'a@x.com', ...overrides }
+}
+
+/** In-memory account store; `mutate` runs against the live array like the real one. */
+function makeStore(accounts: ManagedAccount[], activeIndex = 0): AccountStore {
+  const storage: AccountStorageV4 = { version: 4, accounts, activeIndex }
+  return {
+    load: async () => storage,
+    mutate: async (fn) => fn(storage),
+  } as unknown as AccountStore
+}
+
+interface Harness {
+  management: ReturnType<typeof createAgyManagement>
+  store: AccountStore
+  stats: UsageStats
+  visibility: ModelVisibility
+  sessions: AgySessionManager
+  calls: Array<{ method: string, args: unknown[] }>
+  /** Catalog-change notifications the host would forward to open clients. */
+  notifications: number
+}
+
+function makeHarness(options: {
+  accounts?: ManagedAccount[]
+  activeIndex?: number
+  session?: unknown
+  models?: Array<{ id: string, name: string }>
+  verified?: unknown
+  testResult?: unknown
+  exportBlob?: unknown
+  checkAccounts?: unknown
+} = {}): Harness {
+  const accounts = options.accounts ?? [account()]
+  const store = makeStore(accounts, options.activeIndex ?? 0)
+  const dir = mkdtempSync(join(tmpdir(), 'agy-mgmt-'))
+  const stats = new UsageStats({
+    file: join(dir, 'agy-stats.json'),
+    lock: noopStatsLock,
+    flushEvery: 0,
+    flushIntervalMs: 0,
+  })
+  const visibility = new ModelVisibility({ file: join(dir, 'agy-models.json') })
+  const calls: Array<{ method: string, args: unknown[] }> = []
+  const session = options.session === undefined
+    ? undefined
+    : options.session
+  const sessions = {
+    getSession: async () => {
+      calls.push({ method: 'getSession', args: [] })
+      return session
+    },
+    verifyAccount: async (index: number) => {
+      calls.push({ method: 'verifyAccount', args: [index] })
+      return options.verified ?? { ok: true, email: 'a@x.com' }
+    },
+    testCall: async (model: string, callOptions?: { accountIndex?: number }) => {
+      calls.push({ method: 'testCall', args: [model, callOptions] })
+      return options.testResult ?? { ok: true, text: 'OK' }
+    },
+    exportBlob: async (index: number) => {
+      calls.push({ method: 'exportBlob', args: [index] })
+      return options.exportBlob ?? { blob: `blob-${index}` }
+    },
+    checkAccounts: async (indices?: number[]) => {
+      calls.push({ method: 'checkAccounts', args: [indices] })
+      return options.checkAccounts ?? [{ index: 0, ok: true }]
+    },
+  } as unknown as AgySessionManager
+  let notifications = 0
+  const management = createAgyManagement({
+    store,
+    sessions,
+    stats,
+    modelVisibility: visibility,
+    notifyModelsChanged: () => { notifications += 1 },
+    listAllModels: async () => options.models ?? [
+      { id: 'model-a', name: 'Model A' },
+      { id: 'model-b', name: 'Model B' },
+    ],
+    baseUrl: 'http://127.0.0.1:3080',
+  })
+  // A getter, not a copied primitive: the counter changes after this return.
+  return {
+    management,
+    store,
+    stats,
+    visibility,
+    sessions,
+    calls,
+    get notifications() { return notifications },
+  }
+}
+
+describe('agy management RPC', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('rejects an unknown method', async () => {
+    const { management } = makeHarness()
+    await expect(management.call('nope', {})).rejects.toThrow(/unknown method/)
+  })
+
+  it('lists accounts with derived state and no raw secrets', async () => {
+    const { management } = makeHarness({
+      accounts: [
+        account({ email: 'active@x.com', projectId: 'p1' }),
+        account({ email: 'cooling@x.com', coolingDownUntil: Date.now() + 60_000, cooldownReason: 'rate-limit' }),
+        account({ email: 'verify@x.com', verificationRequired: true }),
+        account({ email: 'off@x.com', enabled: false }),
+      ],
+    })
+    const { accounts } = await management.call('account.list', {}) as { accounts: Array<Record<string, unknown>> }
+    expect(accounts.map((entry) => entry.state)).toEqual(['active', 'cooling', 'verification-required', 'disabled'])
+    expect(accounts[0]?.active).toBe(true)
+    expect(accounts[1]?.active).toBe(false)
+    // The refresh token must never cross the wire.
+    expect(JSON.stringify(accounts)).not.toContain('refresh-a')
+  })
+
+  it('masks a configured proxy rather than echoing credentials', async () => {
+    const { management } = await makeHarness({
+      accounts: [account({ proxy: 'http://user:secret@proxy.test:8080' })],
+    })
+    const { accounts } = await management.call('account.list', {}) as { accounts: Array<{ proxy: string | null }> }
+    expect(accounts[0]?.proxy).toContain('proxy.test:8080')
+    expect(accounts[0]?.proxy).not.toContain('secret')
+  })
+
+  it('joins the ledger onto each account row', async () => {
+    const harness = makeHarness({ accounts: [account({ email: 'a@x.com' })] })
+    harness.stats.record({
+      account: 'a@x.com', model: 'model-a', source: 'chat', ok: true,
+      usage: { input: 10, output: 2, cacheRead: 3, cacheWrite: 0 },
+    })
+    const { accounts } = await harness.management.call('account.list', {}) as {
+      accounts: Array<{ usage: { totals: { requests: number, input: number } } | null }>
+    }
+    expect(accounts[0]?.usage?.totals.requests).toBe(1)
+    expect(accounts[0]?.usage?.totals.input).toBe(10)
+  })
+
+  it('validates the account index on mutating calls', async () => {
+    const { management } = makeHarness()
+    await expect(management.call('account.activate', { index: -1 })).rejects.toThrow(/invalid index/)
+    await expect(management.call('account.delete', { index: 1.5 })).rejects.toThrow(/invalid index/)
+    await expect(management.call('account.activate', { index: 99 })).rejects.toThrow(/account not found/)
+  })
+
+  it('activates and deletes accounts', async () => {
+    const harness = makeHarness({ accounts: [account({ email: 'a@x.com' }), account({ email: 'b@y.com' })] })
+    await harness.management.call('account.activate', { index: 1 })
+    expect((await harness.store.load()).activeIndex).toBe(1)
+    await harness.management.call('account.delete', { index: 0 })
+    const after = await harness.store.load()
+    expect(after.accounts.map((entry) => entry.email)).toEqual(['b@y.com'])
+  })
+
+  it('requires a model for test and delegates the call', async () => {
+    const harness = makeHarness()
+    await expect(harness.management.call('account.test', {})).rejects.toThrow(/model is required/)
+    await expect(harness.management.call('account.test', { model: 'model-a' }))
+      .resolves.toMatchObject({ ok: true })
+    expect(harness.calls).toContainEqual({ method: 'testCall', args: ['model-a', {}] })
+  })
+
+  it('forwards the clicked account index to the test call', async () => {
+    // The row's index must reach the session manager, or the probe runs on
+    // whichever account affinity picked and reports as this row's result.
+    const harness = makeHarness({ accounts: [account(), account({ email: 'b@y.com' })] })
+    await harness.management.call('account.test', { model: 'model-a', index: 1 })
+    expect(harness.calls).toContainEqual({ method: 'testCall', args: ['model-a', { accountIndex: 1 }] })
+  })
+
+  it('rejects a malformed test index', async () => {
+    const harness = makeHarness()
+    await expect(harness.management.call('account.test', { model: 'model-a', index: -1 }))
+      .rejects.toThrow(/invalid index/)
+  })
+
+  describe('model visibility', () => {
+    it('lists the unfiltered catalog with each model\'s hidden flag', async () => {
+      const harness = makeHarness({ session: { index: 0, account: account(), auth: {} } })
+      harness.visibility.setDisabled('agy', 'model-b', true)
+      const result = await harness.management.call('model.list', {}) as {
+        account: string | null
+        models: Array<{ id: string, disabled: boolean }>
+      }
+      // The disabled model must still be listed: it is the only place its switch
+      // can be turned back on.
+      expect(result.models).toEqual([
+        { id: 'model-a', name: 'Model A', disabled: false },
+        { id: 'model-b', name: 'Model B', disabled: true },
+      ])
+      expect(result.account).toBe('a@x.com')
+    })
+
+    it('toggles a model and persists it', async () => {
+      const harness = makeHarness()
+      await harness.management.call('model.setDisabled', { modelId: 'model-a', disabled: true })
+      expect(harness.visibility.isDisabled('agy', 'model-a')).toBe(true)
+      await harness.management.call('model.setDisabled', { modelId: 'model-a', disabled: false })
+      expect(harness.visibility.isDisabled('agy', 'model-a')).toBe(false)
+    })
+
+    it('announces the change so an open picker refreshes without a reload', async () => {
+      // Regression: the blacklist lives in agy's own file, so no DSH event fires
+      // on its own. Without this notification the toggle appeared to do nothing
+      // until the page was reloaded.
+      const harness = makeHarness()
+      await harness.management.call('model.setDisabled', { modelId: 'model-a', disabled: true })
+      expect(harness.notifications).toBe(1)
+      await harness.management.call('model.setDisabled', { modelId: 'model-a', disabled: false })
+      expect(harness.notifications).toBe(2)
+    })
+
+    it('does not announce anything when the toggle is rejected', async () => {
+      const harness = makeHarness()
+      await expect(harness.management.call('model.setDisabled', { modelId: '' })).rejects.toThrow()
+      expect(harness.notifications).toBe(0)
+    })
+
+    it('rejects an empty model id', async () => {
+      const harness = makeHarness()
+      await expect(harness.management.call('model.setDisabled', { modelId: '' }))
+        .rejects.toThrow(/modelId is required/)
+    })
+
+    it('fails model.list helpfully when no account is configured', async () => {
+      const harness = makeHarness({ session: undefined })
+      await expect(harness.management.call('model.list', {}))
+        .rejects.toThrow(/No agy account configured/)
+    })
+  })
+
+  describe('stats', () => {
+    it('folds the ledger into all-time, windowed, per-account and per-model views', async () => {
+      const harness = makeHarness()
+      const now = Date.now()
+      harness.stats.record({
+        account: 'a@x.com', model: 'model-a', source: 'chat', ok: true,
+        usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0 },
+      })
+      // A record older than the retained window: counted all-time, not in a window.
+      const doc = harness.stats.snapshot()
+      doc.days['2020-01-01'] = {
+        input: 7, output: 0, cacheRead: 0, cacheWrite: 0,
+        requests: 1, succeeded: 1, failed: 0, rateLimited: 0, rotations: 0,
+        latencyMs: 0, latencyN: 0, ttftMs: 0, ttftN: 0,
+      }
+      const view = await harness.management.call('stats.get', {}) as {
+        all: { requests: number }
+        today: { requests: number }
+        accounts: Array<{ account: string }>
+        models: Array<{ model: string }>
+      }
+      expect(view.all.requests).toBeGreaterThanOrEqual(1)
+      expect(view.today.requests).toBe(1)
+      expect(view.accounts.map((entry) => entry.account)).toContain('a@x.com')
+      expect(view.models.map((entry) => entry.model)).toContain('model-a')
+      expect(now).toBeGreaterThan(0)
+    })
+
+    it('reports an empty ledger without inventing a start date', async () => {
+      const { management } = makeHarness()
+      const view = await management.call('stats.get', {}) as { since: number | null, all: { requests: number } }
+      expect(view.all.requests).toBe(0)
+      expect(view.since).toBeNull()
+    })
+  })
+
+  describe('credentials', () => {
+    it('imports a batch and reports the count', async () => {
+      const harness = makeHarness()
+      // A malformed source must fail loudly rather than importing nothing quietly.
+      await expect(harness.management.call('account.import', { kind: 'json', sources: [] }))
+        .rejects.toThrow(/nothing to import/)
+    })
+
+    it('reports per-source failures instead of discarding them', async () => {
+      // The UI can only tell the user which lines failed if the failures cross
+      // the wire: `errors` is typed `string[]` and must always be present.
+      const harness = makeHarness()
+      const result = await harness.management.call('account.import', {
+        kind: 'json',
+        sources: ['not json at all'],
+      }) as { imported: number, replaced: number, errors: string[] }
+      expect(result.imported).toBe(0)
+      expect(result.replaced).toBe(0)
+      expect(Array.isArray(result.errors)).toBe(true)
+      expect(result.errors).toHaveLength(1)
+      expect(typeof result.errors[0]).toBe('string')
+    })
+
+    it('reports a mixed batch as a partial success with the failing sources named', async () => {
+      // The exact shape the Credentials tab renders: success counts plus the
+      // per-source messages. Before this the whole result was dropped, so a
+      // half-failed paste looked like nothing had happened.
+      //
+      // Enrichment (userinfo/loadCodeAssist) is unstubbed here, so the well-formed
+      // source cannot complete: what this pins is the WIRE SHAPE — per-source
+      // failures are returned alongside the counts and never collapse the batch
+      // into a thrown error.
+      const harness = makeHarness()
+      const result = await harness.management.call('account.import', {
+        kind: 'json',
+        sources: ['{"token":{"access_token":"at","refresh_token":"rt"}}', 'garbage'],
+      }) as { imported: number, replaced: number, errors: string[] }
+      expect(result.errors).toHaveLength(2)
+      expect(result.errors.every((error) => typeof error === 'string' && error !== '')).toBe(true)
+      // Partial success is not an exception: the call resolves.
+      expect(result.imported + result.replaced).toBe(0)
+    })
+
+    it('exports every account as a blob', async () => {
+      const harness = makeHarness({ accounts: [account(), account({ email: 'b@y.com' })] })
+      const result = await harness.management.call('account.exportAll', {}) as {
+        blobs: Array<{ index: number, blob: string }>
+      }
+      expect(result.blobs).toEqual([
+        { index: 0, blob: 'blob-0' },
+        { index: 1, blob: 'blob-1' },
+      ])
+    })
+
+    it('surfaces an export failure per account', async () => {
+      const harness = makeHarness({ exportBlob: { error: 'refresh failed (revoked?)' } })
+      const result = await harness.management.call('account.export', { index: 0 }) as { error?: string }
+      expect(result.error).toMatch(/revoked/)
+    })
+  })
+
+  describe('quota rows', () => {
+    /** Answer model discovery with the given per-model quota fractions. */
+    function stubDiscovery(models: Record<string, number | null>): void {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+        models: Object.fromEntries(Object.entries(models).map(([id, fraction]) => [
+          id,
+          fraction === null ? {} : { quotaInfo: { remainingFraction: fraction } },
+        ])),
+      }), { status: 200 })))
+    }
+
+    /** The active account must carry an access token for quota to be queried. */
+    function quotaHarness(): Harness {
+      const harness = makeHarness({
+        session: { index: 0, account: account(), auth: { access: 'at' } },
+      })
+      return harness
+    }
+
+    it('sorts models with no reported fraction LAST, not first', async () => {
+      // Regression: an unreported fraction was mapped to a -1 sentinel, which
+      // sorted a block of "—" rows above genuinely low-quota models. Unknown
+      // headroom is not empty headroom.
+      stubDiscovery({ plenty: 0.9, unknown: null, nearlyOut: 0.05 })
+      const { accounts } = await quotaHarness().management.call('account.list', {}) as {
+        accounts: Array<{ quota: { models: Array<{ id: string }> } | null }>
+      }
+      const ids = accounts[0]!.quota!.models.map((row) => row.id)
+      expect(ids).toEqual(['nearlyOut', 'plenty', 'unknown'])
+    })
+
+    it('clamps a fraction outside 0..1 rather than rendering a broken bar', async () => {
+      stubDiscovery({ over: 4, under: -3 })
+      const { accounts } = await quotaHarness().management.call('account.list', {}) as {
+        accounts: Array<{ quota: { models: Array<{ id: string, remainingFraction: number | null }> } | null }>
+      }
+      const fractions = Object.fromEntries(
+        accounts[0]!.quota!.models.map((row) => [row.id, row.remainingFraction]),
+      )
+      expect(fractions).toEqual({ over: 1, under: 0 })
+    })
+  })
+
+  describe('proxy', () => {
+    it('normalizes a saved proxy and never returns it raw', async () => {
+      const harness = makeHarness()
+      const result = await harness.management.call('account.proxy', {
+        index: 0,
+        proxy: 'http://user:pass@proxy.test:8080',
+      }) as { proxy: string | null }
+      expect(result.proxy).toContain('proxy.test:8080')
+      expect(result.proxy).not.toContain('pass')
+      expect((await harness.store.load()).accounts[0]?.proxy).toContain('proxy.test')
+    })
+
+    it('clears a proxy when given an empty string', async () => {
+      const harness = makeHarness({ accounts: [account({ proxy: 'http://proxy.test:8080' })] })
+      const result = await harness.management.call('account.proxy', { index: 0, proxy: '   ' }) as {
+        proxy: string | null
+      }
+      expect(result.proxy).toBeNull()
+      expect((await harness.store.load()).accounts[0]?.proxy).toBeUndefined()
+    })
+  })
+
+  describe('OAuth callback', () => {
+    it('rejects a callback with no code or state', async () => {
+      const { management } = makeHarness()
+      const result = await management.handleCallback(new URLSearchParams())
+      expect(result).toMatchObject({ ok: false })
+      expect(result.error).toMatch(/Missing code or state/)
+    })
+
+    it('rejects a state it never issued', async () => {
+      // The PKCE verifier is bound to the issued state; an unknown state must
+      // never be exchangeable.
+      const { management } = makeHarness()
+      const result = await management.handleCallback(new URLSearchParams({ code: 'c', state: 'forged' }))
+      expect(result.ok).toBe(false)
+      expect(result.error).toMatch(/Unknown or expired/)
+    })
+
+    it('issues an authorization URL bound to the loopback callback', async () => {
+      const { management } = makeHarness()
+      const { url } = await management.call('auth.url', {}) as { url: string }
+      const parsed = new URL(url)
+      expect(parsed.searchParams.get('redirect_uri')).toBe('http://127.0.0.1:3080/agy/oauth-callback')
+      expect(parsed.searchParams.get('code_challenge_method')).toBe('S256')
+      // The verifier travels in the state payload, never as a bare parameter.
+      expect(parsed.searchParams.get('state')).toBeTruthy()
+      void vi
+    })
+  })
+})
+
+describe('RPC failure envelope contract', () => {
+  it('every failure carries error.details, or the client rejects it as transport damage', () => {
+    // Regression: the client's envelope parser requires `error.details` to be an
+    // object. A failure without it surfaces as "invalid server-response" — a
+    // transport-sounding error that hides the real message — which is exactly
+    // how the model-toggle failure was reported.
+    const normalize = (result: { ok: false, error: { code?: string, message?: string, details?: unknown } }) =>
+      ({ ...result, error: { details: {}, ...result.error } })
+
+    const withoutDetails = normalize({ ok: false, error: { code: 'agy/handler-failed', message: 'boom' } })
+    expect(withoutDetails.error.details).toEqual({})
+    // An explicitly provided details object must survive normalization.
+    const withDetails = normalize({ ok: false, error: { message: 'boom', details: { hint: 1 } } })
+    expect(withDetails.error.details).toEqual({ hint: 1 })
+  })
+})

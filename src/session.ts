@@ -50,6 +50,37 @@ export interface SessionManagerOptions {
   onRotate?: (fromIndex: number, toIndex: number, reason: FailureKind) => void
   /** Called after a health check finishes (batch probe results). */
   onHealthReport?: (results: AccountHealthResult[]) => void
+  /**
+   * Receives one usage record per account-scoped upstream call made outside the
+   * chat path (verification, test calls, CLI invocations).
+   *
+   * This is the half of the ledger DSH structurally cannot supply: those calls
+   * consume upstream quota without ever producing a session event, so agy is
+   * the only party that can count them. Chat generations are recorded by the
+   * adapter, which sees their token usage.
+   */
+  recordUsage?: (record: UsageRecord) => void
+}
+
+/** A usage record emitted by the session manager's non-chat call paths. */
+export interface UsageRecord {
+  account?: string
+  model?: string
+  source: 'chat' | 'cli' | 'verify' | 'test'
+  ok: boolean
+  rateLimited?: boolean
+  /** Token usage, when the call parsed an upstream stream. */
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+  latencyMs?: number
+  ttftMs?: number
+  /**
+   * A pool-level event (a rotation) rather than a request of its own.
+   * The adapter has already recorded the request that failed, so this must
+   * move only the pool counters or the request would be counted twice.
+   */
+  poolEvent?: boolean
+  /** Marks a rotation in a pool event. */
+  rotated?: boolean
 }
 
 /** One account's health check result (refresh + userinfo). */
@@ -106,6 +137,7 @@ export class AgySessionManager {
   private readonly store: AccountStore
   private readonly onRotate: SessionManagerOptions['onRotate']
   private readonly onHealthReport: SessionManagerOptions['onHealthReport']
+  private readonly recordUsageOption: SessionManagerOptions['recordUsage']
   private readonly tokenCache = new Map<string, TokenCacheEntry>()
   /** In-flight refresh promises keyed by account: concurrent requests share one refresh. */
   private readonly refreshInFlight = new Map<string, Promise<OAuthAuthDetails | undefined>>()
@@ -133,6 +165,16 @@ export class AgySessionManager {
     this.store = options.store
     this.onRotate = options.onRotate
     this.onHealthReport = options.onHealthReport
+    this.recordUsageOption = options.recordUsage
+  }
+
+  /** Emit one non-chat usage record; a ledger failure never breaks the call. */
+  private emitUsage(record: UsageRecord): void {
+    try {
+      this.recordUsageOption?.(record)
+    } catch {
+      // Swallowed by design: statistics are diagnostics.
+    }
   }
 
   private accountKey(account: ManagedAccount): string {
@@ -356,10 +398,24 @@ export class AgySessionManager {
    * transiently failed even when the Google account owns a Cloud Code project
    * (mirrors OmniRoute's ensureAntigravityProjectAssigned + persistence).
    * @param model - requested model id; drives family-scoped quota ranking.
+   * @param accountIndex - resolve this exact account instead of ranking the pool.
+   *   Used by the management "Test call" action, where testing a different
+   *   account than the one the user clicked would report a result for the wrong
+   *   account. Deliberately does NOT update the affinity pin: a one-shot test
+   *   must not steer the next real conversation onto the account it probed.
    */
-  async getSession(model?: string): Promise<AgyAccountSession | undefined> {
+  async getSession(model?: string, accountIndex?: number): Promise<AgyAccountSession | undefined> {
     let storage = await this.store.load()
-    const maxAttempts = storage.accounts.filter((account) => account.enabled !== false).length
+    if (accountIndex !== undefined) {
+      // Fail loudly rather than silently falling back to the pool: a test that
+      // reports on an account it was not asked about is worse than an error.
+      const account = storage.accounts[accountIndex]
+      if (!account) throw new Error(`account #${accountIndex} not found`)
+      if (account.enabled === false) throw new Error(`account #${accountIndex} is disabled`)
+    }
+    const maxAttempts = accountIndex === undefined
+      ? storage.accounts.filter((account) => account.enabled !== false).length
+      : 1
     let proxyUnreachableCount = 0
     /**
      * Last transport failure seen on a *proxyless* account. Such an account is
@@ -373,11 +429,18 @@ export class AgySessionManager {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const eligible = storage.accounts.filter((account) => account.enabled !== false)
-      if (eligible.length > 1) {
+      if (accountIndex === undefined && eligible.length > 1) {
         await this.refreshQuotaCache(storage)
         // In-memory overlay on storage already took place in refreshQuotaCache.
       }
-      const picked = await this.pickAccount(storage, model)
+      const picked = accountIndex === undefined
+        ? await this.pickAccount(storage, model)
+        : (() => {
+          const account = storage.accounts[accountIndex]
+          if (!account) throw new Error(`account #${accountIndex} not found`)
+          if (account.enabled === false) throw new Error(`account #${accountIndex} is disabled`)
+          return { account, index: accountIndex }
+        })()
       if (!picked) return undefined
       let auth: OAuthAuthDetails | undefined
       try {
@@ -388,6 +451,11 @@ export class AgySessionManager {
           // without a cooldown (the proxy may recover; a cooldown would also hide
           // the real cause and block a solo proxied pool).
           proxyUnreachableCount++
+          // A pinned caller asked about ONE account: falling over to a different
+          // one would answer a question nobody asked, and mutating the pool
+          // cursor for a diagnostic probe would be a side effect the user did
+          // not request. Surface the failure instead.
+          if (accountIndex !== undefined) throw error
           storage = await this.skipAccount(storage, picked.account)
           continue
         }
@@ -395,11 +463,15 @@ export class AgySessionManager {
         // (issue #29): fall over to the next enabled account, remembering the
         // failure in case none of them succeeds.
         lastTransportError = error
+        if (accountIndex !== undefined) throw error
         storage = await this.skipAccount(storage, picked.account)
         continue
       }
       if (!auth) {
         // The selected credential was revoked and disabled by accessTokenFor.
+        if (accountIndex !== undefined) {
+          throw new Error(`account #${accountIndex} credential is no longer valid — run \`dsh-agy login\``)
+        }
         // Re-read and select another enabled account within this same request.
         this.lastUsed = null
         storage = await this.store.load()
@@ -434,7 +506,9 @@ export class AgySessionManager {
         }
       }
 
-      this.lastUsed = { key, at: Date.now() }
+      // A pinned (test) call must not touch the affinity pin: probing an account
+      // is not "using" it, and pinning would steer the next real conversation.
+      if (accountIndex === undefined) this.lastUsed = { key, at: Date.now() }
       return {
         auth,
         account: picked.account,
@@ -548,6 +622,17 @@ export class AgySessionManager {
 
     if (nextIndexToRotate !== null) {
       this.onRotate?.(session.index, nextIndexToRotate, kind)
+      // Counted as a pool event, not a request: the adapter already recorded
+      // the request that failed, and counting it again here would inflate it.
+      this.emitUsage({
+        ...(session.account.email === undefined && session.account.id === undefined
+          ? {}
+          : { account: session.account.email ?? session.account.id }),
+        source: 'chat',
+        ok: false,
+        rotated: true,
+        poolEvent: true,
+      })
     }
   }
   /** Adapter hook: reset the failure counter after a clean completion. */
@@ -560,11 +645,36 @@ export class AgySessionManager {
   /**
    * Test call: one short streaming request against the live backend.
    * Returns the collected text or a structured error message.
+   * @param model - model id to exercise.
+   * @param options - probe overrides.
+   *   - `prompt` / `maxTokens`: the request shape (defaults to a one-token reply).
+   *   - `accountIndex`: test this exact account instead of letting the pool rank
+   *     one. The management UI exposes "Test call" per account row, so without
+   *     this the probe ran on whichever account affinity picked, and its result
+   *     was both returned and recorded against that other account.
    */
-  async testCall(model: string, prompt = 'Reply with exactly: OK', maxTokens = 1024): Promise<{ ok: boolean; text?: string; error?: string }> {
+  async testCall(
+    model: string,
+    options: { prompt?: string; maxTokens?: number; accountIndex?: number } = {},
+  ): Promise<{ ok: boolean; text?: string; error?: string }> {
+    const prompt = options.prompt ?? 'Reply with exactly: OK'
+    const maxTokens = options.maxTokens ?? 1024
+    // Session resolution happens OUTSIDE the recorded region: a rejected pin
+    // ("account #9 not found") or a refresh failure means no upstream model call
+    // was made, and counting it as a request would inflate a ledger whose whole
+    // purpose is to reflect what actually consumed quota. The exception is a
+    // refresh that reached the token endpoint — that is still recorded below,
+    // because it did touch the account's identity.
+    const startedAt = Date.now()
+    let session: AgyAccountSession | undefined
     try {
-      const session = await this.getSession(model)
-      if (!session) return { ok: false, error: 'No agy account configured — run `dsh-agy login` first.' }
+      session = await this.getSession(model, options.accountIndex)
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    if (!session) return { ok: false, error: 'No agy account configured — run `dsh-agy login` first.' }
+    try {
+      const account = session.account.email ?? session.account.id
       const { toAgyRequestBody } = await import('./adapter/translate.ts')
       const { fetchAgyFirstOk } = await import('./oauth/constants.ts')
       const { parseAgySse } = await import('./adapter/parse.ts')
@@ -596,15 +706,39 @@ export class AgySessionManager {
       )
       if (!response.ok) {
         const text = await response.text().catch(() => '')
+        this.emitUsage({ account, model, source: 'test', ok: false, latencyMs: Date.now() - startedAt })
         return { ok: false, error: `HTTP ${response.status}: ${text.slice(0, 300)}` }
       }
-      if (!response.body) return { ok: false, error: 'no response body' }
-      const text: string[] = []
-      for await (const chunk of parseAgySse(response.body)) {
-        if (chunk.type === 'text-delta') text.push(chunk.text)
+      if (!response.body) {
+        this.emitUsage({ account, model, source: 'test', ok: false, latencyMs: Date.now() - startedAt })
+        return { ok: false, error: 'no response body' }
       }
-      return { ok: text.length > 0, text: text.join(''), error: text.length > 0 ? undefined : 'empty response' }
+      const text: string[] = []
+      let usage: UsageRecord['usage']
+      let ttftMs: number | undefined
+      for await (const chunk of parseAgySse(response.body)) {
+        if (chunk.type === 'usage') {
+          usage = {
+            input: chunk.usage.inputTokens,
+            output: chunk.usage.outputTokens,
+            cacheRead: chunk.usage.cacheReadTokens ?? 0,
+            cacheWrite: chunk.usage.cacheWriteTokens ?? 0,
+          }
+        } else if (chunk.type === 'text-delta') {
+          if (ttftMs === undefined) ttftMs = Date.now() - startedAt
+          text.push(chunk.text)
+        }
+      }
+      const ok = text.length > 0
+      this.emitUsage({
+        account, model, source: 'test', ok,
+        ...(usage === undefined ? {} : { usage }),
+        ...(ttftMs === undefined ? {} : { ttftMs }),
+        latencyMs: Date.now() - startedAt,
+      })
+      return { ok, text: text.join(''), error: ok ? undefined : 'empty response' }
     } catch (error) {
+      this.emitUsage({ source: 'test', ok: false, latencyMs: Date.now() - startedAt })
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
@@ -633,13 +767,21 @@ export class AgySessionManager {
 
   /** Probe one account: refresh + userinfo; a live credential re-enables the account. */
   private async probeAccount(index: number, account: ManagedAccount): Promise<{ ok: boolean; email?: string; error?: string }> {
+    const startedAt = Date.now()
+    const key = account.email ?? account.id
     try {
       const auth = await this.accessTokenFor(account)
-      if (!auth) return { ok: false, error: 'refresh failed (revoked?)' }
+      if (!auth) {
+        this.emitUsage({ account: key, source: 'verify', ok: false, latencyMs: Date.now() - startedAt })
+        return { ok: false, error: 'refresh failed (revoked?)' }
+      }
       const response = await proxiedFetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
         headers: { Authorization: `Bearer ${auth.access}` },
       }, account.proxy ? { proxyUrl: account.proxy } : undefined)
-      if (!response.ok) return { ok: false, error: `userinfo ${response.status}` }
+      if (!response.ok) {
+        this.emitUsage({ account: key, source: 'verify', ok: false, latencyMs: Date.now() - startedAt })
+        return { ok: false, error: `userinfo ${response.status}` }
+      }
       const info = (await response.json()) as { email?: string }
       // Credentials are live again — clear any auth-failure disable so the
       // account re-enters rotation without a manual re-import.
@@ -653,8 +795,12 @@ export class AgySessionManager {
           target.verificationUrl = undefined
         }
       })
+      // No model tokens are billed by a userinfo probe, but the call is a real
+      // account-scoped request and belongs in the ledger as such.
+      this.emitUsage({ account: info.email ?? key, source: 'verify', ok: true, latencyMs: Date.now() - startedAt })
       return { ok: true, email: info.email }
     } catch (error) {
+      this.emitUsage({ account: key, source: 'verify', ok: false, latencyMs: Date.now() - startedAt })
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   }

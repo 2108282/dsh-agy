@@ -1,28 +1,1001 @@
-import { createElement } from 'react'
+/**
+ * agy Settings section — the browser half.
+ *
+ * One `settings.section` page with four tabs (accounts, models, usage,
+ * credentials), replacing the standalone `/agy` dashboard. Every figure comes
+ * from the `/api/agy` RPC over `ctx.connection`, so this section needs no
+ * host-rendered page and there is no second UI to keep in step.
+ *
+ * Elements are built through the local `h` helper rather than JSX or nested
+ * `createElement` calls: this package configures no JSX transform for the client
+ * bundle, and `h(tag, props, ...children)` keeps the element tree flat and
+ * readable where nested `createElement` calls become a parenthesis maze.
+ */
+
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import {
+  Button,
+  Input,
+  Pill,
+  StateDot,
+  Switch,
+  Tag,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import type { StateDotState, TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
+import { installAgyStyles } from './styles.ts'
+import { en, zh, type AgyLocaleKey } from './locales.ts'
+import type { AccountView, AgyRpcClient, ModelView, StatsView } from '../rpc-contract.ts'
+import type { UsageCounters } from '../usage-types.ts'
 
-/** Required browser services. */
-export const inject = ['slots']
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Copy owned by the Antigravity Settings section. */
+    agy: AgyLocaleKey
+  }
+}
 
-/** Renders the Settings tab link to the loopback-only Antigravity dashboard. */
-function AgySettingsLink() {
-  return createElement('section', null,
-    createElement('h3', null, 'Antigravity'),
-    createElement('p', null, 'Manage Google Antigravity accounts, quotas, and model checks.'),
-    createElement('a', { href: '/agy', target: '_blank', rel: 'noreferrer' }, 'Open Antigravity dashboard'),
-  )
+/** Required browser services: the slot registry, dictionaries, and the RPC carrier. */
+export const inject = ['slots', 'locale', 'connection']
+
+/** Dictionary namespace this plugin owns. */
+const NS = 'agy'
+
+/** This section's translator. */
+type T = TranslateNS<typeof NS>
+
+/** RPC channel and endpoint the host registers as `/api/agy`. */
+const RPC_CHANNEL = '/api'
+const RPC_ENDPOINT = 'agy'
+
+type TabId = 'accounts' | 'models' | 'usage' | 'credentials'
+
+/** Connection shape this plugin needs (structural, so no host-only import). */
+interface ConnectionLike {
+  rpc: {
+    call: (channel: string, endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>
+  }
 }
 
 /**
- * Registers the Antigravity Settings tab while this client plugin is active.
+ * Element shorthand: flat children, no nesting ceremony.
+ *
+ * The component overload accepts children as trailing arguments too, because
+ * React's `createElement` handles them natively for function components.
+ */
+function h(tag: string, props?: Record<string, unknown> | null, ...children: ReactNode[]): ReactNode
+function h<Props>(
+  // `key` rides in props for `createElement`, so the component overload must
+  // admit it even though it is not part of the component's own props type.
+  component: (props: Props) => ReactNode,
+  props: Props & { key?: string | number },
+  ...children: ReactNode[]
+): ReactNode
+function h(
+  tag: string | ((props: never) => ReactNode),
+  props?: Record<string, unknown> | null,
+  ...children: ReactNode[]
+): ReactNode {
+  return createElement(tag as string, props ?? null, ...children)
+}
+
+/** Call one management method and unwrap the Connection RPC envelope. */
+function createRpc(connection: ConnectionLike): AgyRpcClient {
+  return {
+    async call(method, payload, signal) {
+      const raw = await connection.rpc.call(
+        RPC_CHANNEL,
+        RPC_ENDPOINT,
+        { method, payload },
+        signal,
+      ) as { ok?: boolean; value?: unknown; error?: { message?: string } } | undefined
+      if (raw?.ok === true) return raw.value as never
+      if (raw?.ok === false) throw new Error(raw.error?.message ?? `${method} failed`)
+      // An unrecognized envelope means the transport misbehaved; surfacing it
+      // beats returning undefined as though the call had succeeded.
+      throw new Error(`${method}: malformed RPC response`)
+    },
+  }
+}
+
+// ─── formatting ──────────────────────────────────────────────────────────────
+
+/** Compact token text: 1.2M / 284K / 512. */
+function tokenText(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}K`
+  return String(value)
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '—'
+  if (ms < 1_000) return `${Math.round(ms)}ms`
+  const seconds = ms / 1_000
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const whole = Math.round(seconds)
+  return `${Math.floor(whole / 60)}m${String(whole % 60).padStart(2, '0')}s`
+}
+
+/** Cache-hit share of prompt-side input; null when nothing was billed. */
+function cacheHitPercent(counters: UsageCounters): number | null {
+  const billed = counters.input + counters.cacheRead + counters.cacheWrite
+  if (billed <= 0) return null
+  return Math.round((counters.cacheRead / billed) * 100)
+}
+
+function average(total: number, count: number): number {
+  return count > 0 ? total / count : 0
+}
+
+/** Total tokens across the four disjoint buckets. */
+function totalTokens(counters: UsageCounters): number {
+  return counters.input + counters.output + counters.cacheRead + counters.cacheWrite
+}
+
+/** Quota tint by remaining fraction: healthy / low / critical. */
+function quotaColor(fraction: number): string {
+  if (fraction > 0.7) return 'var(--dsw-alias-state-success-primary, #22c55e)'
+  if (fraction >= 0.3) return 'var(--dsw-alias-state-warn-primary, #f59e0b)'
+  return 'var(--dsw-alias-state-error-primary, #ec1313)'
+}
+
+/** Localized account-state label. */
+function stateLabel(state: AccountView['state'], t: T): string {
+  switch (state) {
+    case 'active': return t('stateActive')
+    case 'cooling': return t('stateCooling')
+    case 'verification-required': return t('stateVerificationRequired')
+    case 'disabled': return t('stateDisabled')
+  }
+}
+
+/**
+ * A wall-clock moment for a state label (a cooldown end).
+ *
+ * Time-of-day alone is enough while the wall is today; past midnight it must
+ * carry the date, or a 24h quota cooldown reads as though it ends in a few
+ * minutes. (`untilText` is the relative form, used where "how long from now" is
+ * the question rather than "when".)
+ */
+function clockTime(iso: string | null): string {
+  if (iso === null) return '—'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  const now = new Date()
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate()
+  return sameDay
+    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+const MINUTE_MS = 60_000
+const HOUR_MS = 60 * MINUTE_MS
+const DAY_MS = 24 * HOUR_MS
+
+/**
+ * Time until a future moment, as localized copy.
+ *
+ * A quota reset wall is often more than 24h out, so a bare `HH:mm` cannot say
+ * whether it means today or tomorrow — the failure this replaces. Bucket
+ * boundaries mirror the host's `relativeTime` (which is defined for past-dated
+ * rows and would need its arguments reversed to serve a future one, so the
+ * comparison is written out here instead); the words stay in this plugin's own
+ * dictionary, which is exactly the split that API intends.
+ */
+function untilText(iso: string | null, t: T, now: number): string {
+  if (iso === null) return '—'
+  const at = new Date(iso).getTime()
+  if (Number.isNaN(at)) return '—'
+  const diff = at - now
+  if (diff <= 0) return t('relNow')
+  const value = diff < MINUTE_MS
+    ? t('relNow')
+    : diff < HOUR_MS
+      ? t('relMinutes', { n: Math.floor(diff / MINUTE_MS) })
+      : diff < DAY_MS
+        ? t('relHours', { n: Math.floor(diff / HOUR_MS) })
+        : diff < 30 * DAY_MS
+          ? t('relDays', { n: Math.floor(diff / DAY_MS) })
+          : diff < 365 * DAY_MS
+            ? t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
+            : t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
+  return t('quotaResetIn', { value })
+}
+
+// ─── building blocks ─────────────────────────────────────────────────────────
+
+/**
+ * A host-styled button.
+ *
+ * Delegates to the host's `Button` so focus rings, disabled states, size tiers
+ * and theming are the platform's rather than an imitation. `danger` has no
+ * primitive equivalent, so it keeps the ghost family with a local class.
+ *
+ * Every click stops propagating. Account rows are themselves click targets
+ * (selecting the row), so without this a row's "Delete"/"Verify"/"Activate"
+ * button also selected that row — and for Delete the row indices then shifted
+ * underneath a selection that was about to be acted on. Stopping unconditionally
+ * is safe for buttons outside rows, where there is no ancestor handler.
+ */
+function button(label: string, onClick: () => void, options: {
+  variant?: 'primary' | 'danger'
+  size?: 'sm'
+  disabled?: boolean
+  title?: string
+} = {}): ReactNode {
+  return h(Button, {
+    variant: options.variant === 'primary' ? 'primary' : 'outline',
+    size: options.size === 'sm' ? 'sm' : 'md',
+    ...(options.disabled === true ? { disabled: true } : {}),
+    ...(options.title === undefined ? {} : { title: options.title }),
+    ...(options.variant === 'danger' ? { className: 'agy-btn-danger' } : {}),
+    onClick: (event: { stopPropagation?: () => void }) => {
+      event?.stopPropagation?.()
+      onClick()
+    },
+  }, label)
+}
+
+/** Full-width quota row used by the (collapsible) model quota list. */
+function quotaRow(
+  model: { id: string, remainingFraction: number | null, resetTime: string | null },
+  t: T,
+  now: number,
+): ReactNode {
+  const fraction = model.remainingFraction
+  return h('div', { className: 'agy-quota-row', key: model.id },
+    h('span', { className: 'agy-quota-name' }, model.id,
+      model.resetTime === null ? null : h('code', null, untilText(model.resetTime, t, now))),
+    h('span', { className: 'agy-quota-track' },
+      fraction === null
+        ? null
+        : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
+    h('span', { className: 'agy-quota-pct' },
+      fraction === null ? '—' : `${Math.round(fraction * 100)}%`))
+}
+
+/** Account state rendered with the host's state dot plus a tinted tag. */
+function stateBadge(state: AccountView['state'], label: string): ReactNode {
+  const dot: StateDotState = state === 'active'
+    ? 'done'
+    : state === 'cooling' ? 'warning' : 'error'
+  const tone: TagTone = state === 'active' ? 'success' : state === 'cooling' ? 'warning' : 'danger'
+  return h('span', { className: 'agy-state' },
+    h(StateDot, { state: dot, size: 8 }),
+    h(Tag, { tone }, label))
+}
+
+function subhead(title: string, aside?: string): ReactNode {
+  return h('div', { className: 'agy-subhead' },
+    h('span', null, title),
+    aside === undefined || aside === '' ? null : h('span', { className: 'agy-aside' }, aside))
+}
+
+function hint(text: string): ReactNode {
+  return h('p', { className: 'agy-hint' }, text)
+}
+
+function table(headers: ReactNode, rows: ReactNode[]): ReactNode {
+  return h('table', { className: 'agy-table' },
+    headers === null ? null : h('thead', null, headers),
+    h('tbody', null, ...rows))
+}
+
+/** A titled grouping surface. Grouping is what keeps a dense page readable. */
+function card(title: ReactNode, body: ReactNode, aside?: ReactNode): ReactNode {
+  return h('section', { className: 'agy-card' },
+    h('div', { className: 'agy-card-head' },
+      h('span', { className: 'agy-card-title' }, title),
+      aside === undefined ? null : h('span', { className: 'agy-aside' }, aside)),
+    h('div', { className: 'agy-card-body' }, body))
+}
+
+/** A metric strip inside a card. */
+function metrics(cells: ReactNode[]): ReactNode {
+  return h('div', { className: 'agy-metrics' }, ...cells)
+}
+
+/** One metric cell: a label, a large value, and an optional detail line. */
+function metric(label: string, value: number | string, detail: string): ReactNode {
+  const text = typeof value === 'number' ? tokenText(value) : value
+  // Split a trailing unit so it can be typeset smaller, e.g. "1.2" + "M".
+  const match = /^([\d.]+)([MK]?)$/.exec(text)
+  return h('div', { className: 'agy-metric' },
+    h('div', { className: 'agy-metric-k' }, label),
+    h('div', { className: 'agy-metric-v' },
+      match === null ? text : match[1],
+      match !== null && match[2] !== '' ? h('small', null, match[2]) : null),
+    h('div', { className: 'agy-metric-d' }, detail))
+}
+
+/** Definition rows: label/value pairs with hairline separators. */
+function defs(rows: Array<[ReactNode, ReactNode]>): ReactNode {
+  return h('dl', { className: 'agy-defs' },
+    ...rows.flatMap(([label, value], index) => [
+      h('dt', { key: `k${index}` }, label),
+      h('dd', { key: `v${index}` }, value),
+    ]))
+}
+
+// ─── Accounts tab ────────────────────────────────────────────────────────────
+
+interface AccountHandlers {
+  /** Localized copy, resolved per render so a language switch applies. */
+  t: T
+  onActivate: (index: number) => void
+  onVerify: (index: number) => void
+  onDelete: (index: number) => void
+  onTest: (index: number) => void
+  onExport: (index: number) => void
+  onRegenerateFingerprint: (index: number) => void
+  onSetProxy: (index: number, proxy: string) => void
+  onTestProxy: (index: number) => void
+}
+
+/** One account's detail: identity, cumulative usage, proxy, and its actions. */
+function AccountDetail(props: {
+  account: AccountView
+  busy: boolean
+  handlers: AccountHandlers
+  t: T
+}): ReactNode {
+  const { account, busy, handlers, t } = props
+  const [proxyDraft, setProxyDraft] = useState('')
+  const usage = account.usage
+  const models = usage?.models ?? []
+
+  const identity = card(t('detailTitle'), defs([
+    [t('fieldProject'), account.projectId ?? t('noProject')],
+    [t('fieldProxy'), h('span', { className: 'agy-mono' }, account.proxy ?? t('proxyDirect'))],
+    [t('fieldFingerprint'), account.fingerprint === null
+      ? t('fingerprintNone')
+      : t('fingerprintRegenerated', {
+        count: account.fingerprintHistory,
+        date: new Date(account.fingerprint.createdAt).toLocaleDateString(),
+      })],
+    [t('fieldCooldownReason'), account.cooldownReason ?? t('noProject')],
+    [t('fieldSources'), usage === null
+      ? t('noProject')
+      : t('sourcesSummary', {
+        chat: usage.sources.chat,
+        cli: usage.sources.cli,
+        verify: usage.sources.verify,
+        test: usage.sources.test,
+      })],
+    [t('fieldLatency'), usage === null
+      ? t('noProject')
+      : `${t('latencyAverage', { value: formatDuration(average(usage.totals.latencyMs, usage.totals.latencyN)) })}`
+        + ` · ${t('latencyTtft', { value: formatDuration(average(usage.totals.ttftMs, usage.totals.ttftN)) })}`],
+  ]), account.email ?? `#${account.index}`)
+
+  const actions = card(t('colActions'), h('div', { className: 'agy-actions' },
+    button(t('actionTest'), () => { handlers.onTest(account.index) }, { disabled: busy }),
+    button(t('actionExport'), () => { handlers.onExport(account.index) }, { disabled: busy }),
+    button(t('actionRegenerateFingerprint'), () => { handlers.onRegenerateFingerprint(account.index) }, { disabled: busy })))
+
+  const usageBlock = usage === null ? null : card(
+    t('usageCumulative'),
+    h('div', null,
+      metrics([
+        metric(t('kpiInput'), usage.totals.input, t('kpiInputDetail')),
+        metric(t('kpiOutput'), usage.totals.output, t('kpiOutputDetail')),
+        metric(t('kpiCacheRead'), usage.totals.cacheRead, t('kpiCacheHit', { percent: cacheHitPercent(usage.totals) ?? 0 })),
+        metric(t('kpiRequests'), String(usage.totals.requests), t('kpiRequestsDetail', {
+          succeeded: usage.totals.succeeded,
+          failed: usage.totals.failed,
+        })),
+      ]),
+      // Per-model usage stays a table: a metric grid is the right shape for it.
+      models.length === 0 ? null : h('div', { className: 'agy-table-wrap' },
+        table(h('tr', null,
+          h('th', null, t('colModel')),
+          h('th', { className: 'agy-num', style: { width: '46px' } }, t('colRequests')),
+          h('th', { className: 'agy-num', style: { width: '60px' } }, t('colInput')),
+          h('th', { className: 'agy-num', style: { width: '60px' } }, t('colOutput')),
+          h('th', { className: 'agy-num', style: { width: '60px' } }, t('colCacheRead'))),
+        models.map((row) => h('tr', { key: row.model },
+          h('td', { className: 'agy-strong' }, row.model),
+          h('td', { className: 'agy-num' }, String(row.counters.requests)),
+          h('td', { className: 'agy-num' }, tokenText(row.counters.input)),
+          h('td', { className: 'agy-num' }, tokenText(row.counters.output)),
+          h('td', { className: 'agy-num' }, tokenText(row.counters.cacheRead)))))))
+  )
+
+  // Saving only ever writes a non-empty draft: the empty string is the store's
+  // "no proxy" sentinel (`delete account.proxy`), so a Save button that accepted
+  // an empty field silently deleted the account's proxy. Clearing is an explicit
+  // action with its own button, which is also what makes the destructive path
+  // visible instead of sitting behind a placeholder hint.
+  const saveProxy = (): void => {
+    const value = proxyDraft.trim()
+    if (value === '') return
+    handlers.onSetProxy(account.index, value)
+    setProxyDraft('')
+  }
+
+  const proxyBlock = card(t('fieldProxy'), h('div', { className: 'agy-actions' },
+    h(Input, {
+      value: proxyDraft,
+      placeholder: t('proxyPlaceholder'),
+      onChange: (event: { target: { value: string } }) => { setProxyDraft(event.target.value) },
+    }),
+    button(t('actionSave'), saveProxy, { disabled: busy || proxyDraft.trim() === '' }),
+    button(t('actionClear'), () => {
+      handlers.onSetProxy(account.index, '')
+      setProxyDraft('')
+    }, { disabled: busy || account.proxy === null }),
+    button(t('actionTestProxy'), () => { handlers.onTestProxy(account.index) }, { disabled: busy })))
+
+  return h('div', { className: 'agy-detail' }, identity, actions, usageBlock, proxyBlock)
+}
+
+function AccountsTab(props: {
+  accounts: AccountView[]
+  busy: boolean
+  handlers: AccountHandlers
+  t: T
+}): ReactNode {
+  const { accounts, busy, handlers, t } = props
+  const [selected, setSelected] = useState(0)
+
+  if (accounts.length === 0) {
+    return card(t('colAccount'), h('div', { className: 'agy-empty' }, t('emptyAccounts')))
+  }
+  // Clamp by index, not by re-deriving a "selected id": deletion renumbers every
+  // row, so an id-based selection would have to be remapped anyway.
+  const index = Math.min(selected, accounts.length - 1)
+  const current = accounts[index]
+
+  // A selectable row: a div with a real button role, so it is reachable and
+  // operable from the keyboard. Wrapping the row in a <button> would nest the
+  // action buttons inside it — invalid HTML — so the role, tab stop and key
+  // handling are declared here instead.
+  const rows = accounts.map((account, at) => h('div', {
+    key: String(account.index),
+    className: 'agy-rowitem',
+    'data-clickable': 'true',
+    'data-selected': at === index,
+    role: 'button',
+    tabIndex: 0,
+    'aria-pressed': at === index,
+    onClick: () => { setSelected(at) },
+    onKeyDown: (event: { key: string, preventDefault: () => void }) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      // Space would otherwise scroll the settings panel.
+      event.preventDefault()
+      setSelected(at)
+    },
+  },
+  h('div', { className: 'agy-rowmain' },
+    h('div', { className: 'agy-rowtitle' },
+      h('span', { className: 'agy-rowname' }, account.email ?? `#${account.index}`),
+      account.active ? h(Tag, { tone: 'info' }, t('currentAccount')) : null),
+    h('div', { className: 'agy-rowmeta' },
+      (account.projectId ?? t('noProject')),
+      account.usage === null || account.usage.totals.requests === 0
+        ? null
+        : ` · ${t('colRequests')} ${account.usage.totals.requests}`)),
+  h('div', { className: 'agy-rowactions' },
+    stateBadge(account.state, account.state === 'cooling'
+      ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil)}`
+      : stateLabel(account.state, t)),
+    account.active ? null : button(t('actionActivate'), () => { handlers.onActivate(account.index) },
+      { size: 'sm', disabled: busy }),
+    button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }),
+    button(t('actionDelete'), () => { handlers.onDelete(account.index) },
+      { size: 'sm', variant: 'danger', disabled: busy }))))
+
+  return h('div', { className: 'agy-root' },
+    // Master/detail side by side, as the dashboard it replaces had it. Stacked
+    // vertically, selecting a row further down the list pushed the detail it
+    // just opened below the fold — the selection and its result could not be
+    // seen at once.
+    h('div', { className: 'agy-split' },
+      card(t('colAccount'), h('div', { className: 'agy-rows' }, ...rows),
+        `${accounts.length}`),
+      // `key` remounts the detail per account so its proxy draft cannot carry
+      // over: without it React reuses the instance and a draft typed for one
+      // account was still in the box after selecting another, one Save away
+      // from writing A's proxy to B.
+      current === undefined
+        ? null
+        : h(AccountDetail, { key: String(current.index), account: current, busy, handlers, t })))
+}
+
+/**
+ * Models tab: per-model visibility switches, plus the account's model quota in a
+ * collapsible block.
+ *
+ * Quota lives here rather than in the account list because both answer the same
+ * question — "which models can I use, and how much is left" — and the quota list
+ * is long (20+ rows), so it must not push the account list off screen. The
+ * disclosure keeps it one click away without spending the space by default.
+ */
+function ModelsTab(props: {
+  models: ModelView[]
+  account: string | null
+  quota: AccountView['quota']
+  quotaAccount: string | null
+  busy: boolean
+  onToggle: (modelId: string, disabled: boolean) => void
+  t: T
+}): ReactNode {
+  const { models, account, quota, quotaAccount, busy, onToggle, t } = props
+  const [quotaOpen, setQuotaOpen] = useState(false)
+
+  if (models.length === 0) {
+    return card(t('modelsTitle'), h('div', { className: 'agy-empty' }, t('emptyModels')))
+  }
+  const hidden = models.filter((model) => model.disabled).length
+  const quotaModels = quota?.models ?? []
+  // One clock reading per render, so every reset label in the list agrees.
+  const now = Date.now()
+
+  // One normal row per model. A row is a plain grid, not a table: the switch is
+  // the affordance and a table's column rules would fight the card's rhythm.
+  const rows = models.map((model) => h('div', { className: 'agy-rowitem', key: model.id },
+    h('div', { className: 'agy-rowmain' },
+      h('div', { className: 'agy-rowtitle' },
+        h('span', { className: 'agy-rowname' }, model.name)),
+      model.name === model.id
+        ? null
+        : h('div', { className: 'agy-rowmeta agy-mono' }, model.id)),
+    h('div', { className: 'agy-rowactions' },
+      h(Switch, {
+        checked: !model.disabled,
+        disabled: busy,
+        label: t('modelToggleAria', { name: model.name }),
+        onChange: () => { onToggle(model.id, !model.disabled) },
+      }))))
+
+  const quotaBlock = quotaModels.length === 0 ? null : h('div', {
+    className: 'agy-disclosure',
+    'data-open': quotaOpen,
+  },
+  h('button', {
+    type: 'button',
+    className: 'agy-disclosure-toggle',
+    'aria-expanded': quotaOpen,
+    onClick: () => { setQuotaOpen(!quotaOpen) },
+  },
+  h('span', { className: 'agy-caret' }),
+  h('span', null, t('quotaTitle')),
+  h('span', { className: 'agy-disclosure-meta' },
+    t('quotaModelCount', { count: quotaModels.length }))),
+  // Arrow-wrapped: `Array.map` would otherwise pass the index as `t`.
+  quotaOpen ? h('div', { className: 'agy-disclosure-body' }, ...quotaModels.map((row) => quotaRow(row, t, now))) : null)
+
+  return h('div', { className: 'agy-root' },
+    card(t('modelsTitle'), h('div', { className: 'agy-rows' }, ...rows),
+      hidden > 0 ? t('modelsHiddenSuffix', { count: hidden }) : account ?? undefined),
+    hint(t('modelsHelp')),
+    quotaBlock === null ? null : card(
+      quotaAccount === null ? t('quotaTitle') : `${t('quotaTitle')} · ${quotaAccount}`,
+      quotaBlock))
+}
+
+// ─── Usage tab ───────────────────────────────────────────────────────────────
+
+type RangeId = 'today' | 'week' | 'month' | 'all'
+
+const RANGE_IDS: readonly RangeId[] = ['today', 'week', 'month', 'all']
+
+/** Localized label for one range chip. */
+function rangeLabel(id: RangeId, t: T): string {
+  switch (id) {
+    case 'today': return t('rangeToday')
+    case 'week': return t('rangeWeek')
+    case 'month': return t('rangeMonth')
+    case 'all': return t('rangeAll')
+  }
+}
+
+function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
+  const { t } = props
+  const [range, setRange] = useState<RangeId>('today')
+  const stats = props.stats
+  if (stats === null) return h('div', { className: 'agy-empty' }, t('loading'))
+  if (stats.all.requests === 0) return card(t('usageTitle'), h('div', { className: 'agy-empty' }, t('emptyUsage')))
+
+  const counters = range === 'today'
+    ? stats.today
+    : range === 'week'
+      ? stats.week
+      : range === 'month' ? stats.month : stats.all
+  const hit = cacheHitPercent(counters)
+  const maxRequests = Math.max(1, ...stats.models.map((row) => row.counters.requests))
+
+  // The primitives catalog names `Pill` for view switchers and filters: it owns
+  // the active/inactive fill pair, so no local chip skin is needed.
+  const rangePicker = h('div', { className: 'agy-toolbar' },
+    h('div', { className: 'agy-chips' }, ...RANGE_IDS.map((id) => h(Pill, {
+      key: id,
+      active: range === id,
+      onClick: () => { setRange(id) },
+    }, rangeLabel(id, t)))),
+    h('span', { className: 'agy-grow' }),
+    stats.since === null
+      ? null
+      : h('span', { className: 'agy-aside' }, t('since', { date: new Date(stats.since).toLocaleDateString() })))
+
+  const summary = card(t('usageTitle'), metrics([
+    metric(t('colRequests'), String(counters.requests), t('kpiRequestsDetail', {
+      succeeded: counters.succeeded,
+      failed: counters.failed,
+    })),
+    metric(t('colInput'), counters.input, t('kpiInputDetail')),
+    metric(t('colOutput'), counters.output, t('kpiOutputDetail')),
+    metric(t('colCacheRead'), counters.cacheRead,
+      hit === null ? t('kpiNoBilledInput') : t('kpiCacheHit', { percent: hit })),
+  ]))
+
+  const timing = card(t('fieldLatency'), defs([
+    [t('fieldCacheWrite'), tokenText(counters.cacheWrite)],
+    [t('fieldRateLimitRotation'), `${counters.rateLimited} / ${counters.rotations}`],
+    [t('labelLatencyAverage'), formatDuration(average(counters.latencyMs, counters.latencyN))],
+    [t('labelTtft'), formatDuration(average(counters.ttftMs, counters.ttftN))],
+  ]))
+
+  const byModel = stats.models.length === 0 ? null : card(t('byModel'),
+    h('div', { className: 'agy-table-wrap' },
+      table(h('tr', null,
+        h('th', null, t('colModel')),
+        h('th', { className: 'agy-num', style: { width: '46px' } }, t('colRequests')),
+        h('th', { className: 'agy-num', style: { width: '56px' } }, t('colInput')),
+        h('th', { className: 'agy-num', style: { width: '56px' } }, t('colOutput')),
+        h('th', { className: 'agy-num', style: { width: '56px' } }, t('colCacheRead')),
+        h('th', { className: 'agy-num', style: { width: '64px' } }, t('colShare'))),
+      stats.models.map((row) => h('tr', { key: row.model },
+        h('td', { className: 'agy-strong' }, h('span', { className: 'agy-mail' }, row.model)),
+        h('td', { className: 'agy-num' }, String(row.counters.requests)),
+        h('td', { className: 'agy-num' }, tokenText(row.counters.input)),
+        h('td', { className: 'agy-num' }, tokenText(row.counters.output)),
+        h('td', { className: 'agy-num' }, tokenText(row.counters.cacheRead)),
+        h('td', { className: 'agy-num' },
+          h('span', { className: 'agy-bar' },
+            h('span', { className: 'agy-track' },
+              h('i', { style: { width: `${Math.round((row.counters.requests / maxRequests) * 100)}%` } })))))))),
+    t('byModelAside'))
+
+  const byAccount = stats.accounts.length === 0 ? null : card(t('byAccount'),
+    h('div', { className: 'agy-table-wrap' },
+      table(h('tr', null,
+        h('th', null, t('colAccount')),
+        h('th', { className: 'agy-num', style: { width: '46px' } }, t('colRequests')),
+        h('th', { className: 'agy-num', style: { width: '58px' } }, t('colToken')),
+        h('th', { className: 'agy-num', style: { width: '42px' } }, t('colFailed')),
+        h('th', { className: 'agy-num', style: { width: '42px' } }, t('colRateLimited')),
+        h('th', { className: 'agy-num', style: { width: '42px' } }, t('colRotations'))),
+      stats.accounts.map((row) => h('tr', { key: row.account },
+        h('td', { className: 'agy-strong' }, h('span', { className: 'agy-mail' }, row.account)),
+        h('td', { className: 'agy-num' }, String(row.totals.requests)),
+        h('td', { className: 'agy-num' }, tokenText(totalTokens(row.totals))),
+        h('td', { className: 'agy-num' }, String(row.totals.failed)),
+        h('td', { className: 'agy-num' }, String(row.totals.rateLimited)),
+        h('td', { className: 'agy-num' }, String(row.totals.rotations)))))),
+    t('byAccountAside'))
+
+  return h('div', { className: 'agy-root' },
+    rangePicker, summary, timing, byModel, byAccount,
+    hint(t('ledgerNote')))
+}
+
+// ─── Credentials tab ─────────────────────────────────────────────────────────
+
+function CredentialsTab(props: {
+  busy: boolean
+  onImport: (kind: 'json' | 'blob', sources: string[]) => void
+  onExportAll: () => void
+  t: T
+}): ReactNode {
+  const { t } = props
+  const [text, setText] = useState('')
+  const sources = useMemo(
+    () => text.split('\n').map((line) => line.trim()).filter((line) => line !== ''),
+    [text],
+  )
+  const suffix = sources.length > 1 ? ` (${sources.length})` : ''
+  return h('div', { className: 'agy-root' },
+    subhead(t('importTitle')),
+    hint(t('importHelp')),
+    h('textarea', {
+      className: 'agy-textarea',
+      style: { marginTop: '8px' },
+      value: text,
+      placeholder: t('importPlaceholder'),
+      onChange: (event: { target: { value: string } }) => { setText(event.target.value) },
+    }),
+    h('div', { className: 'agy-toolbar', style: { marginTop: '8px' } },
+      // Both labels go through the dictionary: hardcoded Chinese showed up in
+      // the English UI and bypassed the zh/en parity check.
+      button(`${t('importJson')}${suffix}`, () => { props.onImport('json', sources) },
+        { disabled: props.busy || sources.length === 0 }),
+      button(`${t('importBlob')}${suffix}`, () => { props.onImport('blob', sources) },
+        { disabled: props.busy || sources.length === 0 }),
+      h('span', { className: 'agy-grow' }),
+      button(t('exportAll'), () => { props.onExportAll() }, { disabled: props.busy })))
+}
+
+// ─── root ────────────────────────────────────────────────────────────────────
+
+/** The Settings section body. */
+export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+  const { rpc, t } = props
+  const [tab, setTab] = useState<TabId>('accounts')
+  const [accounts, setAccounts] = useState<AccountView[]>([])
+  const [models, setModels] = useState<ModelView[]>([])
+  const [modelAccount, setModelAccount] = useState<string | null>(null)
+  /** Model-discovery failure, shown on the Models tab only (see loadModels). */
+  const [modelError, setModelError] = useState<string | undefined>(undefined)
+  const [stats, setStats] = useState<StatsView | null>(null)
+  const [error, setError] = useState<string | undefined>(undefined)
+  /** A non-fatal outcome worth reporting (e.g. a partial credential import). */
+  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  /** Guards state updates after the section unmounts mid-request. */
+  const alive = useRef(true)
+
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+
+  const refresh = useCallback(async () => {
+    try {
+      const [accountResult, statsResult] = await Promise.all([
+        rpc.call('account.list', {}),
+        rpc.call('stats.get', {}),
+      ])
+      if (!alive.current) return
+      setAccounts(accountResult.accounts)
+      setStats(statsResult)
+      setError(undefined)
+    } catch (caught) {
+      if (!alive.current) return
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      if (alive.current) setLoaded(true)
+    }
+  }, [rpc])
+
+  /**
+   * The model list loads separately: it is the one call that may reach upstream
+   * (model discovery), so the page must render even when it is slow or fails.
+   *
+   * Its failure is kept out of the shared error banner. The list is loaded
+   * eagerly (the tab badge needs it), and "no account configured yet" is a
+   * perfectly ordinary startup state for an accounts-first page — putting that
+   * in the banner would greet every new user with an error.
+   */
+  const loadModels = useCallback(async () => {
+    try {
+      const result = await rpc.call('model.list', {})
+      if (!alive.current) return
+      setModels(result.models)
+      setModelAccount(result.account)
+      setModelError(undefined)
+    } catch (caught) {
+      if (!alive.current) return
+      setModelError(caught instanceof Error ? caught.message : String(caught))
+    }
+  }, [rpc])
+
+  useEffect(() => { void refresh() }, [refresh])
+  // Models load up front, not on first visit to the Models tab: the tab badge is
+  // rendered from this list, so lazy loading made the count appear only after
+  // the user had already been there, and left it stale after account changes.
+  // The call is not awaited by `refresh`, so a slow model discovery still does
+  // not hold up the accounts view.
+  useEffect(() => { void loadModels() }, [loadModels])
+  useEffect(() => {
+    // Retry when the Models tab is opened and the initial load failed (e.g. no
+    // account existed yet at mount, and one was added afterwards).
+    if (tab === 'models' && models.length === 0) void loadModels()
+  }, [tab, models.length, loadModels])
+
+  /** Run one mutating call, then reload; failures land in the banner. */
+  const act = useCallback(async (run: () => Promise<unknown>) => {
+    setBusy(true)
+    // A fresh action supersedes the previous outcome; a stale notice next to a
+    // new error would read as if both were current.
+    setNotice(undefined)
+    try {
+      await run()
+      await refresh()
+      setError(undefined)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      if (alive.current) setBusy(false)
+    }
+  }, [refresh])
+
+  /** Login must open the popup from the click, so the URL is fetched first. */
+  /**
+   * The active account's quota, for the Models tab.
+   *
+   * Only the active row carries quota — the host queries one account per list
+   * call — so this picks that row rather than inventing a second query.
+   */
+  const activeRow = accounts.find((entry) => entry.active)
+  const activeQuota = activeRow?.quota ?? null
+  const activeQuotaAccount = activeRow?.email ?? null
+
+  const startLogin = useCallback(() => {
+    setBusy(true)
+    rpc.call('auth.url', {}).then((result) => {
+      window.open(result.url, 'agy-oauth', 'width=520,height=680')
+      setError(undefined)
+    }).catch((caught: unknown) => {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    }).finally(() => {
+      if (alive.current) setBusy(false)
+    })
+  }, [rpc])
+
+  // The callback page posts this once the exchange succeeds.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent): void => {
+      if ((event.data as { type?: string } | null)?.type === 'agy_login_success') void refresh()
+    }
+    window.addEventListener('message', onMessage)
+    return () => { window.removeEventListener('message', onMessage) }
+  }, [refresh])
+
+  const copyText = useCallback(async (text: string) => {
+    await navigator.clipboard?.writeText(text)
+  }, [])
+
+  const handlers: AccountHandlers = useMemo(() => ({
+    t,
+    onActivate: (index) => { void act(() => rpc.call('account.activate', { index })) },
+    onVerify: (index) => { void act(() => rpc.call('account.verify', { index })) },
+    onDelete: (index) => {
+      if (!window.confirm(t('confirmDelete'))) return
+      void act(() => rpc.call('account.delete', { index }))
+    },
+    onTest: (index) => {
+      // Test needs a model id; discover the first visible one rather than
+      // guessing, and report clearly when there is none.
+      void act(async () => {
+        const listed = models.length > 0 ? models : (await rpc.call('model.list', {})).models
+        const target = listed.find((entry) => !entry.disabled)?.id
+        if (target === undefined) throw new Error(t('noModelToTest'))
+        // Carry the clicked row's index: without it the host tested whichever
+        // account affinity picked and reported that result here.
+        await rpc.call('account.test', { model: target, index })
+      })
+    },
+    onExport: (index) => {
+      void act(async () => {
+        const result = await rpc.call('account.export', { index })
+        if (result.blob === undefined) throw new Error(result.error ?? t('exportFailed'))
+        await copyText(result.blob)
+      })
+    },
+    onRegenerateFingerprint: (index) => {
+      void act(() => rpc.call('account.fingerprint', { index, action: 'regenerate' }))
+    },
+    onSetProxy: (index, proxy) => { void act(() => rpc.call('account.proxy', { index, proxy })) },
+    onTestProxy: (index) => { void act(() => rpc.call('account.proxyTest', { index })) },
+  }), [act, copyText, models, rpc, t])
+
+  const tabButton = (id: TabId, label: string, count?: number): ReactNode =>
+    h('button', {
+      key: id,
+      type: 'button',
+      className: 'agy-tab',
+      'data-active': tab === id,
+      onClick: () => { setTab(id) },
+    }, label, count === undefined ? null : h('span', { className: 'agy-count' }, String(count)))
+
+  const body = tab === 'accounts'
+    ? h(AccountsTab, { accounts, busy, handlers, t })
+    : tab === 'models'
+      ? modelError === undefined
+        ? h(ModelsTab, {
+          models,
+          account: modelAccount,
+          // The quota panel answers the same question as the visibility list
+          // ("which models can I use, how much is left"), so it lives here. It is
+          // read from the active account's row, which is the only one the host
+          // queries (see management.ts listAccounts).
+          quota: activeQuota,
+          quotaAccount: activeQuotaAccount,
+          busy,
+          t,
+          onToggle: (modelId: string, disabled: boolean) => {
+            void act(async () => {
+              await rpc.call('model.setDisabled', { modelId, disabled })
+              // Reload from the host so the switch mirrors what the adapter will
+              // actually filter, rather than what this click hoped it would.
+              await loadModels()
+            })
+          },
+        })
+        : h('div', { className: 'agy-root' },
+          h('div', { className: 'agy-error' }, modelError),
+          button(t('refresh'), () => { void loadModels() }, { size: 'sm' }))
+      : tab === 'usage'
+        ? h(UsageTab, { stats, t })
+        : h(CredentialsTab, {
+          busy,
+          t,
+          onImport: (kind: 'json' | 'blob', sources: string[]) => {
+            void act(async () => {
+              const result = await rpc.call('account.import', { kind, sources })
+              // A batch with failures is a partial success, so it must not be
+              // reported through the error path — and it must not be silent
+              // either, which is what discarding this result used to be.
+              if (result.errors.length > 0) {
+                setNotice(`${t('importPartial', {
+                  imported: result.imported,
+                  replaced: result.replaced,
+                  failed: result.errors.length,
+                })}\n${result.errors.join('\n')}`)
+              } else {
+                setNotice(t('importResult', {
+                  imported: result.imported,
+                  replaced: result.replaced,
+                }))
+              }
+            })
+          },
+          onExportAll: () => {
+            void act(async () => {
+              const { blobs } = await rpc.call('account.exportAll', {})
+              await copyText(blobs.map((entry) => entry.blob).join('\n'))
+            })
+          },
+        })
+
+  return h('div', { className: 'agy-root' },
+    h('div', { className: 'agy-head' },
+      h('div', null,
+        h('div', { className: 'agy-title' }, 'Antigravity'),
+        h('div', { className: 'agy-sub' }, t('subtitle'))),
+      h('div', { className: 'agy-toolbar' },
+        button(t('refresh'), () => { void refresh() }, { size: 'sm', disabled: busy }),
+        button(t('login'), startLogin, { size: 'sm', variant: 'primary', disabled: busy }))),
+    h('div', { className: 'agy-tabs' },
+      tabButton('accounts', t('tabAccounts'), accounts.length),
+      tabButton('models', t('tabModels'), models.length > 0 ? models.length : undefined),
+      tabButton('usage', t('tabUsage')),
+      tabButton('credentials', t('tabCredentials'))),
+    error === undefined ? null : h('div', { className: 'agy-error' }, error),
+    notice === undefined ? null : h('div', { className: 'agy-notice' }, notice),
+    body,
+    loaded || error !== undefined ? null : h('div', { className: 'agy-empty' }, t('loading')))
+}
+
+/**
+ * Register the Antigravity Settings section while this client plugin is active.
  * @param ctx - Client Cordis context.
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-    name: 'settings.plugins.tab',
+  ctx.effect(() => installAgyStyles(), 'dsh-agy: styles')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-agy: dictionaries')
+  const connection = ctx.get('connection') as ConnectionLike | undefined
+  if (connection === undefined) {
+    ctx.logger.warn('[dsh-agy] connection service unavailable — Antigravity settings not registered')
+    return
+  }
+  const rpc = createRpc(connection)
+  // Bound once from the host's locale service: the slot content is re-created on
+  // a language switch (the locale plugin bumps the ledger), so `t` stays current.
+  const t = ctx.locale.bind(NS)
+  ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
     id: 'agy',
-    order: 10,
-    label: 'Antigravity',
-  }, AgySettingsLink)), 'dsh-agy: Settings tab')
+    order: 30,
+    locale: NS,
+    label: () => t('title'),
+  }, () => h(AgySettings, { rpc, t }))), 'dsh-agy: Settings section')
 }

@@ -83,11 +83,34 @@ export interface AgyAdapterOptions {
   markSuccess?(session: AgyAccountSession): Promise<void>
   /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
   resolveAttachments?(): AgyAttachmentStore | undefined
+  /**
+   * Hidden-model lookup. Optional so an adapter stays constructible without the
+   * settings layer (tests, standalone use); absent means nothing is hidden.
+   */
+  modelVisibility?: { disabledFor(provider: string): ReadonlySet<string> }
+  /**
+   * Record one request's usage. Optional by design: the CLI must be able to
+   * build an adapter without the stats ledger, and a statistics failure must
+   * never break a generation.
+   */
+  recordUsage?(record: {
+    account?: string
+    model?: string
+    usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+    ok: boolean
+    latencyMs?: number
+    ttftMs?: number
+  }): void
 }
 
 const UPSTREAM_ERROR_CODE = 'UPSTREAM'
 /** First-class DSH retryable code: the default retry policy honors SERVER (5xx), not UPSTREAM. */
 const SERVER_ERROR_CODE = 'SERVER'
+
+/** Stable ledger key for an account: email when present, else the generated id. */
+function ledgerAccountKey(session: AgyAccountSession): string | undefined {
+  return session.account.email ?? session.account.id
+}
 
 /** Build the impersonation headers for one request (per-request randomization applied by the shell). */
 export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
@@ -113,7 +136,27 @@ export class AgyAdapter extends LlmAdapter {
     return { id: AGY_PROVIDER, name: 'Antigravity (agy)' }
   }
 
+  /**
+   * The catalog as DSH's model selector sees it: discovered models minus the
+   * user's hidden set. Filtering here is what makes "turn a model off" hide it
+   * from the picker — the selector reads this, and DSH itself is untouched.
+   */
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    const all = await this.listAllModels()
+    const hidden = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
+    if (hidden === undefined || hidden.size === 0) return all
+    return all.filter((model) => !hidden.has(model.id))
+  }
+
+  /**
+   * The complete catalog, ignoring the user's hidden set.
+   *
+   * The settings page lists models through this rather than `listModels`: if it
+   * read the filtered list, a hidden model would vanish from the page along
+   * with the switch that hides it, leaving no way to turn it back on without
+   * hand-editing the file.
+   */
+  async listAllModels(): Promise<readonly LlmModelInfo[]> {
     try {
       const session = await this.options.getSession()
       // Model discovery is account-scoped: route it through the account's proxy
@@ -239,6 +282,8 @@ export class AgyAdapter extends LlmAdapter {
       ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
     })
     const headers = buildRequestHeaders(session)
+    /** Wall-clock origin for this attempt's latency figures. */
+    const startedAt = Date.now()
 
     let response: Response
     try {
@@ -261,6 +306,9 @@ export class AgyAdapter extends LlmAdapter {
     } catch (error) {
       const classified = classifyFetchError(error, { proxyUrl: session.account.proxy })
       await this.options.reportFailure(classified.kind, session)
+      // A transport failure consumed no tokens, but it is a real attempt
+      // against this account's quota — record the request, not the usage.
+      this.recordUsage(session, options.model, { ok: false }, startedAt)
       throw new LlmError(classified.message ?? 'agy fetch failed', 'TRANSPORT', { cause: error })
     }
 
@@ -274,6 +322,10 @@ export class AgyAdapter extends LlmAdapter {
         resetTime: classified.resetTime,
         model: options.model,
       })
+      this.recordUsage(session, options.model, {
+        ok: false,
+        rateLimited: classified.kind === 'rate-limit',
+      }, startedAt)
       if (classified.kind === 'rate-limit') {
         // soft/rate limits are retryable by the harness (RATE_LIMIT + delay);
         // daily quota exhaustion is terminal (QUOTA, 24h cooldown already set).
@@ -323,18 +375,42 @@ export class AgyAdapter extends LlmAdapter {
     }
 
     try {
-      yield* parseAgySse(response.body, {
+      // The usage chunk is the ledger's only token source, so the stream is
+      // consumed here rather than piped: every chunk still reaches DSH
+      // unchanged, but the terminal `usage` chunk is also folded into this
+      // account's record. Upstream repeats `usageMetadata` on every SSE event
+      // (cumulative); parse.ts already reduces that to one final chunk.
+      let usage: { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined
+      let ttftMs: number | undefined
+      for await (const chunk of parseAgySse(response.body, {
         signal: options.signal,
         onToolSignature: (toolCallId, signature) => {
           setThoughtSignature(toolCallId, signature)
         },
-      })
+      })) {
+        if (chunk.type === 'usage') {
+          usage = {
+            input: chunk.usage.inputTokens,
+            output: chunk.usage.outputTokens,
+            cacheRead: chunk.usage.cacheReadTokens ?? 0,
+            cacheWrite: chunk.usage.cacheWriteTokens ?? 0,
+          }
+        } else if (ttftMs === undefined && (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta')) {
+          // First model-authored output: the honest end of "time to first token".
+          ttftMs = Date.now() - startedAt
+        }
+        yield chunk
+      }
       await this.options.markSuccess?.(session)
+      this.recordUsage(session, options.model, { ok: true, usage, ttftMs }, startedAt)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         throw new LlmError('agy stream aborted', 'ABORTED', { cause: error })
       }
       await this.options.reportFailure('network-error', session)
+      // A stream that died mid-body may already have delivered billable
+      // content, so the attempt is recorded even though no usage chunk arrived.
+      this.recordUsage(session, options.model, { ok: false }, startedAt)
       // Deliberately UPSTREAM (terminal), not TRANSPORT: content may already
       // have been emitted, and DSH's retry policy honours TRANSPORT, so retrying
       // here would replay a partially-delivered turn. The account-level report
@@ -345,6 +421,40 @@ export class AgyAdapter extends LlmAdapter {
         UPSTREAM_ERROR_CODE,
         { cause: error },
       )
+    }
+  }
+
+  /**
+   * Fold one attempt into the usage ledger.
+   *
+   * Statistics are diagnostics, never load-bearing: a ledger failure must not
+   * fail a generation, so this swallows its own errors.
+   */
+  private recordUsage(
+    session: AgyAccountSession,
+    model: string | undefined,
+    result: {
+      ok: boolean
+      rateLimited?: boolean
+      usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+      ttftMs?: number
+    },
+    startedAt: number,
+  ): void {
+    const record = this.options.recordUsage
+    if (record === undefined) return
+    try {
+      record({
+        ...(ledgerAccountKey(session) === undefined ? {} : { account: ledgerAccountKey(session) }),
+        ...(model === undefined ? {} : { model }),
+        ok: result.ok,
+        ...(result.rateLimited === true ? { rateLimited: true } : {}),
+        ...(result.usage === undefined ? {} : { usage: result.usage }),
+        ...(result.ttftMs === undefined ? {} : { ttftMs: result.ttftMs }),
+        latencyMs: Math.max(0, Date.now() - startedAt),
+      })
+    } catch {
+      // Swallowed by design.
     }
   }
 }

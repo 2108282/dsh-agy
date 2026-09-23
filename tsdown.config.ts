@@ -19,7 +19,10 @@ export default defineConfig([
     target: 'es2024',
     dts: false,
     clean: false,
-    external: ['react'],
+    // `react` and the DSH platform modules are shared into the frozen module
+    // table by the shell (packages/client/web/src/platform.ts PLATFORM_MODULES):
+    // the bundle must require them, never inline a second copy.
+    external: ['react', '@deepseek-ai/dsh-client-ui-primitives'],
     copy: [{ from: 'client.d.ts', rename: 'client.d.ts' }],
     outputOptions: {
       entryFileNames: 'client.js',

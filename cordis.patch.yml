@@ -2,8 +2,10 @@
 
 # Install with: dsh plugin --profile <name> add dsh-agy
 # The loader inserts these rows; the main plugin registers the agy LLM adapter
-# routes, the web entry registers the /agy UI once ctx.webServer activates
-# (it stays pending in profiles without a web server).
+# and the web entry registers the management RPC (`/api/agy`) plus the OAuth
+# callback once ctx.webServer activates (it stays pending in profiles without a
+# web server). The management UI itself is the browser half (`dsh-agy/client`),
+# an inline Settings section — there is no standalone dashboard route.
 
 - insert:
     - id: dsh-agy
