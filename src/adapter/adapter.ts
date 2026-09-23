@@ -24,7 +24,6 @@ import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
-import { VERIFICATION_COOLDOWN_MS } from '../runtime/rotation.ts'
 import {
   classifyFetchError,
   classifyHttpError,
@@ -457,12 +456,18 @@ export class AgyAdapter extends LlmAdapter {
         // parked for a timed window, not disabled, and the pool moves on. The
         // appeal link goes in the message because a message is the only channel
         // DSH surfaces to the user.
+        //
+        // Deliberately NO `providerRetryAfterMs`: the park IS the cooldown, and a
+        // delay above DSH's `maxDelayMs` makes its `normal` retry mode give up
+        // outright (`llm-retry`: `providerRetryAfterMs > maxDelayMs` -> `next()`),
+        // turning a recoverable challenge into a failed turn. With no delay DSH
+        // backs off locally and retries, and that retry lands on another account
+        // because this one is already parked.
         const appeal = classified.verificationUrl ? ` Verify at: ${classified.verificationUrl}` : ''
         throw new LlmError(
           `agy account needs verification (${response.status}): ${classified.message ?? ''}${appeal}`,
           'RATE_LIMIT',
           {
-            providerRetryAfterMs: VERIFICATION_COOLDOWN_MS,
             requestId: ProviderRequestId(generateAntigravityRequestId()),
           },
         )

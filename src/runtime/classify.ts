@@ -285,14 +285,6 @@ const TRANSPORT_CAUSE_CODES = new Set([
 ])
 
 /**
- * Strip proxy credentials from text so `user:pass` never reaches logs or the
- * GUI. Lives in the shared leaf module (`src/redact.ts`) so `proxy.ts` can use
- * the same implementation without an import cycle; re-exported here because
- * this module is where the sanitizing callers already look for it.
- */
-export { redactCredentials }
-
-/**
  * Placeholder messages undici/Node emit while the real reason sits deeper in
  * the cause chain; they must not shadow a usable code further down.
  */

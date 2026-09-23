@@ -232,7 +232,6 @@ export type FailureKind =
   | 'transient'
   | 'proxy-unreachable'
 
-/** Rotation state machine decision for one failed attempt. */
 /**
  * Rotation state machine decision for one failed attempt.
  *

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgySessionManager, impersonationHeadersFor, SESSION_AFFINITY_WINDOW_MS } from '../src/session.ts'
 import { MAX_IN_FLIGHT_PER_ACCOUNT } from '../src/runtime/rotation.ts'
+import { _setFingerprintDataForTest } from '../src/runtime/fingerprint.ts'
+import { _clearVersionCacheForTest } from '../src/runtime/version.ts'
 import { InMemoryAccountStore } from '../src/store/accounts.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 import type { ManagedAccount } from '../src/types.ts'
@@ -170,7 +172,6 @@ describe('AgySessionManager', () => {
     expect(after.accounts[0]!.fingerprintHistory).toHaveLength(1)
   })
 })
-
 
   it('heals a missing projectId at request time and persists it', async () => {
     // token endpoint + loadCodeAssist discovery
@@ -1034,14 +1035,16 @@ describe('verifyAccount', () => {
 })
 
 describe('impersonationHeadersFor', () => {
-  it('randomizes when no fingerprint exists and stays stable with one', () => {
+  it('is deterministic without a fingerprint, and uses the snapshot with one', () => {
     const base = account()
     const first = impersonationHeadersFor(base)
     const second = impersonationHeadersFor(base)
     expect(first['User-Agent']).toMatch(/^antigravity\//)
-    // no fingerprint → each call randomizes (no stability promise)
-    expect(impersonationHeadersFor(base)).toBeDefined()
-    void second
+    // No fingerprint yet: one FIXED identity, identical on every call. This used
+    // to randomize per request, which is the anomaly the stable posture removes —
+    // a device that presents a different platform/SDK-client on each call is not
+    // something an official client does.
+    expect(second).toEqual(first)
 
     const fp = { deviceId: 'd', sessionToken: 's', userAgent: 'antigravity/1.0.0 windows/amd64', apiClient: 'c', clientMetadata: { ideType: 'ANTIGRAVITY' }, createdAt: 0 }
     const stable = impersonationHeadersFor({ ...base, fingerprint: fp })
@@ -1301,4 +1304,65 @@ describe('proxyless transport failover (issue #29)', () => {
     expect(after.accounts[0]!.coolingDownUntil).toBeUndefined()
     expect(after.accounts[0]!.cooldownReason).toBeUndefined()
   })
+})
+
+/**
+ * Kept last on purpose: it clears the version feed caches, and the 750 ms bounded
+ * resolve its hang forces would otherwise be paid again by every later
+ * rate-limit test in this file.
+ */
+describe('fingerprint version freshness', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('never freezes a new fingerprint onto a random pool version', async () => {
+    // Whatever version is written here is the account's User-Agent for the
+    // lifetime of that fingerprint. The only way this path reaches
+    // `generateFingerprint` without a version is the bounded resolve giving up
+    // (750 ms) — the slow-or-blocked-feed cold start — and that function's own
+    // default then picks a RANDOM `versionPool` entry, which could freeze an
+    // account onto a two-minor-old client. The pool is forced to a single stale
+    // entry and the feed HANGS, so the 750 ms race is what actually decides and a
+    // regression cannot pass by luck.
+    _clearVersionCacheForTest()
+    _setFingerprintDataForTest({
+      versionPool: ['1.22.2'],
+      platforms: ['darwin/arm64'],
+      sdkClients: ['google-cloud-sdk vscode/1.96.0'],
+      ideTypes: ['ANTIGRAVITY'],
+    })
+    try {
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes('oauth2.googleapis.com/token')) {
+          return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+        }
+        // Accept and never answer. Rejecting fast would NOT reproduce the case: the
+        // public resolver applies the pinned fallback itself, so a fast failure
+        // never reaches `generateFingerprint` without a version.
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+        })
+      }))
+      const store = new InMemoryAccountStore(storage([account('a@x')]))
+      const sessions = new AgySessionManager({ store })
+      const session = await sessions.getSession('gemini-3-flash')
+
+      // Strip the identity that first use just created, so the assertion exercises
+      // the rate-limit creation path. Leaving it in place made this test vacuous:
+      // the first-use path (`getSession`) already passes `currentAgyVersion()`
+      // explicitly, and with a fingerprint present `consecutive` is 1, so nothing
+      // was generated here at all and the random-pool default was never reached.
+      await store.mutate((draft) => {
+        delete draft.accounts[0]!.fingerprint
+        delete draft.accounts[0]!.fingerprintHistory
+      })
+      await sessions.reportFailure('rate-limit', session!, { model: 'gemini-3-flash' })
+
+      const fp = (await store.load()).accounts[0]!.fingerprint!
+      expect(fp.userAgent).not.toContain('1.22.2')
+      expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ darwin\/arm64$/)
+    } finally {
+      _setFingerprintDataForTest(undefined)
+      vi.unstubAllGlobals()
+    }
+  }, 5_000)
 })

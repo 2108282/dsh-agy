@@ -1161,6 +1161,32 @@ describe('AgyAdapter', () => {
     expect(failures).toEqual([])
   })
 
+  it('sends exactly one client User-Agent on the wire, for a real request', async () => {
+    // The `buildRequestHeaders` test above asserts the object it returns; this one
+    // asserts what the dispatch actually hands to `fetch`. That distinction is the
+    // whole reason the original defect survived: the duplicate header was produced
+    // by a spread inside `buildRequestHeaders`, but a re-introduced merge at the
+    // fetch call site would satisfy an object-level test and still announce this
+    // tool on every generation request.
+    const seen: Array<string | null> = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers as HeadersInit).get('user-agent'))
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toBe(session().impersonation['User-Agent'])
+    expect(seen[0]).not.toContain('deepseek-harness')
+    // The comma-joined pair is the exact shape the old spread produced.
+    expect(seen[0]).not.toContain(',')
+  })
+
   it('does not resend an ordinary 400 under a bumped session id', async () => {
     const bodies: unknown[] = []
     vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
@@ -1425,9 +1451,20 @@ describe('AgyAdapter', () => {
 
     // INVALID_CREDENTIAL would tell the user their login is dead and disable the
     // account; this signal means "verify, then come back".
-    await expect(async () => {
+    let thrown: { code?: string; failure?: { providerRetryAfterMs?: number } } | undefined
+    try {
       for await (const _ of adapter.stream(generateOptions())) void _
-    }).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    } catch (error) {
+      thrown = error as typeof thrown
+    }
+
+    expect(thrown?.code).toBe('RATE_LIMIT')
+    // No delay may be fed to the harness. The account park IS the cooldown, and
+    // `llm-retry` gives up outright when `providerRetryAfterMs > maxDelayMs`
+    // (`mode: 'normal'` -> `next()`), so the 15-minute value that used to be set
+    // here turned a recoverable challenge into a failed turn instead of letting
+    // DSH retry onto another account. Pinned because re-adding it looks helpful.
+    expect(thrown?.failure?.providerRetryAfterMs).toBeUndefined()
 
     expect(seen).toEqual([{ kind: 'verification-required', url: 'https://accounts.google.com/verify?t=abc' }])
   })

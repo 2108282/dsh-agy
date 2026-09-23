@@ -4,8 +4,11 @@
  *
  * - DSH_AGY_DISABLE=1: global kill switch, the plugin registers nothing.
  * - DSH_AGY_FINGERPRINT_MODE=stable: one identity per account, never
- *   regenerated, deterministic fallback headers (OMP-style fixed-client
- *   posture). Default `dynamic` keeps the upstream per-request randomization.
+ *   regenerated. `dynamic` (the default) regenerates the identity after
+ *   repeated rate-limits — that is now the flag's ONLY effect. It no longer
+ *   selects per-request header randomization: an account with no fingerprint yet
+ *   presents one fixed identity either way, because re-rolling a platform per
+ *   request is the anomaly that posture was meant to remove.
  *
  * The BYO OAuth app escape hatch (AGY_CLIENT_ID / AGY_CLIENT_SECRET) lives in
  * oauth/constants.ts (resolveAgyClientCredentials) — oauth/ is a dependency
@@ -27,10 +30,10 @@ export function isAgyDisabled(): boolean {
 }
 
 /**
- * Fingerprint strategy: `dynamic` (default, upstream behavior: per-request
- * header randomization + regeneration on repeated rate-limits) or `stable`
- * (one identity per account, never regenerated, deterministic fallback
- * headers — mirrors OMP's fixed-client posture).
+ * Fingerprint strategy: `dynamic` (default, identity regenerated after repeated
+ * rate-limits) or `stable` (one identity per account, never regenerated —
+ * mirrors OMP's fixed-client posture). Only the regeneration step differs; both
+ * modes present a single fixed identity when no fingerprint exists yet.
  */
 export function fingerprintMode(): FingerprintMode {
   return process.env.DSH_AGY_FINGERPRINT_MODE === 'stable' ? 'stable' : 'dynamic'

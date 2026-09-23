@@ -14,6 +14,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { currentAgyVersion } from '../oauth/constants.ts'
 import type { ClientMetadata, Fingerprint, FingerprintVersion } from '../types.ts'
 import fingerprintData from './fingerprint-data.json'
 
@@ -57,6 +58,17 @@ export function getFingerprintData(): FingerprintData {
 
 function randomFrom<T>(arr: readonly T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]!
+}
+
+/**
+ * Replace the pool data for one test, and restore the real source with `undefined`.
+ *
+ * `getFingerprintData()` caches its result in-process, so a test cannot exercise a
+ * user override file (`$DSH_HOME/agy-fingerprint-data.json`) without a way to drop
+ * that cache.
+ */
+export function _setFingerprintDataForTest(data: FingerprintData | undefined): void {
+  cachedData = data ?? null
 }
 
 /** Generate a randomized device fingerprint representing one apparent device. */
@@ -112,7 +124,10 @@ export function getStableHeaders(
 ): { 'User-Agent': string; 'X-Goog-Api-Client': string; 'Client-Metadata': string } {
   const platform = data.platforms[0] ?? 'windows/amd64'
   return {
-    'User-Agent': `antigravity/${version || '1.18.3'} ${platform}`,
+    // `currentAgyVersion()`, never a literal: the resolved live version or the
+    // pinned fallback. A frozen string here would outlive the release it names
+    // (that staleness is the detectable signal this module exists to avoid).
+    'User-Agent': `antigravity/${version || currentAgyVersion()} ${platform}`,
     'X-Goog-Api-Client': data.sdkClients[0] ?? '',
     'Client-Metadata': JSON.stringify({
       ideType: data.ideTypes[0] ?? 'ANTIGRAVITY',

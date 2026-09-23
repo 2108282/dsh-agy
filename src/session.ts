@@ -718,7 +718,15 @@ export class AgySessionManager {
     this.failureCounts.set(key, consecutive)
     let nextIndexToRotate: number | null = null
     const fpCachedVersion = kind === 'rate-limit' ? peekCachedAntigravityVersion() : null
-    const fpResolvedVersion = (kind === 'rate-limit' && !fpCachedVersion) ? await resolveAntigravityVersionBounded() : (fpCachedVersion ?? '1.18.3')
+    // The version a newly generated fingerprint advertises. Cache first (no I/O),
+    // then a bounded live resolve, then `currentAgyVersion()` (the resolved version
+    // or the pinned fallback) — and never `generateFingerprint`'s own default,
+    // which picks a RANDOM entry from `versionPool`: whatever is chosen here is
+    // frozen into the account's identity for its lifetime, so a cold start with an
+    // unreachable feed could otherwise advertise a two-minor-old client forever.
+    const fpResolvedVersion = kind === 'rate-limit'
+      ? (fpCachedVersion ?? (await resolveAntigravityVersionBounded()) ?? currentAgyVersion())
+      : currentAgyVersion()
 
     await this.store.mutate((storage) => {
       const account = storage.accounts.find((a) => this.accountKey(a) === key)
