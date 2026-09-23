@@ -759,6 +759,21 @@ export class AgySessionManager {
       // UA versions come from the version resolver (bounded, cached 6h) so
       // fingerprints never pin a stale Antigravity client version. The `stable`
       // risk mode pins one identity per account: create once, never regenerate.
+      //
+      // KNOWN DEFECT (recorded, deliberately not changed): this block is gated
+      // on `kind === 'rate-limit'`, so the identity is rebuilt exactly when
+      // quota runs out — and NEVER on `verification-required`, i.e. not when
+      // upstream actually gates the account. The coupling is inverted with
+      // respect to intent. Two further reasons the rebuild is weaker than it
+      // looks: `consecutive` is counted per accountKey while the failing account
+      // has just been rotated away (so reaching 2 requires it to be picked
+      // again first), and of the five `Fingerprint` fields only `userAgent` and
+      // `apiClient` ever reach a request header (`buildRequestHeaders`;
+      // `deviceId`/`sessionToken` are never sent, `clientMetadata` only rides
+      // the control-plane calls). So a "new identity" re-rolls two header
+      // values, one of them a UA shape no artifact confirms. Fixing the gate
+      // alone would not make the mechanism load-bearing — decide what identity
+      // is actually transmitted before widening it.
       if (kind === 'rate-limit' && info?.rateLimitCategory !== 'soft_rate_limit') {
         if (!account.fingerprint) {
           account.fingerprint = generateFingerprint(undefined, fpResolvedVersion)
