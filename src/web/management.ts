@@ -19,7 +19,7 @@ import { maskProxyUrl } from '../store/accounts.ts'
 import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs, withTotalTimeout } from '../proxy.ts'
 import { AGY_PROVIDER } from '../adapter/models.ts'
 import type { DiscoveredModelEntry } from '../adapter/models.ts'
-import { foldWindow } from '../stats.ts'
+import { foldWindowBreakdown } from '../stats.ts'
 import type { UsageCounters, UsageSource } from '../stats.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { AgySessionManager } from '../session.ts'
@@ -33,6 +33,7 @@ import type {
   AgyRpcMethod,
   ModelView,
   QuotaRow,
+  RangeBreakdown,
   StatsView,
 } from '../rpc-contract.ts'
 
@@ -261,16 +262,6 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
   const statsView = (): StatsView => {
     const doc = stats.snapshot()
     const now = Date.now()
-    const accounts = Object.entries(doc.accounts)
-      .map(([account, usage]) => ({
-        account,
-        totals: usage.totals,
-        sources: usage.sources,
-        lastUsedAt: usage.lastUsedAt,
-      }))
-      .sort((a, b) => a.totals.requests === b.totals.requests
-        ? b.lastUsedAt - a.lastUsedAt
-        : b.totals.requests - a.totals.requests)
 
     // Per-model totals across accounts: sum the same model id from every account.
     const byModel = new Map<string, UsageCounters>()
@@ -286,18 +277,29 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         }
       }
     }
-    const models = [...byModel.entries()]
+    const allModels = [...byModel.entries()]
       .map(([model, counters]) => ({ model, counters }))
       .sort((a, b) => b.counters.requests - a.counters.requests)
 
+    // Each range carries its OWN breakdown, so the tables follow the range
+    // selection instead of showing all-time rows beneath range-scoped headline
+    // figures (30 requests above a 164-request row, on one screen). The
+    // all-time range reads the account maps directly, which hold every request
+    // ever recorded rather than only the retained day window.
+    const allAccounts = Object.entries(doc.accounts)
+      .map(([account, usage]) => ({ account, counters: usage.totals }))
+      .sort((a, b) => b.counters.requests - a.counters.requests)
+    const breakdown = (days: number): RangeBreakdown => {
+      const { totals, models, accounts } = foldWindowBreakdown(doc, days, now)
+      return { counters: totals, models, accounts }
+    }
+
     return {
       since: doc.totals.requests > 0 ? doc.since : null,
-      all: doc.totals,
-      today: foldWindow(doc, 1, now),
-      week: foldWindow(doc, 7, now),
-      month: foldWindow(doc, 30, now),
-      accounts,
-      models,
+      all: { counters: doc.totals, models: allModels, accounts: allAccounts },
+      today: breakdown(1),
+      week: breakdown(7),
+      month: breakdown(30),
     }
   }
 

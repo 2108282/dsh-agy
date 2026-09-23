@@ -701,20 +701,53 @@ function numHeader(index: number, label: string): ReactNode {
   return h('th', { className: 'agy-num', style: { width: NUM_COL_WIDTHS[index] } }, label)
 }
 
+/**
+ * The Token composition bar rows: cache read, uncached input, output.
+ *
+ * Ordered LARGEST FIRST by the caller. A plain-prefix cache makes the cache-read
+ * share dominate (it re-reads the whole prefix every turn), which is correct but
+ * reads as impossible without a breakdown — hence this bar, which shows the
+ * proportion rather than restating the numbers.
+ */
+function tokenComposition(counters: UsageCounters): ReactNode {
+  const total = totalTokens(counters)
+  const rows: Array<{ key: string, value: number, tone: string }> = [
+    { key: 'kpiCacheRead', value: counters.cacheRead, tone: 'var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6)' },
+    { key: 'kpiInput', value: counters.input, tone: 'var(--dsw-static-neutral-bluish-700, #8b8f96)' },
+    { key: 'kpiOutput', value: counters.output, tone: 'var(--dsw-alias-state-success-primary, #22c55e)' },
+  ]
+  return h('div', { className: 'agy-compose' }, ...rows.map((row) => {
+    const share = total > 0 ? (row.value / total) * 100 : 0
+    return h('div', { className: 'agy-compose-row', key: row.key },
+      h('span', { className: 'agy-compose-k' }, row.key),
+      h('span', { className: 'agy-compose-track' },
+        h('i', { style: { width: `${Math.max(share, row.value > 0 ? 1 : 0)}%`, background: row.tone } })),
+      h('span', { className: 'agy-compose-v' }, tokenText(row.value)),
+      h('span', { className: 'agy-compose-p' }, `${share.toFixed(1)}%`))
+  }))
+}
+
 function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
   const { t } = props
   const [range, setRange] = useState<RangeId>('today')
   const stats = props.stats
   if (stats === null) return h('div', { className: 'agy-empty' }, t('loading'))
-  if (stats.all.requests === 0) return card(t('usageTitle'), h('div', { className: 'agy-empty' }, t('emptyUsage')))
+  if (stats.all.counters.requests === 0) {
+    return card(t('usageTitle'), h('div', { className: 'agy-empty' }, t('emptyUsage')))
+  }
 
-  const counters = range === 'today'
+  // ONE selection drives the whole page: the headline strip AND both breakdown
+  // tables read the same range. Previously the tables read all-time maps, so
+  // "Today" showed 30 requests above a 164-request row.
+  const view = range === 'today'
     ? stats.today
     : range === 'week'
       ? stats.week
       : range === 'month' ? stats.month : stats.all
+  const counters = view.counters
   const hit = cacheHitPercent(counters)
-  const totalRequests = Math.max(1, stats.models.reduce((sum, row) => sum + row.counters.requests, 0))
+  const total = totalTokens(counters)
+  const totalRequests = Math.max(1, view.models.reduce((sum, row) => sum + row.counters.requests, 0))
 
   // The primitives catalog names `Pill` for view switchers and filters: it owns
   // the active/inactive fill pair, so no local chip skin is needed.
@@ -729,21 +762,27 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
       ? null
       : h('span', { className: 'agy-aside' }, t('since', { date: new Date(stats.since).toLocaleDateString() })))
 
-  // The card states no unit aside, and the by-model card no longer recaps its
-  // own columns: both duplicated the column headers directly beneath them (a
-  // "unit: token" label above the token columns, and an "input / output / cache
-  // read" recap above those same three headers), so the reader parsed the same
-  // words twice per card.
-  const summary = card(t('usageTitle'), metrics([
-    metric(t('colRequests'), String(counters.requests), t('kpiRequestsDetail', {
-      succeeded: counters.succeeded,
-      failed: counters.failed,
-    })),
-    metric(t('colInput'), counters.input, t('kpiInputDetail')),
-    metric(t('colOutput'), counters.output, t('kpiOutputDetail')),
-    metric(t('colCacheRead'), counters.cacheRead,
-      hit === null ? t('kpiNoBilledInput') : t('kpiCacheHit', { percent: hit })),
-  ]))
+  /**
+   * The headline: total Token FIRST, then the three buckets that add up to it.
+   *
+   * The anchor is what makes the rest readable. Without it a reader sees "cache
+   * read 25.8M" beside "input 11.1M" and has no way to know both are parts of
+   * one quantity — and a cache read LARGER than the input looks like a bug
+   * rather than the expected shape of a prefix cache. With the total stated, the
+   * three figures are visibly a partition (their sum is checked by eye).
+   */
+  const summary = card(t('usageTitle'), h('div', null,
+    metrics([
+      metric(t('kpiTotalTokens'), total, t('kpiTotalDetail', {
+        requests: counters.requests,
+        failed: counters.failed,
+      })),
+      metric(t('kpiInput'), counters.input, t('kpiInputDetail')),
+      metric(t('kpiCacheRead'), counters.cacheRead,
+        hit === null ? t('kpiNoBilledInput') : t('kpiCacheHit', { percent: hit })),
+      metric(t('kpiOutput'), counters.output, t('kpiOutputDetail')),
+    ]),
+    tokenComposition(counters)))
 
   const timing = card(t('fieldLatency'), defs([
     [t('fieldCacheWrite'), tokenText(counters.cacheWrite)],
@@ -752,28 +791,40 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     [t('labelTtft'), formatDuration(average(counters.ttftMs, counters.ttftN))],
   ]))
 
-  const byModel = stats.models.length === 0 ? null : card(t('byModel'),
+  // Column headers carry the semantics that used to sit in a card-head aside:
+  // "input" is the UNCACHED portion, so it is labelled as such rather than
+  // explained in prose the reader has to find.
+  const byModel = view.models.length === 0 ? null : card(
+    t('byModel'),
     h('div', { className: 'agy-table-wrap' },
-      table(h('tr', null,
-        h('th', null, t('colModel')),
-        numHeader(0, t('colRequests')),
-        numHeader(1, t('colInput')),
-        numHeader(2, t('colOutput')),
-        numHeader(3, t('colCacheRead')),
-        numHeader(4, t('colShare'))),
-      stats.models.map((row) => h('tr', { key: row.model },
-        h('td', { className: 'agy-strong' }, h('span', { className: 'agy-mail' }, row.model)),
-        h('td', { className: 'agy-num' }, String(row.counters.requests)),
-        h('td', { className: 'agy-num' }, tokenText(row.counters.input)),
-        h('td', { className: 'agy-num' }, tokenText(row.counters.output)),
-        h('td', { className: 'agy-num' }, tokenText(row.counters.cacheRead)),
-        h('td', { className: 'agy-num' },
-          h('span', { className: 'agy-bar' },
-            h('span', { className: 'agy-track' },
-              h('i', { style: { width: `${Math.round((row.counters.requests / totalRequests) * 100)}%` } })))))))),
-  )
+      table(
+        h('tr', null,
+          h('th', null, t('colModel')),
+          numHeader(0, t('colRequests')),
+          numHeader(1, t('colInputUncached')),
+          numHeader(2, t('colCacheRead')),
+          numHeader(3, t('colOutput')),
+          numHeader(4, t('colTokenShare'))),
+        view.models.map((row) => h('tr', { key: row.model },
+          h('td', { className: 'agy-strong' }, h('span', { className: 'agy-mail' }, row.model)),
+          h('td', { className: 'agy-num' }, String(row.counters.requests)),
+          h('td', { className: 'agy-num' }, tokenText(row.counters.input)),
+          h('td', { className: 'agy-num' }, tokenText(row.counters.cacheRead)),
+          h('td', { className: 'agy-num' }, tokenText(row.counters.output)),
+          // Token share, not request share: every neighbouring column is tokens,
+          // and the old bar silently measured requests under a "share" header, so
+          // the heaviest-REQUEST row led even when it moved few tokens.
+          h('td', { className: 'agy-num' },
+            h('span', { className: 'agy-bar' },
+              h('span', { className: 'agy-track' },
+                h('i', {
+                  style: {
+                    width: `${Math.round((totalTokens(row.counters) / Math.max(1, total)) * 100)}%`,
+                  },
+                })))))))),
+    tokenShareNote(t))
 
-  const byAccount = stats.accounts.length === 0 ? null : card(t('byAccount'),
+  const byAccount = view.accounts.length === 0 ? null : card(t('byAccount'),
     h('div', { className: 'agy-table-wrap' },
       table(h('tr', null,
         h('th', null, t('colAccount')),
@@ -782,17 +833,23 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
         numHeader(2, t('colFailed')),
         numHeader(3, t('colRateLimited')),
         numHeader(4, t('colRotations'))),
-      stats.accounts.map((row) => h('tr', { key: row.account },
+      view.accounts.map((row) => h('tr', { key: row.account },
         h('td', { className: 'agy-strong' }, h('span', { className: 'agy-mail' }, row.account)),
-        h('td', { className: 'agy-num' }, String(row.totals.requests)),
-        h('td', { className: 'agy-num' }, tokenText(totalTokens(row.totals))),
-        h('td', { className: 'agy-num' }, String(row.totals.failed)),
-        h('td', { className: 'agy-num' }, String(row.totals.rateLimited)),
-        h('td', { className: 'agy-num' }, String(row.totals.rotations)))))),
+        h('td', { className: 'agy-num' }, String(row.counters.requests)),
+        h('td', { className: 'agy-num' }, tokenText(totalTokens(row.counters))),
+        h('td', { className: 'agy-num' }, String(row.counters.failed)),
+        h('td', { className: 'agy-num' }, String(row.counters.rateLimited)),
+        h('td', { className: 'agy-num' }, String(row.counters.rotations))))),
+    ),
   )
 
   return h('div', { className: 'agy-root' },
     rangePicker, summary, timing, byModel, byAccount)
+}
+
+/** The one-line footnote stating what the token columns count. */
+function tokenShareNote(t: T): ReactNode {
+  return h('p', { className: 'agy-hint agy-table-note' }, t('tokenColumnNote'))
 }
 
 // ─── Credentials tab ─────────────────────────────────────────────────────────

@@ -96,18 +96,32 @@ export interface ModelView {
 export interface StatsView {
   /** When the ledger began collecting (Unix ms), or null when empty. */
   since: number | null
-  /** Grand totals (all time). */
-  all: UsageCounters
-  /** Today's counts. */
-  today: UsageCounters
+  /** Grand totals (all time) and their breakdown. */
+  all: RangeBreakdown
+  /** Today's counts and breakdown. */
+  today: RangeBreakdown
   /** Last 7 days. */
-  week: UsageCounters
+  week: RangeBreakdown
   /** Last 30 days (the full retained window). */
-  month: UsageCounters
-  /** Per-account, all time, richest first. */
-  accounts: Array<{ account: string; totals: UsageCounters; sources: Record<UsageSource, number>; lastUsedAt: number }>
-  /** Per-model across all accounts, all time, heaviest first. */
-  models: Array<{ model: string; counters: UsageCounters }>
+  month: RangeBreakdown
+}
+
+/**
+ * One range selection's figures: the headline counters plus the SAME counters
+ * partitioned by model and by account.
+ *
+ * Every range carries its own breakdown so the whole page follows one
+ * selection. The tables previously read all-time maps while the headline strip
+ * read the selected range, so choosing "Today" showed 30 requests above a
+ * 164-request row with nothing on screen to explain the difference.
+ */
+export interface RangeBreakdown {
+  /** Headline counters for this range (uncached input, output, cache read/write). */
+  counters: UsageCounters
+  /** Per-model counters within this range, heaviest first. */
+  models: Array<{ model: string, counters: UsageCounters }>
+  /** Per-account counters within this range, heaviest first. */
+  accounts: Array<{ account: string, counters: UsageCounters }>
 }
 
 /** Result of one import batch. */

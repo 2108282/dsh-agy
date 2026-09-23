@@ -262,30 +262,49 @@ describe('agy management RPC', () => {
         account: 'a@x.com', model: 'model-a', source: 'chat', ok: true,
         usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0 },
       })
-      // A record older than the retained window: counted all-time, not in a window.
+      // A record older than the retained window: counted all-time, not in any
+      // window. Written in the CURRENT day-bucket shape; version-1 flat counters
+      // are covered by the migration test in stats.test.ts.
       const doc = harness.stats.snapshot()
       doc.days['2020-01-01'] = {
-        input: 7, output: 0, cacheRead: 0, cacheWrite: 0,
-        requests: 1, succeeded: 1, failed: 0, rateLimited: 0, rotations: 0,
-        latencyMs: 0, latencyN: 0, ttftMs: 0, ttftN: 0,
+        totals: {
+          input: 7, output: 0, cacheRead: 0, cacheWrite: 0,
+          requests: 1, succeeded: 1, failed: 0, rateLimited: 0, rotations: 0,
+          latencyMs: 0, latencyN: 0, ttftMs: 0, ttftN: 0,
+        },
+        models: {},
+        accounts: {},
       }
       const view = await harness.management.call('stats.get', {}) as {
-        all: { requests: number }
-        today: { requests: number }
-        accounts: Array<{ account: string }>
-        models: Array<{ model: string }>
+        all: {
+          counters: { requests: number }
+          accounts: Array<{ account: string }>
+          models: Array<{ model: string }>
+        }
+        today: {
+          counters: { requests: number }
+          models: Array<{ model: string }>
+          accounts: Array<{ account: string }>
+        }
       }
-      expect(view.all.requests).toBeGreaterThanOrEqual(1)
-      expect(view.today.requests).toBe(1)
-      expect(view.accounts.map((entry) => entry.account)).toContain('a@x.com')
-      expect(view.models.map((entry) => entry.model)).toContain('model-a')
+      expect(view.all.counters.requests).toBeGreaterThanOrEqual(1)
+      expect(view.today.counters.requests).toBe(1)
+      expect(view.all.accounts.map((entry) => entry.account)).toContain('a@x.com')
+      expect(view.all.models.map((entry) => entry.model)).toContain('model-a')
+      // Every range carries its own breakdown, so both tables follow the range
+      // selector instead of showing all-time rows under a windowed headline.
+      expect(view.today.models.map((entry) => entry.model)).toEqual(['model-a'])
+      expect(view.today.accounts.map((entry) => entry.account)).toEqual(['a@x.com'])
       expect(now).toBeGreaterThan(0)
     })
 
     it('reports an empty ledger without inventing a start date', async () => {
       const { management } = makeHarness()
-      const view = await management.call('stats.get', {}) as { since: number | null, all: { requests: number } }
-      expect(view.all.requests).toBe(0)
+      const view = await management.call('stats.get', {}) as {
+        since: number | null
+        all: { counters: { requests: number } }
+      }
+      expect(view.all.counters.requests).toBe(0)
       expect(view.since).toBeNull()
     })
   })

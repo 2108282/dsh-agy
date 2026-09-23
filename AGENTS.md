@@ -53,6 +53,7 @@ redirects a browser to it with a GET.
   - Counter semantics deliberately differ from DSH's: DSH replaces a step's usage (a retried attempt counts once, for conversation cost), while this ledger accumulates per attempt — every retry really did consume quota, which is what an account-level view must show.
   - A rotation is recorded as a `poolEvent`, never as a request: the adapter has already recorded the failing request, so counting it again inflates it.
   - `totals` never expires (all-time); `days` keeps a rolling `DAY_WINDOW`. A day leaving the window loses granularity only — its counts already live in `totals`.
+  - Each `days` bucket carries its own `models`/`accounts` partition, so the Usage tab's breakdown tables follow the range selector; a version-1 document's flat day counters migrate to that bucket's `totals` with no partition (history is kept, the per-day split is simply absent for pre-upgrade days).
   - The ledger MUST NOT store raw tokens, proxies, or project ids (account emails only).
   - A ledger that cannot be written MUST fail soft AND stay bounded: the pending backlog is capped (`maxPending`), count-based flushing is suspended while writes fail (otherwise every `record()` becomes a synchronous flush, breaking the I/O-free rule above), and the first error of each failure run is reported once through `onFlushError`. A silent, unbounded ledger is the regression.
 - **Client Presentation (`src/client/`)**:

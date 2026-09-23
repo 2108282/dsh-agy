@@ -192,6 +192,30 @@ const CSS = `
 .agy-metric-d { margin-top: 3px; font: var(--dsw-font-xxxs-11);
   color: var(--dsw-alias-label-tertiary, #8f959e); }
 
+/* ── Token composition ─────────────────────────────────────────────────────
+   A share bar per bucket, under the headline metrics. This exists to answer
+   "why is cache read larger than the input?" with a proportion instead of
+   prose: the cache re-reads the whole prefix each turn, so its share dominates.
+   Rows are laid out as label / track / value / percent so the numbers stay in
+   columns and remain scannable. */
+.agy-compose { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.agy-compose-row {
+  display: grid; grid-template-columns: 64px minmax(0,1fr) 56px 44px;
+  align-items: center; gap: 10px;
+}
+.agy-compose-k { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
+.agy-compose-track {
+  height: 6px; border-radius: 3px; overflow: hidden;
+  background: var(--dsw-alias-border-l2, rgba(0,0,0,.12));
+}
+.agy-compose-track i { display: block; height: 100%; border-radius: 3px; }
+.agy-compose-v { text-align: right; font: var(--dsw-font-xxs-12);
+  font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary, #61666b); }
+.agy-compose-p { text-align: right; font: var(--dsw-font-xxxs-11);
+  font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); }
+/* A table's own footnote: states a column's scope that its header cannot. */
+.agy-table-note { padding: 6px 8px 2px; }
+
 /* ── Definition rows (label / value pairs) ───────────────────────────────── */
 .agy-defs { display: grid; grid-template-columns: 92px minmax(0,1fr); margin: 0; }
 .agy-defs dt {

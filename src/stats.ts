@@ -46,7 +46,7 @@ import type { TokenBuckets, UsageCounters, UsageSource } from './usage-types.ts'
 
 export type { TokenBuckets, UsageCounters, UsageSource } from './usage-types.ts'
 
-export const STATS_VERSION = 1
+export const STATS_VERSION = 2
 
 /** Days of per-day buckets retained. Longer spans read `totals`. */
 export const DAY_WINDOW = 30
@@ -62,6 +62,28 @@ export interface AccountUsage {
   lastUsedAt: number
 }
 
+/**
+ * One day's slice, broken down the same three ways the Usage tab reads it.
+ *
+ * Version 1 stored only the flat counters here, which was enough for the KPI
+ * strip but not for the breakdown tables: those had to read the ALL-TIME
+ * `accounts`/`models` maps, so selecting "Today" changed the headline figures
+ * while the tables below still showed every request ever recorded — 30 requests
+ * above a 164-request row on the same screen. Keeping the per-day breakdown is
+ * what lets the whole page follow one range.
+ *
+ * `totals` stays the sum of the day's records; `models`/`accounts` are the same
+ * counters partitioned by dimension. Every record contributes to `totals` and to
+ * whichever dimensions it names.
+ */
+export interface DayBucket {
+  totals: UsageCounters
+  /** Per-model counters within this day. */
+  models: Record<string, UsageCounters>
+  /** Per-account counters within this day. */
+  accounts: Record<string, UsageCounters>
+}
+
 /** The persisted document. */
 export interface StatsDocument {
   version: number
@@ -71,8 +93,8 @@ export interface StatsDocument {
   totals: UsageCounters
   /** Per-account ledgers, keyed by account email (falling back to id). */
   accounts: Record<string, AccountUsage>
-  /** Rolling per-day buckets, `YYYY-MM-DD` -> counters. */
-  days: Record<string, UsageCounters>
+  /** Rolling per-day buckets, `YYYY-MM-DD` -> that day's slice. */
+  days: Record<string, DayBucket>
 }
 
 /** One recorded request, as the call sites observe it. */
@@ -192,10 +214,44 @@ export function parseStatsDocument(text: string, now: number): StatsDocument {
   if (typeof record.days === 'object' && record.days !== null) {
     for (const [key, value] of Object.entries(record.days as Record<string, unknown>)) {
       // Only well-formed day keys survive, so a stray key can never grow the file.
-      if (/^\d{4}-\d{2}-\d{2}$/.test(key)) doc.days[key] = sanitizeCounters(value)
+      if (/^\d{4}-\d{2}-\d{2}$/.test(key)) doc.days[key] = sanitizeDayBucket(value)
     }
   }
   return doc
+}
+
+/**
+ * Coerce one day's stored value into a `DayBucket`.
+ *
+ * Accepts the version-1 shape too: that stored a bare counter block, so a
+ * document written before the upgrade keeps its day counts as `totals` with no
+ * breakdown. Losing the breakdown for those days is the correct trade — the
+ * alternative (dropping the days) would erase real history, and recomputing a
+ * dimension split that was never recorded is impossible. The all-time
+ * `accounts`/`models` maps are unaffected, so only range-scoped breakdown tables
+ * are thinner for pre-upgrade days.
+ */
+function sanitizeDayBucket(raw: unknown): DayBucket {
+  const out: DayBucket = { totals: zeroCounters(), models: {}, accounts: {} }
+  if (typeof raw !== 'object' || raw === null) return out
+  const record = raw as Record<string, unknown>
+  if (typeof record.totals === 'object' && record.totals !== null) {
+    out.totals = sanitizeCounters(record.totals)
+    if (typeof record.models === 'object' && record.models !== null) {
+      for (const [id, value] of Object.entries(record.models as Record<string, unknown>)) {
+        out.models[id] = sanitizeCounters(value)
+      }
+    }
+    if (typeof record.accounts === 'object' && record.accounts !== null) {
+      for (const [key, value] of Object.entries(record.accounts as Record<string, unknown>)) {
+        out.accounts[key] = sanitizeCounters(value)
+      }
+    }
+    return out
+  }
+  // Version-1 day: a bare counter block.
+  out.totals = sanitizeCounters(raw)
+  return out
 }
 
 /** Drop day buckets older than the window; their counts already live in `totals`. */
@@ -223,9 +279,58 @@ export function foldWindow(doc: StatsDocument, days: number, now: number): Usage
   const cutoff = dayKey(now - (span - 1) * 86_400_000)
   for (const [key, bucket] of Object.entries(doc.days)) {
     // String compare is a valid date order for `YYYY-MM-DD`.
-    if (key >= cutoff) addInto(out, bucket)
+    if (key >= cutoff) addInto(out, bucket.totals)
   }
   return out
+}
+
+/** One range's breakdown: totals plus the same counters split by model/account. */
+export interface WindowBreakdown {
+  totals: UsageCounters
+  models: Array<{ model: string, counters: UsageCounters }>
+  accounts: Array<{ account: string, counters: UsageCounters }>
+}
+
+/**
+ * Fold the day buckets for a window into the three views the Usage tab renders.
+ *
+ * The breakdown tables read THIS rather than the all-time `accounts`/`models`
+ * maps, so one range selection governs the whole page. Rows are sorted by
+ * request count descending, matching the all-time view; the caller re-sorts if
+ * it wants another order (the UI shows them as-is).
+ *
+ * @param doc - the ledger snapshot.
+ * @param days - window length in days, at least 1.
+ * @param now - current time (Unix ms).
+ * @returns totals and their per-model / per-account partitions.
+ */
+export function foldWindowBreakdown(doc: StatsDocument, days: number, now: number): WindowBreakdown {
+  const span = Math.max(1, Math.floor(days))
+  const cutoff = dayKey(now - (span - 1) * 86_400_000)
+  const totals = zeroCounters()
+  const models = new Map<string, UsageCounters>()
+  const accounts = new Map<string, UsageCounters>()
+  for (const [key, bucket] of Object.entries(doc.days)) {
+    if (key < cutoff) continue
+    addInto(totals, bucket.totals)
+    for (const [model, counters] of Object.entries(bucket.models)) {
+      const current = models.get(model)
+      if (current === undefined) models.set(model, { ...counters })
+      else addInto(current, counters)
+    }
+    for (const [account, counters] of Object.entries(bucket.accounts)) {
+      const current = accounts.get(account)
+      if (current === undefined) accounts.set(account, { ...counters })
+      else addInto(current, counters)
+    }
+  }
+  const byRequests = (a: { counters: UsageCounters }, b: { counters: UsageCounters }): number =>
+    b.counters.requests - a.counters.requests
+  return {
+    totals,
+    models: [...models.entries()].map(([model, counters]) => ({ model, counters })).sort(byRequests),
+    accounts: [...accounts.entries()].map(([account, counters]) => ({ account, counters })).sort(byRequests),
+  }
 }
 
 /** Merge one record into a document, in place. Shared by the live store and tests. */
@@ -272,8 +377,20 @@ export function applyRecord(doc: StatsDocument, record: UsageRecord, now: number
   }
 
   const key = dayKey(now)
-  const bucket = doc.days[key] ?? zeroCounters()
-  addInto(bucket, delta)
+  const bucket = doc.days[key] ?? { totals: zeroCounters(), models: {}, accounts: {} }
+  addInto(bucket.totals, delta)
+  // The same delta is partitioned by the dimensions it names, so a range-scoped
+  // breakdown table adds up to that range's headline figures exactly.
+  if (record.model !== undefined && record.model !== '') {
+    const model = bucket.models[record.model] ?? zeroCounters()
+    addInto(model, delta)
+    bucket.models[record.model] = model
+  }
+  if (record.account !== undefined && record.account !== '') {
+    const account = bucket.accounts[record.account] ?? zeroCounters()
+    addInto(account, delta)
+    bucket.accounts[record.account] = account
+  }
   doc.days[key] = bucket
 
   pruneDays(doc, now)
