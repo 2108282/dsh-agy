@@ -103,7 +103,8 @@
     },
     "candidates": [
       "google-genai-sdk/<ver> gl-go/<ver> (evidenced, but only on the genai SDK path)",
-      "no explicit UA at all, i.e. the Go/Node default (the CLI sets none in app code)"
+      "no explicit UA at all, i.e. the Go/Node default (the CLI sets none in app code)",
+      "`antigravity/cli/<ver> (aidev_client; os_type=macos; arch=arm64; auth_method=consumer)` — NOT confirmed against the artifact, but it is what EVERY live `scripts/verify-*` probe in this repo has sent since the initial commit, and its parenthesized vocabulary (`aidev_client`, `os_type=`, `auth_method=`) is exactly what the binary's string blob contains. So it is a worked-in-practice CLI-shaped candidate, while the `src/` UA (`antigravity/<ver> <platform>`) is a different shape used on the real data plane. The two disagreeing is itself a finding."
     ],
     "captureRecipe": [
       "The UA needs a live authenticated request. Options, cheapest first:",
@@ -169,7 +170,21 @@
       "sentFields": ["ideType", "ideVersion", "platform"],
       "ideType": { "value": "ANTIGRAVITY", "confidence": "unresolved", "note": "The CLI's own IdeType is injected through its auth provider and was not captured. `GEMINI_CLI` is the enum's newer CLI value and is the alternative to settle by capture; the established working value is kept rather than guessed." },
       "ideVersion": { "value": "<resolved CLI version>", "confidence": "confirmed" },
-      "platform": { "value": "DARWIN_ARM64", "confidence": "confirmed", "note": "platform is pinned to darwin/arm64 (see AGENTS.md), so the enum takes its arm64 member." },
+      "platform": { "value": "DARWIN_ARM64", "confidence": "measured", "note": "platform is pinned to darwin/arm64 (see AGENTS.md), so the enum takes its arm64 member." },
+      "liveCheck": {
+        "script": "pnpm run verify:metadata-acceptance",
+        "result": "200 — the backend accepts `{ideType, ideVersion, platform}` on loadCodeAssist",
+        "why": [
+          "This is the one change this round makes to the LOGIN/ONBOARDING path, where a",
+          "wrong field breaks new accounts instead of degrading a generation, so it was",
+          "measured rather than reasoned about. The script also runs the legacy",
+          "`{ ideType }` body as a control, so a future failure is attributable: if the",
+          "current body is rejected while the legacy one is accepted, the added fields are",
+          "the cause and `platform` is what to drop.",
+          "`dsh-agy verify` cannot answer this — it refreshes the token and calls",
+          "googleapis.com/oauth2/v1/userinfo, which never reaches the Cloud Code backend."
+        ]
+      },
       "omitted": { "fields": ["pluginVersion", "updateChannel", "duetProject", "pluginType", "ideName"], "why": "no captured value; an absent field is merely incomplete, a wrong one is a new anomaly" }
     }
   },

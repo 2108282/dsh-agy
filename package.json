@@ -57,6 +57,7 @@
     "verify:proxy-routing": "tsx scripts/verify-proxy-routing.mts",
     "verify:version-freshness": "tsx scripts/verify-version-freshness.mts",
     "verify:official-identity": "tsx scripts/verify-official-identity.mts",
+    "verify:metadata-acceptance": "tsx scripts/verify-metadata-acceptance.mts",
     "verify:claude-parts": "tsx scripts/verify-claude-parts.mts"
   },
   "peerDependencies": {

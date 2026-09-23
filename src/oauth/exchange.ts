@@ -75,7 +75,7 @@ interface LoadCodeAssistData {
  * WINDOWS_AMD64`). A bad enum value is not a forbidden field. `AGY_PLATFORM_ENUM`
  * carries a valid one.
  */
-function bootstrapMetadata(): Record<string, string> {
+export function bootstrapMetadata(): Record<string, string> {
   return {
     ideType: AGY_IDE_TYPE,
     ideVersion: currentAgyVersion(),
