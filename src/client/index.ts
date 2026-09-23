@@ -390,7 +390,11 @@ function AccountDetail(props: {
   const usage = account.usage
   const models = usage?.models ?? []
 
-  const identity = card(t('detailTitle'), defs([
+  // The verification challenge, when the upstream raised one. The state badge
+  // says the account is parked; THIS is the only place that says how to un-park
+  // it, and the link exists nowhere else in the UI — dropping it left the appeal
+  // URL reachable over the RPC but invisible to the person who has to act on it.
+  const identityRows: Array<[ReactNode, ReactNode]> = [
     [t('fieldProject'), account.projectId ?? t('noProject')],
     [t('fieldProxy'), h('span', { className: 'agy-mono' }, account.proxy ?? t('proxyDirect'))],
     [t('fieldFingerprint'), account.fingerprint === null
@@ -412,7 +416,21 @@ function AccountDetail(props: {
       ? t('noProject')
       : `${t('latencyAverage', { value: formatDuration(average(usage.totals.latencyMs, usage.totals.latencyN)) })}`
         + ` · ${t('latencyTtft', { value: formatDuration(average(usage.totals.ttftMs, usage.totals.ttftN)) })}`],
-  ]), account.email ?? `#${account.index}`)
+  ]
+  if (account.verificationRequired) {
+    identityRows.push([t('fieldVerification'), account.verificationUrl === null
+      ? t('verificationNoUrl')
+      : h('a', {
+        className: 'agy-link',
+        href: account.verificationUrl,
+        // A new tab, because the Settings section is inside the host SPA:
+        // navigating away would lose the panel the user is working in.
+        target: '_blank',
+        rel: 'noreferrer noopener',
+      }, t('verificationOpen'))])
+  }
+
+  const identity = card(t('detailTitle'), defs(identityRows), account.email ?? `#${account.index}`)
 
   const actions = card(t('colActions'), h('div', { className: 'agy-actions' },
     button(t('actionTest'), () => { handlers.onTest(account.index) }, { disabled: busy }),

@@ -227,6 +227,11 @@ const CSS = `
 .agy-strong { color: var(--dsw-alias-label-primary, #1f2329); font-weight: 500; }
 .agy-mail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agy-mono { font-family: var(--ds-font-family-code); }
+/* The one external link in the section (a verification appeal URL). Colored and
+   underlined with theme tokens rather than left to the browser default, which
+   ignores both the light/dark theme and the host's brand color. */
+.agy-link { color: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6); text-decoration: underline; }
+.agy-link:hover { opacity: 0.8; }
 
 .agy-bar { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
 .agy-bar .agy-track { width: 56px; height: 4px; border-radius: 2px; overflow: hidden;

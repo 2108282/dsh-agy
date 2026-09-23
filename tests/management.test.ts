@@ -117,7 +117,11 @@ describe('agy management RPC', () => {
       accounts: [
         account({ email: 'active@x.com', projectId: 'p1' }),
         account({ email: 'cooling@x.com', coolingDownUntil: Date.now() + 60_000, cooldownReason: 'rate-limit' }),
-        account({ email: 'verify@x.com', verificationRequired: true }),
+        account({
+          email: 'verify@x.com',
+          verificationRequired: true,
+          verificationUrl: 'https://accounts.google.com/verify?t=abc',
+        }),
         account({ email: 'off@x.com', enabled: false }),
       ],
     })
@@ -125,6 +129,12 @@ describe('agy management RPC', () => {
     expect(accounts.map((entry) => entry.state)).toEqual(['active', 'cooling', 'verification-required', 'disabled'])
     expect(accounts[0]?.active).toBe(true)
     expect(accounts[1]?.active).toBe(false)
+    // The appeal URL is the actionable half of a verification challenge: the state
+    // alone says an account is parked but not how to un-park it, and the Settings
+    // section has nowhere else to get the link.
+    expect(accounts[2]?.verificationRequired).toBe(true)
+    expect(accounts[2]?.verificationUrl).toBe('https://accounts.google.com/verify?t=abc')
+    expect(accounts[0]?.verificationUrl).toBeNull()
     // The refresh token must never cross the wire.
     expect(JSON.stringify(accounts)).not.toContain('refresh-a')
   })
