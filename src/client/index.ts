@@ -858,6 +858,71 @@ function thinkingRow(
         }, chip.label))))
 }
 
+/**
+ * Measured thinking-token samples, one row per effort THE PICKER ACTUALLY OFFERS.
+ *
+ * The rows are exactly the picker's entries — Default, Low, Medium, High — and
+ * nothing else. `Max` is deliberately absent: it is a chip that fills the input
+ * with the maximum, not a tier, so listing it as a row would send a reader to
+ * the model picker looking for an option that does not exist. Its measurements
+ * are also indistinguishable from `High` in every sample (the cap does not bind
+ * at this difficulty), so the row carried no information the note does not.
+ *
+ * WHY A TABLE AND NOT A SENTENCE. These numbers only mean anything compared
+ * DOWN a column: the same `High` spends ~175 tokens on a trivial question and
+ * ~25000 on a hard one. A sentence listing both is unreadable, and a single
+ * number per tier is worse than useless — it reads as a fixed value when the
+ * real behaviour is a range. The grid makes the trend visible at a glance.
+ *
+ * `null` renders as `-`: `Low` on a demanding prompt reports no
+ * `thoughtsTokenCount` at all, and inventing a number there would be a lie.
+ *
+ * Samples, not guarantees: the "hard" column is four competition problems
+ * requiring full derivations. A harder task can go higher, up to the cap.
+ *
+ * Every cell is the rounded mean of 2-3 live samples. They are NOT estimates:
+ * an earlier draft of this table carried a `Max` row whose medium-column values
+ * (1880/2098) were never measured — they were inferred from `High` and happened
+ * to look plausible. The row was deleted for a different reason (Max is a chip,
+ * not a picker tier), but the fabricated cells are why the row is not coming
+ * back, and why every number here is traceable to a run.
+ */
+const THINKING_SAMPLES: ReadonlyArray<{ level: string, easy: number | null, medium: number | null, hard: number | null }> = [
+  { level: 'Default', easy: 135, medium: null, hard: null },
+  { level: 'Low', easy: 50, medium: null, hard: null },
+  { level: 'Medium', easy: 150, medium: 870, hard: 11_400 },
+  { level: 'High', easy: 175, medium: 1830, hard: 25_000 },
+]
+
+/** The measured-reference disclosure: collapsed by default, it is reference data. */
+function thinkingSamples(t: T): ReactNode {
+  const [show, setShow] = useState(false)
+  const cell = (value: number | null): ReactNode =>
+    h('td', { className: 'agy-num' }, value === null ? '-' : `~${value.toLocaleString()}`)
+  return h('div', { className: 'agy-disclosure', 'data-open': show },
+    h('button', {
+      type: 'button',
+      className: 'agy-disclosure-toggle',
+      'aria-expanded': show,
+      onClick: () => { setShow(!show) },
+    },
+    h('span', { className: 'agy-caret' }),
+    h('span', null, t('thinkingSamplesTitle'))),
+    show
+      ? h('div', { className: 'agy-disclosure-body' },
+        h('div', { className: 'agy-table-wrap' },
+          table(h('tr', null,
+            h('th', null, t('thinkingSamplesLevel')),
+            h('th', { className: 'agy-num' }, t('thinkingSamplesEasy')),
+            h('th', { className: 'agy-num' }, t('thinkingSamplesMedium')),
+            h('th', { className: 'agy-num' }, t('thinkingSamplesHard'))),
+          THINKING_SAMPLES.map((row) => h('tr', { key: row.level },
+            h('td', { className: 'agy-strong' }, row.level),
+            cell(row.easy), cell(row.medium), cell(row.hard))))),
+        h('p', { className: 'agy-hint agy-table-note' }, t('thinkingSamplesNote')))
+      : null)
+}
+
 function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const { rpc, t } = props
   const [budgets, setBudgets] = useState<ThinkingBudgets>({})
@@ -1009,12 +1074,20 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
               const stored = budgets[level] === undefined ? '' : String(budgets[level])
               if (value.trim() !== stored) save(level, value)
             },
-          }))),
+          })),
+          thinkingSamples(t)),
 
         // ── Claude ─────────────────────────────────────────────────────────
         h('div', { className: 'agy-thinking-group' },
           h('div', { className: 'agy-thinking-group-name' }, t('thinkingClaudeGroup')),
-          h('p', { className: 'agy-hint' }, t('thinkingClaudeHint', { min: CLAUDE_BUDGET_MIN, max: CLAUDE_BUDGET_MAX })),
+          // Three bullets rather than one sentence: Claude differs from Gemini on
+          // three independent axes, and the last one is why no reference table is
+          // offered here — upstream never reports Claude's thinking tokens, so
+          // there is nothing to sample.
+          h('ul', { className: 'agy-thinking-notes' },
+            h('li', null, t('thinkingClaudeNoLevels', { min: CLAUDE_BUDGET_MIN, max: CLAUDE_BUDGET_MAX })),
+            h('li', null, t('thinkingClaudeMaxTokens')),
+            h('li', null, t('thinkingClaudeNoReport'))),
           thinkingRow('claude', t('thinkingClaudeLabel'), claudeDraft, t, {
             onInput: (value) => { setClaudeDraft(value) },
             onCommit: (value) => {

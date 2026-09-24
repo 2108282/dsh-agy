@@ -250,6 +250,13 @@ const CSS = `
   margin-bottom: 2px;
 }
 .agy-thinking-group .agy-hint { margin: 0 0 8px; }
+/* Claude's three differences, as a list: each is an independent axis, and the
+   last one is why that group has no reference table. */
+.agy-thinking-notes { margin: 0 0 8px; padding-left: 18px; }
+.agy-thinking-notes li {
+  font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e);
+  line-height: 1.6;
+}
 .agy-thinking-row {
   display: grid; grid-template-columns: 72px minmax(0, 180px) auto;
   align-items: center; gap: 14px; padding: 8px 0;
