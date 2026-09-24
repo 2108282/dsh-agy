@@ -224,6 +224,8 @@ export interface AgyRpcMethods {
       budgets: ThinkingBudgets
       min: number
       max: number
+      /** Budget for the tiered slot (the selector's "Default" effort). */
+      tieredBudget: number | null
       /** Claude-family budget (a single value; the family is id-bound). */
       claudeBudget: number | null
       /** Claude's own accepted interval, which differs from the tiered one. */
@@ -253,6 +255,16 @@ export interface AgyRpcMethods {
   'thinking.setClaude': {
     payload: { budget?: number | null }
     result: { claudeBudget: number | null }
+  }
+  /**
+   * Set or clear the tiered slot's budget.
+   *
+   * Its own call because the slot has no level id: `thinking.set` is keyed by
+   * level, and this one is the selector's "Default" effort.
+   */
+  'thinking.setTiered': {
+    payload: { budget?: number | null }
+    result: { tieredBudget: number | null }
   }
   'stats.get': { payload: Record<string, never>; result: StatsView }
 }

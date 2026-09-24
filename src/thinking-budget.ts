@@ -65,6 +65,16 @@ export interface ThinkingDocument {
   budgets: ThinkingBudgets
   /** Budget for Claude thinking models; absent means "send no budget". */
   claudeBudget?: number
+  /**
+   * Budget for the TIERED slot — the selector's "Default" effort.
+   *
+   * That effort carries no level id (`effort: void 0`), so it cannot be keyed in
+   * `budgets`. A value here sends `thinkingBudget` WITHOUT `thinkingLevel`, which
+   * is what makes "Default" configurable as a Max: the effort still decides
+   * nothing, the number does. Absent means the request sends no thinkingConfig at
+   * all, i.e. upstream's own adaptive allocation.
+   */
+  tieredBudget?: number
 }
 
 /** Whether `value` may be sent as a `thinkingBudget`. */
@@ -103,12 +113,14 @@ export function parseThinkingDocument(text: string): ThinkingDocument {
   const record = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : {}
   const budgets = sanitizeThinkingBudgets(record.budgets)
   const claude = record.claudeBudget
+  const tiered = record.tieredBudget
   return {
     version: THINKING_VERSION,
     budgets,
     // Dropped when unusable rather than clamped, matching the level budgets: the
     // request then sends no budget, which is a valid state.
     ...(isValidClaudeBudget(claude) ? { claudeBudget: claude } : {}),
+    ...(isValidThinkingBudget(tiered) ? { tieredBudget: tiered } : {}),
   }
 }
 
@@ -238,6 +250,7 @@ export class ThinkingBudgetStore {
       version: THINKING_VERSION,
       budgets: { ...this.doc.budgets },
       ...(this.doc.claudeBudget === undefined ? {} : { claudeBudget: this.doc.claudeBudget }),
+      ...(this.doc.tieredBudget === undefined ? {} : { tieredBudget: this.doc.tieredBudget }),
     }
     mutate(next)
     const text = ThinkingBudgetStore.serialize(next)
@@ -264,6 +277,12 @@ export class ThinkingBudgetStore {
     return this.doc.claudeBudget
   }
 
+  /** The tiered-slot budget (the selector's Default effort), or undefined. */
+  tieredBudget(): number | undefined {
+    this.reloadIfChanged()
+    return this.doc.tieredBudget
+  }
+
   /** The raw map, for the settings UI. */
   all(): ThinkingBudgets {
     this.reloadIfChanged()
@@ -277,6 +296,7 @@ export class ThinkingBudgetStore {
       version: THINKING_VERSION,
       budgets: { ...this.doc.budgets },
       ...(this.doc.claudeBudget === undefined ? {} : { claudeBudget: this.doc.claudeBudget }),
+      ...(this.doc.tieredBudget === undefined ? {} : { tieredBudget: this.doc.tieredBudget }),
     }
   }
 
@@ -292,6 +312,18 @@ export class ThinkingBudgetStore {
       else doc.budgets[key] = value
     })
     return this.all()
+  }
+
+  /** Replace the tiered-slot budget, or clear it when `value` is undefined. */
+  setTieredBudget(value: number | undefined): ThinkingDocument {
+    if (value !== undefined && !isValidThinkingBudget(value)) {
+      throw new Error(`thinking budget must be an integer in [${THINKING_BUDGET_MIN}, ${THINKING_BUDGET_MAX}]`)
+    }
+    this.write((doc) => {
+      if (value === undefined) delete doc.tieredBudget
+      else doc.tieredBudget = value
+    })
+    return this.snapshot()
   }
 
   /** Replace the Claude budget, or clear it when `value` is undefined. */

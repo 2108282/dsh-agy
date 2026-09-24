@@ -1043,6 +1043,27 @@ describe('models', () => {
     expect(idBound.request.generationConfig?.thinkingConfig).toBeUndefined()
   })
 
+  it('turns the Default effort into Max when a tiered budget is set', () => {
+    // The selector's "Default" entry arrives with NO effort. Unset, the request
+    // must carry no thinkingConfig at all (upstream allocates); a configured
+    // value sends a bare `thinkingBudget` with no `thinkingLevel`, which is what
+    // makes it a cap rather than a fourth tier.
+    const withTiered = (budget: number | undefined): unknown =>
+      toAgyRequestBody(
+        generateOptions({ model: 'gemini-3.8-flash-tiered' }),
+        { tieredBudgetFor: () => budget },
+      ).request.generationConfig?.thinkingConfig
+
+    expect(withTiered(undefined)).toBeUndefined()
+    expect(withTiered(65_535)).toEqual({ thinkingBudget: 65_535, includeThoughts: true })
+    // A chosen LEVEL still wins over the Default slot: they are different efforts.
+    const leveled = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'high' as any }),
+      { tieredBudgetFor: () => 65_535, thinkingBudgetFor: () => undefined },
+    )
+    expect(leveled.request.generationConfig?.thinkingConfig).toEqual({ thinkingLevel: 'high', includeThoughts: true })
+  })
+
   it('sends a Claude budget only when max_tokens leaves room above it', () => {
     // Measured on this channel: Claude rejects a budget that is not STRICTLY
     // below `max_tokens` (`budget=1024, max_tokens=1024` is a 400), and it also

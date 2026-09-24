@@ -400,6 +400,15 @@ export function toAgyRequestBody(
      * level to key by.
      */
     claudeBudgetFor?: () => number | undefined
+    /**
+     * The configured budget for the TIERED slot (the selector's "Default"
+     * effort), or undefined when unset.
+     *
+     * That effort arrives with NO level id, so it cannot go through
+     * `thinkingBudgetFor`. A value here sends a bare `thinkingBudget` with no
+     * `thinkingLevel` — the tiered model's adaptive entry, given an explicit cap.
+     */
+    tieredBudgetFor?: () => number | undefined
   },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
@@ -435,7 +444,16 @@ export function toAgyRequestBody(
   if (isLevelThinkingModel(options.model)) {
     if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
       generationConfig.thinkingConfig = { thinkingBudget: 0 }
-    } else if (effort && LEVEL_THINKING_LEVELS.has(effort)) {
+    } else if (effort === undefined) {
+      // The selector's "Default" effort: no level was chosen. A configured tiered
+      // budget turns this into Max by sending a bare `thinkingBudget` (no
+      // `thinkingLevel`, so the number alone decides). Unset sends nothing at all,
+      // which leaves upstream's own adaptive allocation in charge.
+      const tiered = context.tieredBudgetFor?.()
+      if (tiered !== undefined) {
+        generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
+      }
+    } else if (LEVEL_THINKING_LEVELS.has(effort)) {
       // A configured number for this level takes the place of the level token:
       // both together would let the level win (see `thinkingBudgetFor`).
       const configured = context.thinkingBudgetFor?.(effort)

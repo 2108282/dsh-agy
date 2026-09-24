@@ -132,6 +132,7 @@ export async function createAgyRuntime(ctx: Context): Promise<{
     modelVisibility,
     thinkingBudgetFor: (level) => thinkingBudget.budgetFor(level),
     claudeBudgetFor: () => thinkingBudget.claudeBudget(),
+    tieredBudgetFor: () => thinkingBudget.tieredBudget(),
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })
   // Persist the ledger on normal termination. `exit` covers both a graceful

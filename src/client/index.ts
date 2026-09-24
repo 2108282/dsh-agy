@@ -765,9 +765,58 @@ function ModelsTab(props: {
  * zero fallback, and why clearing it is a real action rather than "set to 0"
  * (measured: `0` reduces thinking but does not reliably disable it).
  */
+/**
+ * One budget row: label, input, and optional shortcut chips.
+ *
+ * There is deliberately NO trailing text column. An earlier version put the wire
+ * form there ("sends thinkingLevel: high"), which was wrong twice over: on the
+ * "High" row it restated that row's own label, and `thinkingLevel` /
+ * `thinkingBudget` are identifiers for us rather than words a user needs. The
+ * input plus its label carry all the information the row has.
+ *
+ * `chips` are shortcuts, not a second control: they only fill the input, and the
+ * empty one is the meaningful default (upstream allocates).
+ */
+function thinkingRow(
+  id: string,
+  label: string,
+  value: string,
+  t: T,
+  handlers: {
+    onInput: (value: string) => void
+    onCommit: (value: string) => void
+    chips?: Array<{ label: string, value: string }>
+  },
+): ReactNode {
+  return h('div', { className: 'agy-thinking-row', key: id },
+    h('span', { className: 'agy-thinking-k' }, label),
+    h(Input, {
+      value,
+      // The placeholder states what EMPTY does, not a number: a grey `1000`
+      // would read as "leaving this blank gives you 1000", the opposite of the
+      // real behaviour.
+      placeholder: t('thinkingAuto'),
+      inputMode: 'numeric',
+      onChange: (event: { target: { value: string } }) => { handlers.onInput(event.target.value) },
+      onBlur: (event: { target: { value: string } }) => { handlers.onCommit(event.target.value) },
+    }),
+    handlers.chips === undefined
+      ? null
+      : h('span', { className: 'agy-thinking-chips' }, ...handlers.chips.map((chip) =>
+        h('button', {
+          key: chip.label,
+          type: 'button',
+          className: 'agy-thinking-chip',
+          // Clicking fills the field and commits in one step; the blur handler
+          // then sees an unchanged value and does not save twice.
+          onClick: () => { handlers.onInput(chip.value); handlers.onCommit(chip.value) },
+        }, chip.label))))
+}
+
 function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const { rpc, t } = props
   const [budgets, setBudgets] = useState<ThinkingBudgets>({})
+  const [tieredBudget, setTieredBudget] = useState<number | null>(null)
   const [claudeBudget, setClaudeBudget] = useState<number | null>(null)
   const [claudeDraft, setClaudeDraft] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
@@ -786,6 +835,8 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         const result = await rpc.call('thinking.get', {})
         if (!alive.current) return
         setBudgets(result.budgets)
+        setTieredBudget(result.tieredBudget)
+        setDrafts((c) => ({ ...c, tiered: result.tieredBudget === null ? '' : String(result.tieredBudget) }))
         setClaudeBudget(result.claudeBudget)
         setClaudeDraft(result.claudeBudget === null ? '' : String(result.claudeBudget))
         // Drafts mirror the stored values as strings, so an in-progress edit is
@@ -832,6 +883,26 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     })()
   }
 
+  const saveTiered = (raw: string): void => {
+    const trimmed = raw.trim()
+    const value = trimmed === '' ? null : Number(trimmed)
+    if (value !== null && !Number.isInteger(value)) {
+      setError(t('thinkingInvalid'))
+      return
+    }
+    void (async () => {
+      try {
+        const result = await rpc.call('thinking.setTiered', { budget: value })
+        if (!alive.current) return
+        setTieredBudget(result.tieredBudget)
+        setError(undefined)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      }
+    })()
+  }
+
   const saveClaude = (raw: string): void => {
     const trimmed = raw.trim()
     const value = trimmed === '' ? null : Number(trimmed)
@@ -853,6 +924,7 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   }
 
   const configured = THINKING_LEVELS.filter((level) => budgets[level] !== undefined).length
+    + (tieredBudget === null ? 0 : 1)
   const block = h('div', { className: 'agy-disclosure', 'data-open': open },
     h('button', {
       type: 'button',
@@ -867,62 +939,48 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     open
       ? h('div', { className: 'agy-disclosure-body' },
         error === undefined ? null : h('div', { className: 'agy-error' }, error),
-        ...THINKING_LEVELS.map((level) => h('div', { className: 'agy-thinking-row', key: level },
-          h('span', { className: 'agy-thinking-k' }, levelLabel(level, t)),
-          h(Input, {
-            value: drafts[level] ?? '',
-            // The placeholder states what EMPTY does, not a number: a grey `1000`
-            // would read as "leaving this blank gives you 1000", which is the
-            // opposite of the real behaviour.
-            placeholder: t('thinkingAuto'),
-            inputMode: 'numeric',
-            onChange: (event: { target: { value: string } }) => {
-              setDrafts((current) => ({ ...current, [level]: event.target.value }))
+
+        // ── Gemini (tiered) ────────────────────────────────────────────────
+        h('div', { className: 'agy-thinking-group' },
+          h('div', { className: 'agy-thinking-group-name' }, t('thinkingGeminiGroup')),
+          h('p', { className: 'agy-hint' }, t('thinkingGeminiHint', { min: THINKING_BUDGET_MIN, max: THINKING_BUDGET_MAX })),
+          // The selector's "Default" effort carries no level id, so it is its own
+          // row rather than one of the three. Empty = upstream allocates; a value
+          // = Max, a bare cap with no level sent alongside it.
+          thinkingRow('tiered', t('thinkingTieredLabel'), drafts.tiered ?? '', t, {
+            onInput: (value) => { setDrafts((c) => ({ ...c, tiered: value })) },
+            onCommit: (value) => {
+              const stored = tieredBudget === null ? '' : String(tieredBudget)
+              if (value.trim() !== stored) saveTiered(value)
             },
-            onBlur: (event: { target: { value: string } }) => {
-              const next = event.target.value
-              const stored = budgets[level] === undefined ? '' : String(budgets[level])
-              if (next.trim() !== stored) save(level, next)
-            },
+            chips: [
+              { label: t('thinkingChipDefault'), value: '' },
+              { label: t('thinkingChipMax'), value: String(THINKING_BUDGET_MAX) },
+            ],
           }),
-          // The wire form for THIS level, right where the choice is made: the
-          // whole point of the setting is what goes out on the wire, and that
-          // differs per level once a budget is set.
-          h('span', { className: 'agy-thinking-wire' },
-            budgets[level] === undefined
-              ? t('thinkingWireLevel', { level })
-              : t('thinkingWireBudget', { budget: budgets[level] })))),
-        // What each level does by default, and what the upstream default is.
-        // Both are measured facts, not invented values: the official default is
-        // the `thinkingBudget` upstream itself reports for these ids.
-        h('div', { className: 'agy-thinking-notes' },
-          h('p', { className: 'agy-hint' }, t('thinkingHint', { min: THINKING_BUDGET_MIN, max: THINKING_BUDGET_MAX })),
-          h('p', { className: 'agy-hint' }, t('thinkingHintOfficial')),
-          h('p', { className: 'agy-hint' }, t('thinkingHintMinus1'))),
-        // Claude gets its own single field rather than three levels: the family is
-        // id-bound (each capability is its own model id, e.g.
-        // `claude-opus-4-6-thinking`), so there is no level to key by. Its
-        // interval also differs — floor 1024, and the request needs `max_tokens`
-        // strictly greater than the budget — which is why it validates separately.
-        h('div', { className: 'agy-thinking-claude' },
-          h('div', { className: 'agy-thinking-row' },
-            h('span', { className: 'agy-thinking-k' }, t('thinkingClaudeLabel')),
-            h(Input, {
-              value: claudeDraft,
-              placeholder: t('thinkingAuto'),
-              inputMode: 'numeric',
-              onChange: (event: { target: { value: string } }) => { setClaudeDraft(event.target.value) },
-              onBlur: (event: { target: { value: string } }) => {
-                const next = event.target.value
-                const stored = claudeBudget === null ? '' : String(claudeBudget)
-                if (next.trim() !== stored) saveClaude(next)
-              },
-            }),
-            h('span', { className: 'agy-thinking-wire' },
-              claudeBudget === null
-                ? t('thinkingWireNone')
-                : t('thinkingWireBudget', { budget: claudeBudget }))),
-          h('p', { className: 'agy-hint' }, t('thinkingClaudeHint', { min: CLAUDE_BUDGET_MIN, max: CLAUDE_BUDGET_MAX }))))
+          ...THINKING_LEVELS.map((level) => thinkingRow(level, levelLabel(level, t), drafts[level] ?? '', t, {
+            onInput: (value) => { setDrafts((c) => ({ ...c, [level]: value })) },
+            onCommit: (value) => {
+              const stored = budgets[level] === undefined ? '' : String(budgets[level])
+              if (value.trim() !== stored) save(level, value)
+            },
+          }))),
+
+        // ── Claude ─────────────────────────────────────────────────────────
+        h('div', { className: 'agy-thinking-group' },
+          h('div', { className: 'agy-thinking-group-name' }, t('thinkingClaudeGroup')),
+          h('p', { className: 'agy-hint' }, t('thinkingClaudeHint', { min: CLAUDE_BUDGET_MIN, max: CLAUDE_BUDGET_MAX })),
+          thinkingRow('claude', t('thinkingClaudeLabel'), claudeDraft, t, {
+            onInput: (value) => { setClaudeDraft(value) },
+            onCommit: (value) => {
+              const stored = claudeBudget === null ? '' : String(claudeBudget)
+              if (value.trim() !== stored) saveClaude(value)
+            },
+            chips: [
+              { label: t('thinkingChipDefault'), value: '' },
+              { label: t('thinkingChipMax'), value: String(CLAUDE_BUDGET_MAX) },
+            ],
+          })))
       : null)
 
   return card(t('thinkingTitle'), block)

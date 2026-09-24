@@ -83,7 +83,22 @@ export function catalogModel(modelId: string): CatalogModel | undefined {
   return undefined
 }
 
-/** Level-thinking models: single id + selectable low/medium/high via thinkingLevel. */
+/**
+ * Level-thinking models: a single id with selectable tiers via `thinkingLevel`.
+ *
+ * KNOWN GAP (tracked in issue #47, with the measurements): upstream publishes the
+ * authoritative grouping as `tieredModelIds` in every `fetchAvailableModels`
+ * response — `{ flashLite: [...], flash: [...], pro: ['gemini-3.1-pro-low'] }` —
+ * and this rule ignores it. The `-tiered` suffix is a NAMING COINCIDENCE that
+ * happens to hold for the three Flash ids, so:
+ *   - upstream-tiered `gemini-3.1-pro-low` (which does accept `thinkingLevel`,
+ *     measured) is treated as id-bound and never shows a tier selector;
+ *   - a tiered model added under any other name is silently excluded — no log,
+ *     no warning, it simply appears without tiers.
+ * The fix is to consult `tieredModelIds` with this function as the offline
+ * fallback, and to let the budget card render the tiers a family actually has
+ * (Flash: low/medium/high; Pro: low/high only).
+ */
 export function isLevelThinkingModel(modelId: string): boolean {
   if (catalogModel(modelId)?.thinking === 'level') return true
   return typeof modelId === 'string' && modelId.endsWith('-tiered')

@@ -113,6 +113,8 @@ export interface AgyAdapterOptions {
    * carries its own validation (floor 1024, and `max_tokens` must exceed it).
    */
   claudeBudgetFor?(): number | undefined
+  /** Budget for the tiered slot (the selector's "Default" effort). */
+  tieredBudgetFor?(): number | undefined
   /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
   resolveAttachments?(): AgyAttachmentStore | undefined
   /**
@@ -418,6 +420,9 @@ export class AgyAdapter extends LlmAdapter {
           ...(this.options.claudeBudgetFor === undefined
             ? {}
             : { claudeBudgetFor: this.options.claudeBudgetFor }),
+          ...(this.options.tieredBudgetFor === undefined
+            ? {}
+            : { tieredBudgetFor: this.options.tieredBudgetFor }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
         })

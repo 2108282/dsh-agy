@@ -234,16 +234,34 @@ const CSS = `
 /* One row per reasoning level: label, then the budget input. The input is
    width-capped so the empty state reads as "no value set" rather than as a wide
    field waiting to be filled. */
+/* Label | input | chips. Two content columns plus shortcuts, with real vertical
+   breathing room: the earlier three-column version (label | input | a sentence
+   restating the row's own label) packed four rows into 5px padding and 10px gaps,
+   which read as one solid block. */
+.agy-thinking-group { display: flex; flex-direction: column; }
+.agy-thinking-group + .agy-thinking-group { margin-top: 16px; }
+.agy-thinking-group-name {
+  font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-label-secondary, #61666b);
+  margin-bottom: 2px;
+}
+.agy-thinking-group .agy-hint { margin: 0 0 8px; }
 .agy-thinking-row {
-  display: grid; grid-template-columns: 64px minmax(0, 200px) minmax(0, 1fr);
-  align-items: center; gap: 10px; padding: 5px 0;
+  display: grid; grid-template-columns: 72px minmax(0, 180px) auto;
+  align-items: center; gap: 14px; padding: 8px 0;
 }
 .agy-thinking-k { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary, #61666b); }
-/* What this level actually sends. Placed inline with the input because the
-   wire form IS the setting's effect, and it changes as soon as a budget is set. */
-.agy-thinking-wire { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
-.agy-thinking-notes { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
-.agy-thinking-notes .agy-hint { margin: 0; }
+/* Shortcut chips, not a second control: they fill the field beside them. */
+.agy-thinking-chips { display: flex; gap: 6px; }
+.agy-thinking-chip {
+  border: 0.5px solid var(--dsw-alias-border-l3, rgba(0,0,0,.15));
+  background: transparent; cursor: pointer; border-radius: 10px;
+  padding: 2px 8px; font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-secondary, #61666b);
+}
+.agy-thinking-chip:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.agy-thinking-chip:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4176e6); outline-offset: 1px;
+}
 .agy-disclosure-meta { margin-left: auto; font: var(--dsw-font-xxxs-11);
   color: var(--dsw-alias-label-tertiary, #8f959e); font-variant-numeric: tabular-nums; }
 

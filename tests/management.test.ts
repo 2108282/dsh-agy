@@ -104,6 +104,8 @@ function makeHarness(options: {
       set: (level, value) => thinkingBudget.setBudget(level, value),
       claude: () => thinkingBudget.claudeBudget(),
       setClaude: (value) => thinkingBudget.setClaudeBudget(value).claudeBudget,
+      tiered: () => thinkingBudget.tieredBudget(),
+      setTiered: (value) => thinkingBudget.setTieredBudget(value).tieredBudget,
     },
     notifyModelsChanged: () => { notifications += 1 },
     listAllModels: async () => options.models ?? [
@@ -352,6 +354,19 @@ describe('agy management RPC', () => {
         budgets: Record<string, number>
       }
       expect(alsoCleared.budgets).toEqual({})
+    })
+
+    it('sets, reads and clears the Tiered slot budget', async () => {
+      // The selector's "Default" effort has no level id, so it is its own slot.
+      // Empty = upstream allocates; a value = Max, a bare cap.
+      const { management } = makeHarness()
+      const initial = await management.call('thinking.get', {}) as { tieredBudget: number | null }
+      expect(initial.tieredBudget).toBeNull()
+      const set = await management.call('thinking.setTiered', { budget: 65535 }) as { tieredBudget: number | null }
+      expect(set.tieredBudget).toBe(65535)
+      expect((await management.call('thinking.get', {}) as { tieredBudget: number | null }).tieredBudget).toBe(65535)
+      expect((await management.call('thinking.setTiered', { budget: null }) as { tieredBudget: number | null }).tieredBudget).toBeNull()
+      await expect(management.call('thinking.setTiered', { budget: 70000 })).rejects.toThrow(/65535/)
     })
 
     it('sets, reads and clears the Claude budget', async () => {

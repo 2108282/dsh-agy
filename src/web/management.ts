@@ -61,6 +61,8 @@ export interface AgyManagementOptions {
     set: (level: string, value: number | undefined) => ThinkingBudgets
     claude: () => number | undefined
     setClaude: (value: number | undefined) => number | undefined
+    tiered: () => number | undefined
+    setTiered: (value: number | undefined) => number | undefined
   }
   /**
    * The adapter's *unfiltered* model catalog.
@@ -495,10 +497,23 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       budgets: thinkingBudget.all(),
       min: THINKING_BUDGET_MIN,
       max: THINKING_BUDGET_MAX,
+      tieredBudget: thinkingBudget.tiered() ?? null,
       claudeBudget: thinkingBudget.claude() ?? null,
       claudeMin: CLAUDE_BUDGET_MIN,
       claudeMax: CLAUDE_BUDGET_MAX,
     }),
+
+    'thinking.setTiered': async (payload) => {
+      const body = payload as { budget?: unknown } | undefined
+      const raw = body?.budget
+      if (raw !== undefined && raw !== null && typeof raw !== 'number') fail('budget must be a number')
+      try {
+        const value = thinkingBudget.setTiered(raw === undefined || raw === null ? undefined : raw)
+        return { tieredBudget: value ?? null }
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    },
 
     'thinking.setClaude': async (payload) => {
       const body = payload as { budget?: unknown } | undefined
