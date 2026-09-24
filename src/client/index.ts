@@ -909,7 +909,23 @@ const THINKING_SAMPLES: ReadonlyArray<{
   { level: 'max', easy: 185, medium: 2_130, hard: 62_900 },
 ]
 
-function thinkingSamples(t: T): ReactNode {
+/**
+ * Collapsible table of measured thinking tokens.
+ *
+ * MUST be rendered as a component (`h(ThinkingSamples, { t })`), never CALLED as
+ * `ThinkingSamples({ t })` or as a lowercase helper. This function owns a
+ * `useState`, and React keys renderer state by hook call order: a direct call
+ * inside the parent's conditional branch appends this hook to the PARENT's
+ * sequence, so the parent's hook count changes the moment the section expands and
+ * React throws mid-render. The exception unmounts the whole Settings tree — a
+ * white panel no click can revive, only a restart.
+ *
+ * This is the second occurrence of that class of bug in this file (`ModelsTab`
+ * ran a `useMemo` after an early return, white-screening on tab switch). Both
+ * passed `tsc`, the 442 unit tests and CI, because the test environment is
+ * `environment: 'node'` and renders nothing — nothing static checks hook order.
+ */
+function ThinkingSamples({ t }: { t: T }): ReactNode {
   const [show, setShow] = useState(false)
   // A true zero is printed as `0`, not `~0`: the tilde marks a rounded sample,
   // and it would make a measured absence of thinking look like an estimate.
@@ -1101,7 +1117,7 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
               if (value.trim() !== stored) save(level, value)
             },
           })),
-          thinkingSamples(t)),
+          h(ThinkingSamples, { t })),
 
         // ── Claude ─────────────────────────────────────────────────────────
         h('div', { className: 'agy-thinking-group' },
