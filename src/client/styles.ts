@@ -206,6 +206,9 @@ const CSS = `
   font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* A table's own footnote: states a column's scope that its header cannot. */
 .agy-table-note { padding: 6px 8px 2px; }
+/* The 65535 row is a CONFIGURATION of High, not a sibling tier: indenting it
+   makes the dependency visible without adding a column or a badge. */
+.agy-table td.agy-nested { padding-left: 20px; font-weight: 400; }
 
 /* ── Definition rows (label / value pairs) ───────────────────────────────── */
 .agy-defs { display: grid; grid-template-columns: 92px minmax(0,1fr); margin: 0; }
@@ -250,6 +253,9 @@ const CSS = `
   margin-bottom: 2px;
 }
 .agy-thinking-group .agy-hint { margin: 0 0 8px; }
+/* The four things a reader can actually DO with this setting. A list, because
+   each is an independent action, and prose buried them. */
+.agy-thinking-effects { margin: 2px 0 10px; }
 /* Claude's three differences, as a list: each is an independent axis, and the
    last one is why that group has no reference table. */
 .agy-thinking-notes { margin: 0 0 8px; padding-left: 18px; }

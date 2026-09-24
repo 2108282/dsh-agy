@@ -15,22 +15,29 @@
 // RECORDED RESULTS (gemini-3.8-flash-tiered, cap 65536). Thinking tokens:
 //
 //              easy      medium      hard
-//   Default      ~134      ~1,095     ~45,762
-//   Low           ~50   unreported  unreported
+//   Default      ~134      ~1,095     ~48,721
+//   Low           ~50            0      ~8,970   (0 = measured zero, not missing)
 //   Medium       ~150        ~872     ~60,414
-//   High         ~166      ~1,856     ~62,912
+//   High         ~166      ~1,856     ~63,381
+//   entered 65535 ~184      ~2,130     ~62,913   (nested under High)
 //
-//   hard column as % of the 65536 ceiling: Default 69.8%, Low 13.7%,
-//   Medium 92.2%, High 96.0%. Medium and High both nearly fill the budget on a
+//   hard column as % of the 65536 ceiling: Default 74.3%, Low 13.7%,
+//   Medium 92.2%, High 96.7%. Medium and High both nearly fill the budget on a
 //   hard prompt, which is why they can look equivalent there while differing
-//   sharply on easy ones.
+//   sharply on easy ones. 65535 vs High: +11% easy, +15% medium, -0.7% hard.
+//
+//   `Default`'s hard cell carried only 2 samples (34k, 57k — 51% apart) until
+//   four more were taken (56k, 51k, 43k, 51k); 6 samples now give ~48,700 at
+//   sd ~8,800. It was the weakest cell in the published table.
 //
 //   easy/medium were taken at cap 60000. They are still valid because they sit
 //   far BELOW either cap (~50-1,900), so the cap never bound them; only the hard
 //   column needed re-measuring at the ceiling.
 //
-// `Low` reporting nothing on demanding prompts is a real upstream behaviour, not
-// a failed request — hence the `unreported` cell rather than a number.
+// `Low` on the MEDIUM prompt is a measured ZERO, not missing data: all 5 runs
+// returned no thoughtsTokenCount, and total - output equalled the prompt size
+// (38 tokens) every time, i.e. total = prompt + output. The easy prompt reports
+// ~50 for the same setting, which is what rules out a harness fault.
 //
 // Run it when you need to re-derive the numbers behind the client's reference
 // table, or when a new model family appears.

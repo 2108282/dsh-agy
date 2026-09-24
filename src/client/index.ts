@@ -880,24 +880,41 @@ function thinkingRow(
  * The hard column below was re-measured at the ceiling. `pnpm run
  * verify:thinking-levels` re-derives all of it.
  *
- * `null` renders as `-`: `Low` reports no `thoughtsTokenCount` on the medium
- * prompt, and inventing a number there would be a lie.
+ * A `0` is a MEASURED ZERO, not a placeholder: on the medium prompt `Low`
+ * returned no `thoughtsTokenCount` field at all, and `total - output` equalled
+ * the prompt size in all 5 runs — upstream really spent no thinking tokens. It is
+ * printed as `0` rather than `-` so the row does not look like missing data.
  *
- * Every value is the mean of 2-11 live samples, rounded — the hard column's
- * spread is wide (Default: 34k and 57k), which is why these are labelled samples
- * and not a specification.
+ * Every value is the mean of 2-11 live samples, rounded. `Default`'s hard cell
+ * carried only 2 samples (34k and 57k, 51% apart) until four more were taken:
+ * 6 samples now give ~48,700 at sd ~8,800. The spread is why these are labelled
+ * samples and not a specification.
  */
-const THINKING_SAMPLES: ReadonlyArray<{ level: string, easy: number | null, medium: number | null, hard: number | null }> = [
-  { level: 'Default', easy: 135, medium: 1_100, hard: 46_000 },
-  { level: 'Low', easy: 50, medium: null, hard: 9_000 },
-  { level: 'Medium', easy: 150, medium: 870, hard: 60_000 },
-  { level: 'High', easy: 165, medium: 1_855, hard: 63_000 },
+const THINKING_SAMPLES: ReadonlyArray<{
+  level: string
+  easy: number | null
+  medium: number | null
+  hard: number | null
+}> = [
+  { level: 'Default', easy: 135, medium: 1_100, hard: 48_700 },
+  // 0, not "unreported": total - output equalled the prompt size in all 5 runs,
+  // i.e. upstream really spent no thinking tokens on this combination.
+  { level: 'Low', easy: 50, medium: 0, hard: 9_000 },
+  { level: 'Medium', easy: 150, medium: 870, hard: 60_400 },
+  { level: 'High', easy: 165, medium: 1_855, hard: 63_400 },
+  // Independent, NOT nested under High: the same value typed into ANY row sends
+  // the same request (a filled budget replaces the level token), so there is no
+  // structural relationship to High — only a numerical resemblance on the hard
+  // question. Users ask about this value by name, so it belongs in the grid.
+  { level: 'max', easy: 185, medium: 2_130, hard: 62_900 },
 ]
 
 function thinkingSamples(t: T): ReactNode {
   const [show, setShow] = useState(false)
+  // A true zero is printed as `0`, not `~0`: the tilde marks a rounded sample,
+  // and it would make a measured absence of thinking look like an estimate.
   const cell = (value: number | null): ReactNode =>
-    h('td', { className: 'agy-num' }, value === null ? '-' : `~${value.toLocaleString()}`)
+    h('td', { className: 'agy-num' }, value === null ? '-' : value === 0 ? '0' : `~${value.toLocaleString()}`)
   return h('div', { className: 'agy-disclosure', 'data-open': show },
     h('button', {
       type: 'button',
@@ -909,6 +926,8 @@ function thinkingSamples(t: T): ReactNode {
     h('span', null, t('thinkingSamplesTitle'))),
     show
       ? h('div', { className: 'agy-disclosure-body' },
+        h('p', { className: 'agy-hint' }, t('thinkingSamplesIntro')),
+        h('p', { className: 'agy-hint' }, t('thinkingSamplesCaption')),
         h('div', { className: 'agy-table-wrap' },
           table(h('tr', null,
             h('th', null, t('thinkingSamplesLevel')),
@@ -916,9 +935,15 @@ function thinkingSamples(t: T): ReactNode {
             h('th', { className: 'agy-num' }, t('thinkingSamplesMedium')),
             h('th', { className: 'agy-num' }, t('thinkingSamplesHard'))),
           THINKING_SAMPLES.map((row) => h('tr', { key: row.level },
-            h('td', { className: 'agy-strong' }, row.level),
+            // The nested row is indented so it reads as High's configuration.
+            h('td', { className: 'agy-strong' },
+              row.level === 'max' ? t('thinkingSamplesMaxRow') : row.level),
             cell(row.easy), cell(row.medium), cell(row.hard))))),
-        h('p', { className: 'agy-hint agy-table-note' }, t('thinkingSamplesNote')))
+        h('p', { className: 'agy-hint agy-table-note' }, t('thinkingSamplesComparison')),
+        h('p', { className: 'agy-hint agy-table-note' }, t('thinkingSamplesSources')),
+        // The `0` is real and reproducible, but a reader could mistake it for a
+        // broken cell, so it is called out explicitly.
+        h('p', { className: 'agy-hint agy-table-note' }, t('thinkingSamplesZero')))
       : null)
 }
 
@@ -1052,7 +1077,12 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         // ── Gemini (tiered) ────────────────────────────────────────────────
         h('div', { className: 'agy-thinking-group' },
           h('div', { className: 'agy-thinking-group-name' }, t('thinkingGeminiGroup')),
-          h('p', { className: 'agy-hint' }, t('thinkingGeminiHint', { min: THINKING_BUDGET_MIN, max: THINKING_BUDGET_MAX })),
+          h('p', { className: 'agy-hint' }, t('thinkingGeminiHint')),
+          h('ul', { className: 'agy-thinking-notes agy-thinking-effects' },
+            h('li', null, t('thinkingEffectLowUp')),
+            h('li', null, t('thinkingEffectHighDown')),
+            h('li', null, t('thinkingEffectMax')),
+            h('li', null, t('thinkingEffectReset'))),
           // The selector's "Default" effort carries no level id, so it is its own
           // row rather than one of the three. Empty = upstream allocates; a value
           // = Max, a bare cap with no level sent alongside it.

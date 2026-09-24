@@ -148,6 +148,42 @@ valid until it expires or you revoke it in your Google account security settings
 
 ## Other things you may care about
 
+### Thinking budget (reasoning effort)
+
+A thinking budget is a hidden parameter in the API that controls how hard the
+model thinks. Upstream gives a few of its values names, and those names are what
+you see as reasoning effort (`high` / `medium` / `low`) in the model picker. A
+budget replaces the `high` / `medium` / `low` value that would otherwise be sent,
+rather than stacking with it.
+
+With that in mind, here is what a custom budget can do:
+
+- **Make a low tier think more** — put a larger value on the `Low` row.
+- **Make a high tier think less** (faster, cheaper) — put a smaller value on the
+  `High` row.
+- **Maximum thinking** — just select `High`; no value needed.
+- **Back to that tier's default** — clear the row.
+
+The model adapts how long it thinks to the difficulty of the question, within the
+budget. This table shows what Gemini 3.8 Flash actually spent (in tokens) under
+different budgets, on questions of different difficulty:
+
+| Setting | Easy | Medium | Hard |
+|---|---|---|---|
+| Default | ~135 | ~1,100 | ~48,700 |
+| Low | ~50 | 0 | ~9,000 |
+| Medium | ~150 | ~870 | ~60,400 |
+| High | ~165 | ~1,855 | ~63,400 |
+| Entered 65535 | ~185 | ~2,130 | ~62,900 |
+
+Entering the maximum (65535) is identical to selecting High on the hard question,
+but raises thinking on the easy and medium ones by about 10–15%. The value alone
+decides the effect — the same number entered on any row sends the same request.
+
+Note: the hard question is a combinatorial derivation (derive a tiling recurrence
+and compute term 40), the medium one a number-theory proof (prove n⁴+4 is always
+composite), and the easy one a two-digit multiplication.
+
 ### Rotation mechanics
 
 Usage-aware selection: when several accounts are available, requests rank them
