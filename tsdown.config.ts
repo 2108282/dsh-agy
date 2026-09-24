@@ -9,7 +9,13 @@ export default defineConfig([
     target: 'es2024',
     dts: true,
     clean: true,
-    external: ['socks-proxy-agent'],
+    deps: {
+      neverBundle: [
+        '@deepseek-ai/cordis',
+        '@deepseek-ai/dsh-llm',
+        'socks-proxy-agent',
+      ],
+    },
   },
   {
     entry: { client: 'src/client/index.ts' },

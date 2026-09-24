@@ -12,7 +12,7 @@ importers:
         specifier: ^4.0.2
         version: 4.0.2(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@deepseek-ai/dsh-llm':
-        specifier: ^0.1.5-rc.1
+        specifier: ^0.1.5-rc.1 || ^0.1.6 || ^0.1.7-rc.1
         version: 0.1.5-rc.2(@deepseek-ai/cordis@4.0.2)
       commander:
         specifier: ^14.0.0

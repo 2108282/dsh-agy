@@ -3,7 +3,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_BEHAVIOR_INSTRUCTION, AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AGY_PUBLIC_MODELS, formatTieredModelName } from '../src/adapter/catalog.ts'
@@ -55,6 +55,18 @@ describe('translate', () => {
     expect(body.requestType).toBe('agent')
     expect(body.request.contents).toEqual([{ role: 'user', parts: [{ text: 'hello' }] }])
     expect(body.request.sessionId).toBe('s1')
+  })
+
+  it('appends behavior instruction when appendBehaviorInstruction is enabled', () => {
+    const withoutSystem = toAgyRequestBody(generateOptions(), { appendBehaviorInstruction: true })
+    expect(withoutSystem.request.systemInstruction?.parts[0]?.text).toContain('【Antigravity 协作交互规范】')
+
+    const withSystem = toAgyRequestBody(generateOptions({ system: 'You are an assistant.' }), {
+      appendBehaviorInstruction: true,
+    })
+    expect(withSystem.request.systemInstruction?.parts[0]?.text).toBe(
+      `You are an assistant.\n\n${AGY_BEHAVIOR_INSTRUCTION}`,
+    )
   })
 
   it('translates user image blocks into inlineData parts from resolved bytes', () => {
