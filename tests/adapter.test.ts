@@ -7,7 +7,7 @@ import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } 
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AGY_PUBLIC_MODELS, formatTieredModelName } from '../src/adapter/catalog.ts'
-import { AgyAdapter } from '../src/adapter/adapter.ts'
+import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 function textMessage(role: Message['role'], text: string): Message {
@@ -897,14 +897,12 @@ describe('models', () => {
     expect(resolved38.name).toBe('Gemini 3.8 Flash')
     expect(resolved38.reasoning).toBeDefined()
     expect(resolved38.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
-    expect(String(resolved38.reasoning!.defaultEffort)).toBe('medium')
     expect(resolved38.inputModalities).toEqual(['text', 'image'])
 
     const resolved = resolveAgyModel('agy', 'gemini-3.7-flash-tiered')
     expect(resolved.name).toBe('Gemini 3.7 Flash')
     expect(resolved.reasoning).toBeDefined()
     expect(resolved.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
-    expect(String(resolved.reasoning!.defaultEffort)).toBe('medium')
     expect(resolved.inputModalities).toEqual(['text', 'image'])
 
     const tiered36 = resolveAgyModel('agy', 'gemini-3.6-flash-tiered')
@@ -925,6 +923,36 @@ describe('models', () => {
     for (const id of ['gemini-3.6-flash-high', 'gemini-2.5-flash', 'brand-new-model']) {
       expect(resolveAgyModel('agy', id).reasoning).toBeUndefined()
     }
+  })
+
+  it('declares no default reasoning effort, so the selector keeps an adaptive option', () => {
+    // Regression guard. `defaultEffort` is not a cosmetic default: the harness
+    // resolves `effective = requested ?? reasoning.defaultEffort` AND builds the
+    // selector's options as
+    //   `...defaultEffort === void 0 ? [providerDefault] : []`
+    // so declaring one both forces an effort onto every request and deletes the
+    // only choice meaning "let the model decide" — the selector then has no
+    // adaptive entry at all, and `translate.ts` always emits `thinkingConfig`.
+    // Every tiered model must therefore leave it unset.
+    for (const id of ['gemini-3.8-flash-tiered', 'gemini-3.7-flash-tiered', 'gemini-3.9-flash-tiered']) {
+      const resolved = resolveAgyModel('agy', id)
+      expect(resolved.reasoning, `${id} should expose reasoning`).toBeDefined()
+      expect(
+        resolved.reasoning!.defaultEffort,
+        `${id} must not pin a default effort (it would remove the adaptive option)`,
+      ).toBeUndefined()
+      // The three explicit levels stay selectable next to the adaptive option.
+      expect(resolved.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+    }
+  })
+
+  it('omits thinkingConfig entirely when no effort is requested (adaptive path)', () => {
+    // Companion to the guard above: with no `defaultEffort` in play, an omitted
+    // effort must produce NO thinkingConfig, which is what lets the upstream run
+    // its own adaptive budget. If this ever emits a level, the adaptive option
+    // is broken at the wire even though the selector still lists it.
+    const adaptive = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered' }), {})
+    expect(adaptive.request.generationConfig?.thinkingConfig).toBeUndefined()
   })
 
   it('maps reasoningEffort to thinkingConfig for tiered models only', () => {
@@ -958,6 +986,188 @@ describe('models', () => {
     const invalid = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'ultra' as any }), {})
     expect(invalid.request.generationConfig?.thinkingConfig).toBeUndefined()
   })
+
+  it('replaces the level with a configured budget, never sends both', () => {
+    // Measured: when BOTH ride together the LEVEL wins —
+    // `{thinkingLevel:"low",thinkingBudget:16000}` spends what `low` alone spends
+    // (~180 thoughts against ~330 for the budget alone), and
+    // `{thinkingLevel:"high",thinkingBudget:1000}` tracks `high` (~316 vs ~173).
+    // Sending both would make the configured number silently inert, so the
+    // budget must take the level's place.
+    const budgetFor = (level: string): number | undefined =>
+      level === 'high' ? 16000 : undefined
+    const withBudget = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'high' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(withBudget.request.generationConfig?.thinkingConfig)
+      .toEqual({ thinkingBudget: 16000, includeThoughts: true })
+
+    // A level with no configured budget keeps the level token.
+    const noBudget = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'low' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(noBudget.request.generationConfig?.thinkingConfig)
+      .toEqual({ thinkingLevel: 'low', includeThoughts: true })
+
+    // No resolver at all behaves exactly as before the feature existed.
+    const absent = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'high' as any }),
+      {},
+    )
+    expect(absent.request.generationConfig?.thinkingConfig)
+      .toEqual({ thinkingLevel: 'high', includeThoughts: true })
+  })
+
+  it('keeps the off-paths off even when a budget is configured', () => {
+    // `session-title` and an explicit none/off must still send `thinkingBudget:0`:
+    // they exist to protect a tight maxTokens cap, and a user-configured level
+    // budget is about how much thinking a NORMAL turn gets.
+    const budgetFor = (): number => 16000
+    const title = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', purpose: 'session-title' as any, reasoningEffort: 'high' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(title.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+    const off = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'off' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(off.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+    // Id-bound models still never carry a config, budget or not.
+    const idBound = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.6-flash-high', reasoningEffort: 'high' as any }),
+      { thinkingBudgetFor: budgetFor },
+    )
+    expect(idBound.request.generationConfig?.thinkingConfig).toBeUndefined()
+  })
+
+  it('turns the Default effort into Max when a tiered budget is set', () => {
+    // The selector's "Default" entry arrives with NO effort. Unset, the request
+    // must carry no thinkingConfig at all (upstream allocates); a configured
+    // value sends a bare `thinkingBudget` with no `thinkingLevel`, which is what
+    // makes it a cap rather than a fourth tier.
+    const withTiered = (budget: number | undefined): unknown =>
+      toAgyRequestBody(
+        generateOptions({ model: 'gemini-3.8-flash-tiered' }),
+        { tieredBudgetFor: () => budget },
+      ).request.generationConfig?.thinkingConfig
+
+    expect(withTiered(undefined)).toBeUndefined()
+    expect(withTiered(65_535)).toEqual({ thinkingBudget: 65_535, includeThoughts: true })
+    // A chosen LEVEL still wins over the Default slot: they are different efforts.
+    const leveled = toAgyRequestBody(
+      generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'high' as any }),
+      { tieredBudgetFor: () => 65_535, thinkingBudgetFor: () => undefined },
+    )
+    expect(leveled.request.generationConfig?.thinkingConfig).toEqual({ thinkingLevel: 'high', includeThoughts: true })
+  })
+
+  it('sends a Claude budget only when max_tokens leaves room above it', () => {
+    // Measured on this channel: Claude rejects a budget that is not STRICTLY
+    // below `max_tokens` (`budget=1024, max_tokens=1024` is a 400), and it also
+    // rejects a budget sent with no `maxOutputTokens` at all. So the guard is the
+    // difference between a working setting and a 400 on every request.
+    const withClaudeBudget = (maxTokens: number | undefined): unknown =>
+      toAgyRequestBody(
+        generateOptions({ model: 'claude-opus-4-6-thinking', ...(maxTokens === undefined ? {} : { maxTokens }) }),
+        { claudeBudgetFor: () => 16384 },
+      ).request.generationConfig?.thinkingConfig
+
+    // Room above the budget: sent.
+    expect(withClaudeBudget(64_000)).toEqual({ thinkingBudget: 16384, includeThoughts: true })
+    // Exactly equal is NOT enough (strictly greater is required).
+    expect(withClaudeBudget(16_384)).toBeUndefined()
+    // Below the budget: dropped rather than raising the caller's cap.
+    expect(withClaudeBudget(1024)).toBeUndefined()
+    // No output cap at all: also dropped.
+    expect(withClaudeBudget(undefined)).toBeUndefined()
+  })
+
+  it('leaves a Claude request untouched when no budget is configured', () => {
+    // The shipped default must change nothing: no budget means the request keeps
+    // upstream's own thinking behaviour.
+    const body = toAgyRequestBody(
+      generateOptions({ model: 'claude-opus-4-6-thinking', maxTokens: 64_000 }),
+      { claudeBudgetFor: () => undefined },
+    )
+    expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
+    // And the resolver being absent entirely behaves the same way.
+    const absent = toAgyRequestBody(
+      generateOptions({ model: 'claude-opus-4-6-thinking', maxTokens: 64_000 }),
+      {},
+    )
+    expect(absent.request.generationConfig?.thinkingConfig).toBeUndefined()
+  })
+
+  it('never sends a Claude budget on a session-title request', () => {
+    // Session titles run with a tiny output cap, so a large budget would be
+    // dropped by the room check anyway — but the purpose check keeps the
+    // behaviour explicit rather than incidental.
+    const body = toAgyRequestBody(
+      generateOptions({ model: 'claude-opus-4-6-thinking', purpose: 'session-title' as any, maxTokens: 64_000 }),
+      { claudeBudgetFor: () => 16384 },
+    )
+    expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
+  })
+})
+
+describe('buildRequestHeaders', () => {
+  function session(impersonation: AgyAccountSession['impersonation']): AgyAccountSession {
+    return {
+      auth: { access: 'at', expires: Date.now() + 3600_000, refresh: 'rt|p' },
+      account: { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0 },
+      index: 0,
+      impersonation,
+    }
+  }
+
+  /**
+   * Regression test for the highest-signal defect found in the security review.
+   *
+   * `attributionHeaders()` returns a lowercase `user-agent`; the impersonation
+   * object uses camel-case `User-Agent`. Spreading both kept them as two distinct
+   * properties, and `Headers` folded them into ONE comma-joined value:
+   *
+   *   `deepseek-harness/<v> (+url), antigravity/<v> <platform>`
+   *
+   * That header named this tool on every generation request, was byte-identical
+   * for every dsh-agy user, and cannot be produced by any official client. This
+   * test asserts the WIRE result rather than the intermediate object, because the
+   * object looked correct in isolation — which is exactly how the bug survived.
+   */
+  it('sends exactly one User-Agent, and it is the client identity', () => {
+    const headers = new Headers(buildRequestHeaders(session({
+      'User-Agent': 'antigravity/2.0.0 darwin/arm64',
+      'X-Goog-Api-Client': 'google-cloud-sdk vscode/1.96.0',
+      clientMetadata: { ideType: 'ANTIGRAVITY' },
+    })))
+
+    expect(headers.get('user-agent')).toBe('antigravity/2.0.0 darwin/arm64')
+    expect(headers.get('user-agent')).not.toContain('deepseek-harness')
+    // A comma-joined pair is the specific shape the old spread produced.
+    expect(headers.get('user-agent')).not.toContain(',')
+  })
+
+  it('carries the two impersonation headers and nothing invented', () => {
+    const headers = buildRequestHeaders(session({
+      'User-Agent': 'antigravity/2.0.0 darwin/arm64',
+      'X-Goog-Api-Client': 'google-cloud-sdk vscode/1.96.0',
+      clientMetadata: { ideType: 'ANTIGRAVITY' },
+    }))
+
+    expect(headers.authorization).toBe('Bearer at')
+    expect(headers['X-Goog-Api-Client']).toBe('google-cloud-sdk vscode/1.96.0')
+    // Neither of these is an official shape: `Client-Metadata` and
+    // `x-goog-request-id` are both absent from BOTH official binaries, and the
+    // request id the backend correlates on is the body's `requestId` field.
+    expect(Object.keys(headers).sort()).toEqual(
+      ['User-Agent', 'X-Goog-Api-Client', 'accept', 'authorization', 'content-type'],
+    )
+    // The metadata message is not a header and must not be spread as one.
+    expect(headers).not.toHaveProperty('clientMetadata')
+  })
 })
 
 describe('AgyAdapter', () => {
@@ -971,7 +1181,7 @@ describe('AgyAdapter', () => {
       impersonation: {
         'User-Agent': 'antigravity/1.18.3 darwin/arm64',
         'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
-        'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
+        clientMetadata: { ideType: 'ANTIGRAVITY' },
       },
       ...overrides,
     }
@@ -1077,6 +1287,140 @@ describe('AgyAdapter', () => {
       code: 'UNSUPPORTED_CONTENT',
       message: expect.stringContaining('agy image attachment "att-1" could not be loaded: attachment storage offline'),
     })
+  })
+
+  it('resends once under a fresh session id when the upstream hits the 1M wall', async () => {
+    const bodies: Array<{ request: { sessionId?: string } }> = []
+    const wall =
+      '{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed for the model: 1048576"}}'
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      // First attempt reports the per-session accumulation wall; the resend must
+      // succeed, which only happens if the derived session id actually changed.
+      if (bodies.length === 1) return new Response(wall, { status: 400 })
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+
+    const failures: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+    for await (const _ of adapter.stream(generateOptions({ sessionId: 'session-1' as never }))) void _
+
+    expect(bodies).toHaveLength(2)
+    const first = bodies[0]!.request.sessionId
+    const second = bodies[1]!.request.sessionId
+    expect(first).toBeDefined()
+    expect(second).toBeDefined()
+    // A different upstream session is the whole recovery mechanism.
+    expect(second).not.toBe(first)
+    // The account is healthy — this is a session-scoped wall, not an account
+    // fault, so it must not cool or rotate the account.
+    expect(failures).toEqual([])
+  })
+
+  it('carries the request id in the body, and sends no request-id header', async () => {
+    // The id used to be stamped in two places. `toAgyRequestBody` and
+    // `buildRequestHeaders` each generated their own, so one request carried
+    // `body.requestId` != `x-goog-request-id` — a shape no client produces, and
+    // invisible to any test that looked at one side only. The body's field is the
+    // one that survived, because `x-goog-request-id` is present in neither
+    // official binary.
+    const seen: Array<{ header: string | null; body: unknown }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({
+        header: new Headers(init?.headers as HeadersInit).get('x-goog-request-id'),
+        body: JSON.parse(String(init?.body)) as { requestId?: string },
+      })
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(seen).toHaveLength(1)
+    expect((seen[0]!.body as { requestId?: string }).requestId).toMatch(/^agent\/\d+\/[0-9a-f]{8}$/)
+    expect(seen[0]!.header).toBeNull()
+  })
+
+  it('gives a resent attempt its own request id', async () => {
+    // The 1M-wall resend is a second upstream request, so it must not repeat the
+    // first one's id — that would look like a replayed request.
+    const seen: Array<{ requestId?: string; sessionId?: string }> = []
+    const wall =
+      '{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed for the model: 1048576"}}'
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { requestId?: string; request: { sessionId?: string } }
+      seen.push({
+        requestId: body.requestId,
+        sessionId: body.request.sessionId,
+      })
+      if (seen.length === 1) return new Response(wall, { status: 400 })
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions({ sessionId: 'session-1' as never }))) void _
+
+    expect(seen).toHaveLength(2)
+    expect(seen[0]!.requestId).toBeDefined()
+    expect(seen[1]!.requestId).not.toBe(seen[0]!.requestId)
+    // Same rule for the upstream session: the resend names a fresh one.
+    expect(seen[1]!.sessionId).not.toBe(seen[0]!.sessionId)
+  })
+
+  it('sends exactly one client User-Agent on the wire, for a real request', async () => {
+    // The `buildRequestHeaders` test above asserts the object it returns; this one
+    // asserts what the dispatch actually hands to `fetch`. That distinction is the
+    // whole reason the original defect survived: the duplicate header was produced
+    // by a spread inside `buildRequestHeaders`, but a re-introduced merge at the
+    // fetch call site would satisfy an object-level test and still announce this
+    // tool on every generation request.
+    const seen: Array<string | null> = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers as HeadersInit).get('user-agent'))
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toBe(session().impersonation['User-Agent'])
+    expect(seen[0]).not.toContain('deepseek-harness')
+    // The comma-joined pair is the exact shape the old spread produced.
+    expect(seen[0]).not.toContain(',')
+  })
+
+  it('does not resend an ordinary 400 under a bumped session id', async () => {
+    const bodies: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return new Response(
+        '{"error":{"code":400,"message":"Request contains an invalid argument."}}',
+        { status: 400 },
+      )
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ sessionId: 'session-1' as never }))) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+    // Resending a malformed payload changes nothing but the session id.
+    expect(bodies).toHaveLength(1)
   })
 
   it('resolves image attachments concurrently and returns a complete map', async () => {
@@ -1304,6 +1648,91 @@ describe('AgyAdapter', () => {
     expect(retryMs).toBeGreaterThan(0)
   })
 
+  it('treats a 403 verification challenge as recoverable, not as a dead credential', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: {
+        code: 403,
+        status: 'PERMISSION_DENIED',
+        message: 'VALIDATION_REQUIRED',
+        details: [{ metadata: { validation_url: 'https://accounts.google.com/verify?t=abc' } }],
+      },
+    }), { status: 403 })))
+
+    const seen: Array<{ kind: string; url?: string }> = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind, _session, info) => { seen.push({ kind, url: info?.verificationUrl }) },
+    })
+
+    // INVALID_CREDENTIAL would tell the user their login is dead and disable the
+    // account; this signal means "verify, then come back".
+    let thrown: { code?: string; failure?: { providerRetryAfterMs?: number } } | undefined
+    try {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    } catch (error) {
+      thrown = error as typeof thrown
+    }
+
+    expect(thrown?.code).toBe('RATE_LIMIT')
+    // No delay may be fed to the harness. The account park IS the cooldown, and
+    // `llm-retry` gives up outright when `providerRetryAfterMs > maxDelayMs`
+    // (`mode: 'normal'` -> `next()`), so the 15-minute value that used to be set
+    // here turned a recoverable challenge into a failed turn instead of letting
+    // DSH retry onto another account. Pinned because re-adding it looks helpful.
+    expect(thrown?.failure?.providerRetryAfterMs).toBeUndefined()
+
+    expect(seen).toEqual([{ kind: 'verification-required', url: 'https://accounts.google.com/verify?t=abc' }])
+  })
+
+  it('surfaces the appeal link in the failure message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: { code: 403, message: 'VALIDATION_REQUIRED', details: [{ metadata: { appeal_url: 'https://appeal.example/x' } }] },
+    }), { status: 403 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toThrow(/https:\/\/appeal\.example\/x/)
+  })
+
+  it('releases the in-flight slot when a consumer abandons the stream', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream(['data: [DONE]']), { status: 200 })))
+
+    const events: string[] = []
+    const account = { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0 }
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      noteRequestStarted: (a) => events.push(`start:${a.email}`),
+      noteRequestSettled: (a) => events.push(`settled:${a.email}`),
+    })
+
+    // Consume one chunk then break: the async generator's `finally` must still run
+    // the release, or the counter leaks and the account is deprioritized forever.
+    for await (const _ of adapter.stream(generateOptions())) break
+    expect(events).toContain(`start:${account.email}`)
+    expect(events).toContain(`settled:${account.email}`)
+  })
+
+  it('releases the in-flight slot when the request fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":"boom"}', { status: 500 })))
+
+    const events: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      noteRequestStarted: () => events.push('start'),
+      noteRequestSettled: () => events.push('settled'),
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'SERVER' })
+    expect(events).toEqual(['start', 'settled'])
+  })
+
   it('maps structured auth failures to the matching host error code', async () => {
     const cases = [
       ['transport', 'TRANSPORT'],
@@ -1340,6 +1769,94 @@ describe('AgyAdapter', () => {
       reportFailure: async () => {},
     })
     await expect(broken.listModels('agy')).rejects.toThrow('store corrupt')
+  })
+
+  it('hides disabled models from listModels but keeps them in listAllModels', async () => {
+    // This pairing is the model-toggle contract: the selector reads listModels
+    // (filtered), while the settings page reads listAllModels (unfiltered) so a
+    // hidden model is still listed next to the switch that un-hides it.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ models: {} }), { status: 200 })))
+    const hidden = new Set(['gemini-2.5-flash'])
+    const adapter = new AgyAdapter({
+      getSession: async () => undefined,
+      reportFailure: async () => {},
+      modelVisibility: { disabledFor: () => hidden },
+    })
+    const visible = await adapter.listModels('agy')
+    const all = await adapter.listAllModels()
+    expect(all.some((model) => model.id === 'gemini-2.5-flash')).toBe(true)
+    expect(visible.some((model) => model.id === 'gemini-2.5-flash')).toBe(false)
+    expect(visible.length).toBe(all.length - 1)
+  })
+
+  it('returns the full catalog when nothing is disabled', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ models: {} }), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => undefined,
+      reportFailure: async () => {},
+      modelVisibility: { disabledFor: () => new Set<string>() },
+    })
+    const visible = await adapter.listModels('agy')
+    const all = await adapter.listAllModels()
+    expect(visible.map((model) => model.id)).toEqual(all.map((model) => model.id))
+  })
+
+  it('records one usage sample per generation, with its token buckets', async () => {
+    const recorded: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":120,"cachedContentTokenCount":20,"candidatesTokenCount":7}}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (sample) => { recorded.push(sample as Record<string, unknown>) },
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(recorded).toHaveLength(1)
+    const sample = recorded[0] as {
+      ok: boolean
+      model?: string
+      account?: string
+      usage?: { input: number, output: number, cacheRead: number }
+    }
+    expect(sample.ok).toBe(true)
+    expect(sample.account).toBe('a@b.c')
+    // Buckets stay disjoint: input is uncached only (120 total minus 20 cached).
+    expect(sample.usage).toMatchObject({ input: 100, output: 7, cacheRead: 20 })
+  })
+
+  it('records a failed attempt without token usage', async () => {
+    const recorded: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('quota', { status: 403 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (sample) => { recorded.push(sample as Record<string, unknown>) },
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toThrow()
+
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0]?.ok).toBe(false)
+    expect(recorded[0]?.usage).toBeUndefined()
+  })
+
+  it('never lets a usage-recording failure break a generation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: () => { throw new Error('ledger exploded') },
+    })
+    const chunks: unknown[] = []
+    for await (const chunk of adapter.stream(generateOptions())) chunks.push(chunk)
+    expect(chunks.length).toBeGreaterThan(0)
   })
 
   it('converts quota-exhausted pool blockage into terminal QUOTA error', async () => {

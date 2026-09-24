@@ -70,7 +70,7 @@ async function main(): Promise<void> {
 
   const random = getRandomizedHeaders()
 
-  const variants: Array<{ name: string; headers: Record<string, string>; project?: string }> = [
+  const variants: Array<{ name: string; headers: Record<string, string>; project?: string; metadata?: unknown }> = [
     {
       name: 'A1 omniroute-cli-headers, no project',
       headers: {
@@ -111,6 +111,11 @@ async function main(): Promise<void> {
       },
       project: discovered.projectId || undefined,
     },
+    // `Client-Metadata` was a HEADER in an earlier version and is absent from
+    // both official binaries. The impersonation surface is two headers plus the
+    // BODY's `metadata` message (`ImpersonationHeaders.clientMetadata`), so the
+    // body is what varies here — reading a `Client-Metadata` key off the header
+    // object yielded `undefined` and sent no identity at all.
     {
       name: 'C1 our-fingerprint-headers, no project',
       headers: {
@@ -118,9 +123,9 @@ async function main(): Promise<void> {
         Accept: 'text/event-stream',
         'User-Agent': random['User-Agent'],
         'X-Goog-Api-Client': random['X-Goog-Api-Client'],
-        'Client-Metadata': random['Client-Metadata'],
         Authorization: `Bearer ${access}`,
       },
+      metadata: random.clientMetadata,
     },
     {
       name: 'C2 our-fingerprint-headers, + project',
@@ -129,17 +134,24 @@ async function main(): Promise<void> {
         Accept: 'text/event-stream',
         'User-Agent': random['User-Agent'],
         'X-Goog-Api-Client': random['X-Goog-Api-Client'],
-        'Client-Metadata': random['Client-Metadata'],
         Authorization: `Bearer ${access}`,
       },
       project: discovered.projectId || undefined,
+      metadata: random.clientMetadata,
     },
   ]
 
   for (const variant of variants) {
-    const probeBody = variant.project
+    let probeBody = variant.project
       ? body.replace('"project":undefined', JSON.stringify(variant.project))
       : body.replace('"project":undefined,', '')
+    // The identity message belongs in the BODY. Injecting it here keeps this
+    // A/B honest: C-variants differ from A/B in the metadata they send, not
+    // merely in which headers they omit.
+    if (variant.metadata !== undefined) {
+      probeBody = probeBody.replace('"requestType":"agent"',
+        `"requestType":"agent","metadata":${JSON.stringify(variant.metadata)}`)
+    }
     const response = await fetch(url, {
       method: 'POST',
       headers: variant.headers,

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgySessionManager, impersonationHeadersFor, SESSION_AFFINITY_WINDOW_MS } from '../src/session.ts'
+import { MAX_IN_FLIGHT_PER_ACCOUNT } from '../src/runtime/rotation.ts'
+import { _setFingerprintDataForTest } from '../src/runtime/fingerprint.ts'
+import { _clearVersionCacheForTest } from '../src/runtime/version.ts'
 import { InMemoryAccountStore } from '../src/store/accounts.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 import type { ManagedAccount } from '../src/types.ts'
@@ -33,7 +36,7 @@ describe('AgySessionManager', () => {
     expect(session).toBeDefined()
     expect(session!.auth.access).toBe('at')
     expect(session!.impersonation['User-Agent']).toMatch(/^antigravity\/\d+\.\d+\.\d+/)
-    expect(session!.impersonation['Client-Metadata']).toContain('ANTIGRAVITY')
+    expect(session!.impersonation.clientMetadata.ideType).toContain('ANTIGRAVITY')
   })
 
   it('uses the persistent fingerprint when the account has one', async () => {
@@ -90,6 +93,31 @@ describe('AgySessionManager', () => {
     vi.useRealTimers()
   })
 
+  it('gives concurrent conversations independent affinity pins', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // Conversation A starts on the active account and pins it.
+    const a1 = await sessions.getSession('gemini-3-flash', undefined, 'session-A')
+    expect(a1!.index).toBe(0)
+
+    // Conversation B is steered elsewhere (its own first pick follows the shared
+    // activeIndex, which A's pin does not change) and pins that account.
+    await store.mutate((s) => { s.activeIndex = 1 })
+    const b1 = await sessions.getSession('gemini-3-flash', undefined, 'session-B')
+    expect(b1!.index).toBe(1)
+
+    // Both pins must survive independently. With the old single-slot pin, B's
+    // selection overwrote A's and A would silently migrate on its next turn.
+    expect((await sessions.getSession('gemini-3-flash', undefined, 'session-A'))!.index).toBe(0)
+    expect((await sessions.getSession('gemini-3-flash', undefined, 'session-B'))!.index).toBe(1)
+
+    // A pinned account failing frees only the conversations pinned to it.
+    await sessions.reportFailure('rate-limit', b1!)
+    expect((await sessions.getSession('gemini-3-flash', undefined, 'session-A'))!.index).toBe(0)
+  })
+
   it('drops session affinity when the pinned account rotates', async () => {
     stubTokenEndpoint()
     const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
@@ -144,7 +172,6 @@ describe('AgySessionManager', () => {
     expect(after.accounts[0]!.fingerprintHistory).toHaveLength(1)
   })
 })
-
 
   it('heals a missing projectId at request time and persists it', async () => {
     // token endpoint + loadCodeAssist discovery
@@ -298,6 +325,50 @@ describe('usage-driven selection', () => {
     expect(second!.index).toBe(0)
   })
 
+  it('uses a below-threshold account when it is the only candidate', async () => {
+    stubTokenEndpoint()
+    // Pins the DECISION, not just the mechanism: a drained account is ranked last
+    // and thus skipped whenever an alternative exists (the test above), but it is
+    // deliberately NOT hard-blocked until it is actually empty. Refusing to use
+    // the last 5% would fail the turn outright, which is worse than spending
+    // quota that resets anyway. AM's `quota_protection` reserves a percentage by
+    // excluding such an account outright; that is a different product decision
+    // (a reserve for a shared gateway) and would be a regression for a
+    // single-user plugin whose alternative is "no answer".
+    const store = new InMemoryAccountStore(storage([
+      quotaAccount('only@x', { google: { remainingFraction: 0.05 } }),
+    ], 0))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session).toBeDefined()
+    expect(session!.index).toBe(0)
+  })
+
+  it('spreads concurrent fan-out off an account that is at its in-flight cap', async () => {
+    stubTokenEndpoint()
+    const a = account('a@x')
+    const b = account('b@x')
+    const store = new InMemoryAccountStore(storage([a, b], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // Saturate account 0 (the one plain ranking would choose) and confirm the next
+    // unrelated conversation is steered to account 1 instead of stacking on it.
+    for (let i = 0; i < MAX_IN_FLIGHT_PER_ACCOUNT; i++) sessions.noteRequestStarted(a)
+    const spread = await sessions.getSession('gemini-3-flash', undefined, 'session-C')
+    expect(spread!.index).toBe(1)
+
+    // Settling frees it again. Re-seed activeIndex first: spreading rotated it to
+    // 1, and ranking is deliberately biased to the active index, which would
+    // otherwise mask whether the cap still excludes account 0.
+    sessions.noteRequestSettled(a)
+    sessions.noteRequestSettled(a)
+    sessions.noteRequestSettled(a)
+    await store.mutate((s) => { s.activeIndex = 0 })
+    const back = await sessions.getSession('gemini-3-flash', undefined, 'session-D')
+    expect(back!.index).toBe(0)
+  })
+
   it('ingests fresh family quotas from fetchAvailableModels when the cache is stale', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -437,13 +508,41 @@ describe('usage-driven selection', () => {
     expect(session!.index).toBe(0)
   })
 
-  it('stable fingerprint mode serves deterministic fallback headers without a fingerprint', () => {
-    vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', 'stable')
-    const first = impersonationHeadersFor(account('a@x'))
-    const second = impersonationHeadersFor(account('a@x'))
-    expect(first).toEqual(second)
-    expect(first['Client-Metadata']).toContain('ANTIGRAVITY')
-    vi.unstubAllEnvs()
+  it('serves deterministic fallback headers without a fingerprint, in either mode', () => {
+    // The pre-fingerprint fallback used to re-randomize platform per call in the
+    // default `dynamic` mode, so one account's consecutive requests could claim
+    // two different platforms. An OS that changes between two requests of one
+    // session is a stronger anomaly than a stale version, so the fallback is now
+    // deterministic regardless of mode — and the platform is pinned outright.
+    for (const mode of ['dynamic', 'stable']) {
+      vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', mode)
+      const first = impersonationHeadersFor(account('a@x'))
+      const second = impersonationHeadersFor(account('a@x'))
+      expect(first).toEqual(second)
+      expect(first['User-Agent']).toMatch(/^antigravity\/\d+\.\d+\.\d+ \S+$/)
+      expect(first.clientMetadata.ideType).toContain('ANTIGRAVITY')
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('freezes one device identity per account from the first request', async () => {
+    stubTokenEndpoint()
+    const acc = account('first-use@x')
+    const store = new InMemoryAccountStore(storage([acc]))
+    const sessions = new AgySessionManager({ store })
+
+    expect(await sessions.getSession('gemini-3-flash')).toBeDefined()
+    const after = (await store.load()).accounts[0]!
+    // The identity must exist before any rate-limit: otherwise the fallback path
+    // serves the first requests and the account appears to change machine.
+    expect(after.fingerprint).toBeDefined()
+    expect(after.fingerprintHistory?.length).toBe(1)
+    expect(after.fingerprintHistory?.[0]?.reason).toBe('initial')
+
+    const first = after.fingerprint!.userAgent
+    // A second session on the same account reuses the stored identity.
+    expect(await sessions.getSession('gemini-3-flash')).toBeDefined()
+    expect((await store.load()).accounts[0]!.fingerprint!.userAgent).toBe(first)
   })
 
   it('health-check probes enabled accounts in batch and re-enables live ones', async () => {
@@ -936,22 +1035,28 @@ describe('verifyAccount', () => {
 })
 
 describe('impersonationHeadersFor', () => {
-  it('randomizes when no fingerprint exists and stays stable with one', () => {
+  it('is deterministic without a fingerprint, and uses the snapshot with one', () => {
     const base = account()
     const first = impersonationHeadersFor(base)
     const second = impersonationHeadersFor(base)
     expect(first['User-Agent']).toMatch(/^antigravity\//)
-    // no fingerprint → each call randomizes (no stability promise)
-    expect(impersonationHeadersFor(base)).toBeDefined()
-    void second
+    // No fingerprint yet: one FIXED identity, identical on every call. This used
+    // to randomize per request, which is the anomaly the stable posture removes —
+    // a device that presents a different platform/SDK-client on each call is not
+    // something an official client does.
+    expect(second).toEqual(first)
 
     const fp = { deviceId: 'd', sessionToken: 's', userAgent: 'antigravity/1.0.0 windows/amd64', apiClient: 'c', clientMetadata: { ideType: 'ANTIGRAVITY' }, createdAt: 0 }
     const stable = impersonationHeadersFor({ ...base, fingerprint: fp })
     expect(stable).toEqual({
       'User-Agent': 'antigravity/1.0.0 windows/amd64',
       'X-Goog-Api-Client': 'c',
-      'Client-Metadata': '{"ideType":"ANTIGRAVITY"}',
+      clientMetadata: { ideType: 'ANTIGRAVITY' },
     })
+    // The metadata is a BODY message and must not leak back into the headers: an
+    // object value spread into a `HeadersInit` is the shape that produced the
+    // comma-joined User-Agent this suite already guards against.
+    expect(Object.keys(stable).sort()).toEqual(['User-Agent', 'X-Goog-Api-Client', 'clientMetadata'])
   })
 })
 
@@ -1031,6 +1136,82 @@ describe('testCall routing (issue #29)', () => {
       const dispatcher = (streamCall![1] as { dispatcher?: unknown } | undefined)?.dispatcher
       expect(dispatcher).toBe(await dispatcherForAsync(accountProxy, { streaming: true }))
     })
+  })
+})
+
+describe('pinned test call (management "Test call" per account row)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  /**
+   * Answer the token endpoint per account and record which bearer each stream
+   * call carried, so the test can prove WHICH account was probed.
+   *
+   * The marker is decoded from the form body because `URLSearchParams`
+   * percent-encodes the `@` in a real refresh token (`rt-b@x` -> `rt-b%40x`).
+   * Only `streamGenerateContent` is recorded: the pool path also calls
+   * `fetchAvailableModels`, which is not the call under test.
+   */
+  function stubStream(accounts: ManagedAccount[]): { store: InMemoryAccountStore, streams: string[] } {
+    const streams: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = decodeURIComponent(String(init?.body ?? ''))
+      if (url.includes('token')) {
+        const which = body.includes('rt-b@x') ? 'b' : 'a'
+        return new Response(JSON.stringify({ access_token: `at-${which}`, expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('streamGenerateContent')) {
+        streams.push(String((init?.headers as Record<string, string> | undefined)?.authorization ?? ''))
+      }
+      return new Response('data: [{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}]\n\ndata: [DONE]\n', {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }))
+    return { store: new InMemoryAccountStore(storage(accounts, 0)), streams }
+  }
+
+  it('tests the requested account, not the affinity/active one', async () => {
+    // Regression: the clicked row's index was dropped on the way to the host, so
+    // the probe ran on whichever account affinity picked (here index 0) while its
+    // result was shown — and recorded — against the row the user clicked.
+    const { store, streams } = stubStream([account('a@x'), account('b@x')])
+    const sessions = new AgySessionManager({ store })
+
+    const result = await sessions.testCall('gemini-3.6-flash-high', { accountIndex: 1 })
+    expect(result.ok).toBe(true)
+    expect(streams).toEqual(['Bearer at-b'])
+  })
+
+  it('does not move the pool cursor for a test call', async () => {
+    // A one-shot probe is not "using" the account: repointing activeIndex would
+    // steer the next real conversation onto the account that was merely tested.
+    const { store } = stubStream([account('a@x'), account('b@x')])
+    const sessions = new AgySessionManager({ store })
+    await sessions.testCall('gemini-3.6-flash-high', { accountIndex: 1 })
+    expect((await store.load()).activeIndex).toBe(0)
+  })
+
+  it('reports a missing or disabled pinned account instead of falling back', async () => {
+    // Falling back would answer a question nobody asked and attribute the result
+    // to the wrong account, which is the bug this pin exists to prevent.
+    const { store } = stubStream([account('a@x'), { ...account('b@x'), enabled: false }])
+    const sessions = new AgySessionManager({ store })
+    const missing = await sessions.testCall('gemini-3.6-flash-high', { accountIndex: 9 })
+    expect(missing.ok).toBe(false)
+    expect(missing.error).toMatch(/not found/)
+
+    const disabled = await sessions.testCall('gemini-3.6-flash-high', { accountIndex: 1 })
+    expect(disabled.ok).toBe(false)
+    expect(disabled.error).toMatch(/disabled/)
+  })
+
+  it('still ranks the pool when no index is given', async () => {
+    const { store, streams } = stubStream([account('a@x'), account('b@x')])
+    const sessions = new AgySessionManager({ store })
+    const result = await sessions.testCall('gemini-3.6-flash-high')
+    expect(result.ok).toBe(true)
+    expect(streams).toHaveLength(1)
   })
 })
 
@@ -1127,4 +1308,100 @@ describe('proxyless transport failover (issue #29)', () => {
     expect(after.accounts[0]!.coolingDownUntil).toBeUndefined()
     expect(after.accounts[0]!.cooldownReason).toBeUndefined()
   })
+})
+
+/**
+ * Kept last on purpose: it clears the version feed caches, and the 750 ms bounded
+ * resolve its hang forces would otherwise be paid again by every later
+ * rate-limit test in this file.
+ */
+describe('fingerprint version freshness', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('never freezes a new fingerprint onto a random pool version', async () => {
+    // Whatever version is written here is the account's User-Agent for the
+    // lifetime of that fingerprint. The only way this path reaches
+    // `generateFingerprint` without a version is the bounded resolve giving up
+    // (750 ms) — the slow-or-blocked-feed cold start — and that function's own
+    // default then picks a RANDOM `versionPool` entry, which could freeze an
+    // account onto a two-minor-old client. The pool is forced to a single stale
+    // entry and the feed HANGS, so the 750 ms race is what actually decides and a
+    // regression cannot pass by luck.
+    _clearVersionCacheForTest()
+    _setFingerprintDataForTest({
+      versionPool: ['1.22.2'],
+      platforms: ['darwin/arm64'],
+      sdkClients: ['google-cloud-sdk vscode/1.96.0'],
+      ideTypes: ['ANTIGRAVITY'],
+    })
+    try {
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes('oauth2.googleapis.com/token')) {
+          return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+        }
+        // Accept and never answer. Rejecting fast would NOT reproduce the case: the
+        // public resolver applies the pinned fallback itself, so a fast failure
+        // never reaches `generateFingerprint` without a version.
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+        })
+      }))
+      const store = new InMemoryAccountStore(storage([account('a@x')]))
+      const sessions = new AgySessionManager({ store })
+      const session = await sessions.getSession('gemini-3-flash')
+
+      // Strip the identity that first use just created, so the assertion exercises
+      // the rate-limit creation path. Leaving it in place made this test vacuous:
+      // the first-use path (`getSession`) already passes `currentAgyVersion()`
+      // explicitly, and with a fingerprint present `consecutive` is 1, so nothing
+      // was generated here at all and the random-pool default was never reached.
+      await store.mutate((draft) => {
+        delete draft.accounts[0]!.fingerprint
+        delete draft.accounts[0]!.fingerprintHistory
+      })
+      await sessions.reportFailure('rate-limit', session!, { model: 'gemini-3-flash' })
+
+      const fp = (await store.load()).accounts[0]!.fingerprint!
+      expect(fp.userAgent).not.toContain('1.22.2')
+      expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ darwin\/arm64$/)
+    } finally {
+      _setFingerprintDataForTest(undefined)
+      vi.unstubAllGlobals()
+    }
+  }, 5_000)
+
+  it('probes the version feeds through the failing account egress', async () => {
+    // The feeds belong to no account, but the request still egresses the host: a
+    // per-account-proxy user must not leak the real IP on the failure path. The
+    // boot-time probe already routed this way; this one was left on the env/direct
+    // route, which is the drift `probeFetch` now prevents.
+    _clearVersionCacheForTest()
+    const probed: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      probed.push((init as { dispatcher?: unknown } | undefined)?.dispatcher)
+      // Never answer: the bounded resolve gives up, and all we assert is WHICH
+      // egress carried the attempt.
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    }))
+
+    // A REAL loopback listener: `proxiedFetch` TCP-fast-fails before it reaches
+    // `fetch`, so a closed port would never exercise the routing at all.
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    await withProxyFixture(async (proxyUrl) => {
+      const store = new InMemoryAccountStore(storage([{ ...account('a@x'), proxy: proxyUrl }]))
+      const sessions = new AgySessionManager({ store })
+      const session = await sessions.getSession('gemini-3-flash')
+      await sessions.reportFailure('rate-limit', session!, { model: 'gemini-3-flash' })
+
+      expect(probed.length).toBeGreaterThan(0)
+      expect(probed[0]).not.toBeUndefined()
+      expect(probed[0]).toBe(await dispatcherForAsync(proxyUrl))
+    })
+  }, 5_000)
 })

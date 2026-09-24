@@ -1,30 +1,39 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   classifyFetchError,
   classifyHttpError,
   classifyRefreshFailure,
   describeFetchError,
+  extractVerificationUrl,
+  isSessionAccumulationOverflow,
 } from '../src/runtime/classify.ts'
 import {
   computeSoftQuotaCacheTtlMs,
   decideRotation,
   isCoolingDown,
-  isOverSoftQuota,
-  isRateLimited,
+  isFamilyRateLimited,
   pickNextAccountIndex,
+  pickProbeProxyUrl,
   recordRateLimit,
+  VERIFICATION_COOLDOWN_MS,
 } from '../src/runtime/rotation.ts'
 import {
-  buildFingerprintHeaders,
   generateFingerprint,
   getRandomizedHeaders,
   getStableHeaders,
+  MAX_FINGERPRINT_HISTORY,
   recordFingerprintVersion,
-  restoreFingerprint,
   updateFingerprintVersion,
 } from '../src/runtime/fingerprint.ts'
-import { deriveAntigravitySessionId, generateAntigravityRequestId, generateAntigravitySessionId } from '../src/runtime/identity.ts'
-import { resolveAntigravityVersion } from '../src/runtime/version.ts'
+import {
+  _clearSessionGenerationsForTest,
+  bumpSessionGeneration,
+  currentSessionGeneration,
+  deriveAntigravitySessionId,
+  generateAntigravityRequestId,
+} from '../src/runtime/identity.ts'
+import { _clearVersionCacheForTest, resolveAntigravityVersion } from '../src/runtime/version.ts'
+import { parseQuotaSummary } from '../src/adapter/quota-summary.ts'
 import {
   FAMILY_UNKNOWN,
   familyKeyOf,
@@ -79,6 +88,41 @@ describe('classifyHttpError', () => {
     expect(quota.rateLimitCategory).toBe('quota_exhausted')
     const plain = classifyHttpError(403, new Headers(), '{"error":"access_denied"}')
     expect(plain.kind).toBe('auth-failure')
+  })
+
+  it('separates a verification challenge from dead credentials', () => {
+    // The upstream asking the owner to verify is RECOVERABLE. Classifying it as
+    // auth-failure permanently disabled a healthy account on a signal that meant
+    // "come back after verifying".
+    const challenge = classifyHttpError(403, new Headers(), JSON.stringify({
+      error: {
+        code: 403,
+        status: 'PERMISSION_DENIED',
+        message: 'VALIDATION_REQUIRED',
+        details: [{ metadata: { validation_url: 'https://accounts.google.com/verify?token=abc' } }],
+      },
+    }))
+    expect(challenge.kind).toBe('verification-required')
+    expect(challenge.verificationUrl).toBe('https://accounts.google.com/verify?token=abc')
+
+    // A genuine ban is still terminal.
+    const banned = classifyHttpError(
+      403,
+      new Headers(),
+      '{"error":{"code":403,"message":"Your account has been suspended due to a violation of the Terms of Service"}}',
+    )
+    expect(banned.kind).toBe('auth-failure')
+  })
+
+  it('extracts the appeal link from either RPC metadata field, or textually', () => {
+    expect(extractVerificationUrl(JSON.stringify({
+      error: { details: [{ metadata: { appeal_url: 'https://appeal.example/x' } }] },
+    }))).toBe('https://appeal.example/x')
+    // Google escapes & as \u0026 inside the JSON string form.
+    expect(extractVerificationUrl('please verify your account at https://x.example/v?a=1\\u0026b=2 now'))
+      .toBe('https://x.example/v?a=1&b=2')
+    expect(extractVerificationUrl('{"error":"no url here"}')).toBeUndefined()
+    expect(extractVerificationUrl(undefined)).toBeUndefined()
   })
 
   it('classifies 5xx as transient with backoff retry', () => {
@@ -199,6 +243,33 @@ describe('classifyHttpError', () => {
 })
 
 describe('rotation state machine', () => {
+  describe('probe routing', () => {
+    it('uses the account that would serve the next request', () => {
+      // The version feeds belong to no account, but a probe on the env/direct
+      // route would egress the host IP that a per-account-proxy user asked to
+      // hide, at boot.
+      expect(pickProbeProxyUrl([account(), account()], 0)).toBeUndefined()
+      const routed = [account(), account()]
+      routed[1]!.proxy = 'socks5://127.0.0.1:1080'
+      expect(pickProbeProxyUrl(routed, 1)).toBe('socks5://127.0.0.1:1080')
+      // An unproxied active account means direct, even when a sibling has a proxy:
+      // the probe follows the account that would carry the next request.
+      expect(pickProbeProxyUrl(routed, 0)).toBeUndefined()
+    })
+
+    it('skips a disabled or cooling active account', () => {
+      const off = { ...account(), enabled: false }
+      const cooling = account()
+      cooling.coolingDownUntil = Date.now() + 60_000
+      const usable = account()
+      usable.proxy = 'http://127.0.0.1:3128'
+      expect(pickProbeProxyUrl([off, usable], 0)).toBe('http://127.0.0.1:3128')
+      expect(pickProbeProxyUrl([cooling, usable], 0)).toBe('http://127.0.0.1:3128')
+      expect(pickProbeProxyUrl([off], 0)).toBeUndefined()
+      expect(pickProbeProxyUrl([], 0)).toBeUndefined()
+    })
+  })
+
   it('rotates on rate-limit with backoff', () => {
     const acc = account()
     const decision = decideRotation('rate-limit', acc, 0, undefined, 'rate_limited')
@@ -227,6 +298,23 @@ describe('rotation state machine', () => {
     expect(decision.action).toBe('revoke')
     expect(acc.enabled).toBe(false)
     expect(acc.verificationRequired).toBe(true)
+  })
+
+  it('parks a verification challenge instead of disabling the account', () => {
+    const acc = account()
+    const before = Date.now()
+    const decision = decideRotation('verification-required', acc, 0)
+
+    // Recoverable: the credential is intact, so the account must stay ENABLED and
+    // come back on its own. `revoke` here was the defect — it permanently
+    // disabled healthy accounts on an upstream request to verify.
+    expect(decision.action).toBe('cool')
+    expect(acc.enabled).not.toBe(false)
+    expect(acc.coolingDownUntil).toBeGreaterThanOrEqual(before + VERIFICATION_COOLDOWN_MS)
+    expect(acc.cooldownReason).toBe('validation-required')
+    // The challenge state is still recorded, so the UI can explain the pause.
+    expect(acc.verificationRequired).toBe(true)
+    expect(acc.verificationRequiredReason).toBe('validation-required')
   })
 
   it('retries transient failures without mutating state', () => {
@@ -301,20 +389,13 @@ describe('rotation state machine', () => {
   it('tracks rate limits and cooldowns', () => {
     const acc = account()
     recordRateLimit(acc, 'gemini-x', Date.now() + 5000)
-    expect(isRateLimited(acc)).toBe(true)
+    // The live reader is family-scoped; `isFamilyDrained`/ranking consume the
+    // same map, which is what actually keeps a limited account out of rotation.
+    expect(isFamilyRateLimited(acc, 'gemini-x')).toBe(true)
+    expect(isFamilyRateLimited(acc, 'claude-x')).toBe(false)
     expect(isCoolingDown(acc)).toBe(false)
     const cooled = { ...account(), coolingDownUntil: Date.now() + 5000 }
     expect(isCoolingDown(cooled)).toBe(true)
-  })
-
-  it('soft quota pre-check avoids burning requests', () => {
-    const acc = account()
-    expect(isOverSoftQuota(acc, 'm1')).toBe(false)
-    acc.cachedQuota = { m1: { remainingFraction: 0.05 } }
-    expect(isOverSoftQuota(acc, 'm1')).toBe(true)
-    expect(isOverSoftQuota(acc, 'm2')).toBe(false)
-    acc.cachedQuota = { m1: { remainingFraction: 0.05, resetTime: '2000-01-01T00:00:00Z' } }
-    expect(isOverSoftQuota(acc, 'm1')).toBe(false)
   })
 
   it('computes quota cache TTLs by health', () => {
@@ -330,25 +411,32 @@ describe('fingerprint', () => {
     const fp = generateFingerprint()
     expect(fp.deviceId).toMatch(/^[0-9a-f-]{36}$/)
     expect(fp.sessionToken).toMatch(/^[0-9a-f]{32}$/)
-    expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ (windows|darwin)\/\S+$/)
+    // Platform pinned. The official `ClientMetadata.Platform` enum read out of the
+    // installed CLI is `PLATFORM_UNSPECIFIED | DARWIN_AMD64 | DARWIN_ARM64 |
+    // LINUX_AMD64 | LINUX_ARM64 | WINDOWS_AMD64`, so these Go-style tokens ARE the
+    // official vocabulary for the enum — while the UA's own `darwin/arm64` token is
+    // a separate, still-uncaptured thing (docs/official-identity.json).
+    expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ darwin\/arm64$/)
     expect(fp.clientMetadata.ideType).toBe('ANTIGRAVITY')
-    // Client-Metadata must only transmit ideType (backend rejects extras)
-    expect(Object.keys(fp.clientMetadata)).toEqual(['ideType'])
-  })
-
-  it('composes only User-Agent from a fingerprint', () => {
-    expect(buildFingerprintHeaders(null)).toEqual({})
-    const fp = generateFingerprint()
-    const headers = buildFingerprintHeaders(fp)
-    expect(headers['User-Agent']).toBe(fp.userAgent)
-    expect(Object.keys(headers)).toEqual(['User-Agent'])
+    // The metadata is the official `ClientMetadata` message: only fields whose
+    // vocabulary is captured, so `pluginVersion`/`ideName`/... stay absent rather
+    // than guessed.
+    expect(fp.clientMetadata.ideVersion).toBe(fp.userAgent.replace(/^antigravity\//, '').replace(/ .*$/, ''))
+    expect([
+      'PLATFORM_UNSPECIFIED', 'DARWIN_AMD64', 'DARWIN_ARM64',
+      'LINUX_AMD64', 'LINUX_ARM64', 'WINDOWS_AMD64',
+    ]).toContain(fp.clientMetadata.platform)
+    // Not the UA's token: conflating the two vocabularies is how `"MACOS"` — not a
+    // member of that enum — came to be sent and rejected with INVALID_ARGUMENT.
+    expect(fp.clientMetadata.platform).not.toBe('darwin/arm64')
+    expect(Object.keys(fp.clientMetadata).sort()).toEqual(['ideType', 'ideVersion', 'platform'])
   })
 
   it('randomizes per-request headers across the pools', () => {
     const seen = new Set<string>()
     for (let i = 0; i < 40; i++) {
       const headers = getRandomizedHeaders()
-      expect(headers['Client-Metadata']).toContain('"ideType":"ANTIGRAVITY"')
+      expect(headers.clientMetadata.ideType).toContain('ANTIGRAVITY')
       seen.add(headers['X-Goog-Api-Client'])
     }
     expect(seen.size).toBeGreaterThan(1)
@@ -363,31 +451,31 @@ describe('fingerprint', () => {
     expect(fp.userAgent).toBe(before.replace(/antigravity\/[\d.]+/, 'antigravity/9.9.9'))
   })
 
-  it('bounds history and restores prior fingerprints', () => {
+  it('bounds the fingerprint history to the most recent entries', () => {
     let history: ReturnType<typeof recordFingerprintVersion> | undefined
-    const first = generateFingerprint()
-    history = recordFingerprintVersion(history, first, 'initial')
+    history = recordFingerprintVersion(history, generateFingerprint(), 'initial')
     for (let i = 0; i < 3; i++) {
       history = recordFingerprintVersion(history, generateFingerprint(), 'regenerated')
     }
     expect(history!.length).toBe(4)
-    expect(restoreFingerprint(history, generateFingerprint())?.deviceId).toBe(first.deviceId)
-    // eviction: after 8 regenerations the initial entry is gone; nothing restorable remains
+
+    // Eviction keeps only the newest MAX_FINGERPRINT_HISTORY entries. The history
+    // is an audit trail of identities this account has presented; it is
+    // deliberately not restorable (see the non-goals in the review doc).
     let evicted = history
     for (let i = 0; i < 8; i++) {
       evicted = recordFingerprintVersion(evicted, generateFingerprint(), 'regenerated')
     }
-    expect(evicted!.length).toBe(5)
-    const current = generateFingerprint()
-    expect(restoreFingerprint(evicted, current)?.deviceId).toBe(current.deviceId)
+    expect(evicted!.length).toBe(MAX_FINGERPRINT_HISTORY)
+    expect(evicted!.at(-1)!.reason).toBe('regenerated')
   })
 
   it('pins deterministic fallback headers for the stable mode', () => {
     const first = getStableHeaders()
     const second = getStableHeaders()
     expect(first).toEqual(second)
-    expect(first['Client-Metadata']).toContain('"ideType"')
-    expect(Object.keys(first).sort()).toEqual(['Client-Metadata', 'User-Agent', 'X-Goog-Api-Client'])
+    expect(first.clientMetadata.ideType).toBe('ANTIGRAVITY')
+    expect(Object.keys(first).sort()).toEqual(['User-Agent', 'X-Goog-Api-Client', 'clientMetadata'])
   })
 })
 
@@ -410,9 +498,8 @@ describe('risk controls', () => {
 })
 
 describe('identity', () => {
-  it('generates request ids and session ids in backend shape', () => {
+  it('generates request ids in backend shape', () => {
     expect(generateAntigravityRequestId()).toMatch(/^agent\/\d+\/[0-9a-f]{8}$/)
-    expect(generateAntigravitySessionId()).toMatch(/^-\d{1,19}$/)
   })
 
   it('derives stable per-account session ids', () => {
@@ -423,22 +510,114 @@ describe('identity', () => {
     expect(deriveAntigravitySessionId('')).toBeNull()
     expect(deriveAntigravitySessionId(null)).toBeNull()
   })
+
+  it('scopes the session id to one conversation, not one account', () => {
+    const account = 'user@example.com'
+    const conversation = 'session-1'
+    const scoped = deriveAntigravitySessionId(account, conversation, 0)
+
+    // Stable across a conversation's turns: the upstream accumulates input per
+    // sessionId, so a drifting id would abandon the server-side session.
+    expect(deriveAntigravitySessionId(account, conversation, 0)).toBe(scoped)
+    expect(scoped).toMatch(/^-\d+$/)
+
+    // A different conversation on the SAME account must not share an upstream
+    // session. A single per-account constant made every conversation look like
+    // one session — a structural anomaly no official client produces.
+    expect(deriveAntigravitySessionId(account, 'session-2', 0)).not.toBe(scoped)
+
+    // A generation bump must name a fresh upstream session (the 1M recovery).
+    expect(deriveAntigravitySessionId(account, conversation, 1)).not.toBe(scoped)
+
+    // Neither may another account.
+    expect(deriveAntigravitySessionId('other@example.com', conversation, 0)).not.toBe(scoped)
+  })
+
+  it('gives a fork its own upstream session, and its own generation counter', () => {
+    // A DSH fork copies the message history into a NEW session id. If the derived
+    // id depended on the account alone (the pre-fix behaviour, and the shape a
+    // "reuse the parent's identity" shortcut would take), the fork would inherit
+    // the parent's server-side accumulated input and hit the 1M wall early.
+    _clearSessionGenerationsForTest()
+    const account = 'user@example.com'
+    const parent = deriveAntigravitySessionId(account, 'conversation-parent', 0)
+    const fork = deriveAntigravitySessionId(account, 'conversation-fork', 0)
+    expect(fork).not.toBe(parent)
+
+    // The counter is per conversation, so escaping the wall in the parent does not
+    // silently move the fork onto a different upstream session than the one its
+    // turns have been accumulating into.
+    expect(bumpSessionGeneration(account, 'conversation-parent')).toBe(1)
+    expect(currentSessionGeneration(account, 'conversation-fork')).toBe(0)
+    expect(deriveAntigravitySessionId(account, 'conversation-fork', currentSessionGeneration(account, 'conversation-fork'))).toBe(fork)
+  })
+
+  it('degrades to the per-account id when no conversation is supplied', () => {
+    // The standalone CLI has no session store; it must not invent a conversation
+    // (a random id would look like a brand-new session on every single call).
+    const perAccount = deriveAntigravitySessionId('user@example.com')
+    expect(deriveAntigravitySessionId('user@example.com', undefined, 0)).toBe(perAccount)
+    expect(deriveAntigravitySessionId('user@example.com', null, 0)).toBe(perAccount)
+  })
+
+  it('tracks one generation counter per (account, conversation)', () => {
+    _clearSessionGenerationsForTest()
+    const account = 'user@example.com'
+    expect(currentSessionGeneration(account, 'a')).toBe(0)
+    expect(currentSessionGeneration(account, 'b')).toBe(0)
+
+    expect(bumpSessionGeneration(account, 'a')).toBe(1)
+    // Bumping one conversation must not disturb another, nor another account.
+    expect(currentSessionGeneration(account, 'b')).toBe(0)
+    expect(currentSessionGeneration('other@example.com', 'a')).toBe(0)
+    expect(bumpSessionGeneration(account, 'a')).toBe(2)
+  })
+})
+
+describe('session accumulation wall', () => {
+  /** The measured upstream body for a session whose server-side input passed 1M. */
+  const WALL =
+    '{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed for the model: 1048576"}}'
+
+  it('detects the bumpable per-session wall', () => {
+    expect(isSessionAccumulationOverflow(400, WALL)).toBe(true)
+    expect(isSessionAccumulationOverflow(400, 'input token count exceeds the maximum')).toBe(true)
+  })
+
+  it('does not treat an ordinary 400 or another status as the wall', () => {
+    // A generic 400 is a malformed request: resending it under a bumped session
+    // id would send the same broken payload again.
+    expect(isSessionAccumulationOverflow(400, '{"error":{"code":400,"message":"Request contains an invalid argument."}}')).toBe(false)
+    expect(isSessionAccumulationOverflow(400, undefined)).toBe(false)
+    expect(isSessionAccumulationOverflow(500, WALL)).toBe(false)
+    expect(isSessionAccumulationOverflow(429, WALL)).toBe(false)
+  })
 })
 
 describe('version resolver', () => {
   afterEach(() => vi.unstubAllGlobals())
+  // The 6h cache is process state, so an earlier test's resolution would answer
+  // this one and the assertion below would never reach the stub.
+  beforeEach(() => _clearVersionCacheForTest())
 
-  it('picks the newest semver from sources', async () => {
+  it('takes the version from the claimed product line, not the highest number', async () => {
+    // The resolver used to return the numeric max across BOTH feeds. The three
+    // Antigravity lines are separate namespaces (IDE 2.x, hub 2.15.x, CLI 1.2.x),
+    // so "max" compares unrelated numbers: the IDE feed's 1.20.1 wins here and this
+    // client would advertise a version that does not exist for the CLI it claims to
+    // be (docs/official-identity.json). Red-capable: the old logic returns 1.20.1.
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.includes('antigravity-auto-updater')) {
         return new Response(JSON.stringify([{ version: '1.15.0' }, { version: '1.20.1' }]), { status: 200 })
       }
-      return new Response(JSON.stringify({ tag_name: 'v1.19.0' }), { status: 200 })
+      // No leading `v`: that is the shape the real feed returns (`tag: "1.2.9"`),
+      // and a `v`-prefixed tag is not what this parser accepts.
+      return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
     const version = await resolveAntigravityVersion(fetchImpl)
-    expect(version).toBe('1.20.1')
+    expect(version).toBe('1.19.0')
   })
 
   it('falls back to the pinned version when sources fail', async () => {
@@ -487,6 +666,79 @@ describe('family quota ingestion', () => {
     })
     expect(ingestFamilyQuotas({})).toEqual({})
     expect(ingestFamilyQuotas({ models: undefined })).toEqual({})
+  })
+})
+
+describe('quota summary (5h / weekly windows)', () => {
+  it('parses upstream groups and keeps the group split verbatim', () => {
+    // The group names are upstream's own, and the `3p-*` buckets cover Claude
+    // AND GPT — a split no model-id prefix rule reproduces, which is why it is
+    // carried through rather than re-derived.
+    const groups = parseQuotaSummary({
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.61, resetTime: '2026-09-25T01:22:55Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.16, resetTime: '2026-09-23T19:29:55Z' },
+          ],
+        },
+        {
+          displayName: 'Claude and GPT models',
+          buckets: [
+            { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.73 },
+            { bucketId: '3p-5h', window: '5h', remainingFraction: 0.99 },
+          ],
+        },
+      ],
+    })
+    expect(groups.map((g) => g.name)).toEqual(['Gemini Models', 'Claude and GPT models'])
+    // Shortest window first, regardless of upstream order (weekly came first above).
+    expect(groups[0]!.windows.map((w) => w.window)).toEqual(['5h', 'weekly'])
+    expect(groups[0]!.windows[0]).toEqual({
+      bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.16, resetTime: '2026-09-23T19:29:55Z',
+    })
+    // An omitted resetTime is null (unknown), not a fabricated value.
+    expect(groups[1]!.windows[0]!.resetTime).toBeNull()
+  })
+
+  it('clamps fractions and rejects unusable payloads', () => {
+    const groups = parseQuotaSummary({
+      groups: [
+        {
+          displayName: 'G',
+          buckets: [
+            { bucketId: 'a', window: '5h', remainingFraction: 1.5 },
+            { bucketId: 'b', window: '5h', remainingFraction: -0.2 },
+            { bucketId: 'c', window: '5h', remainingFraction: 'nope' },
+          ],
+        },
+        // A group with no usable bucket is dropped, not rendered as an empty card.
+        { displayName: 'Empty', buckets: [] },
+        { displayName: 'NoBuckets' },
+      ],
+    })
+    expect(groups).toHaveLength(1)
+    expect(groups[0]!.windows.map((w) => w.remainingFraction)).toEqual([1, 0, null])
+    // Malformed containers degrade to "no windows" rather than throwing.
+    expect(parseQuotaSummary(null)).toEqual([])
+    expect(parseQuotaSummary({})).toEqual([])
+    expect(parseQuotaSummary({ groups: 'nope' })).toEqual([])
+  })
+
+  it('accepts only buckets carrying both an id and a window', () => {
+    const groups = parseQuotaSummary({
+      groups: [{
+        displayName: 'G',
+        buckets: [
+          { bucketId: 'ok', window: '5h', remainingFraction: 0.5 },
+          { window: '5h', remainingFraction: 0.5 },
+          { bucketId: 'no-window', remainingFraction: 0.5 },
+          { bucketId: '', window: '5h' },
+        ],
+      }],
+    })
+    expect(groups[0]!.windows.map((w) => w.bucketId)).toEqual(['ok'])
   })
 })
 

@@ -6,6 +6,14 @@ import {
   formatRefreshParts,
   parseRefreshParts,
 } from '../src/oauth/auth.ts'
+import {
+  AGY_VERSION_FALLBACK,
+  antigravityUserAgent,
+  currentAgyVersion,
+  getAgyBootstrapUserAgent,
+  setResolvedAgyVersion,
+} from '../src/oauth/constants.ts'
+import { resolveAntigravityVersion, resolveAntigravityVersionBounded, resolveObservedAgyVersion, _clearVersionCacheForTest } from '../src/runtime/version.ts'
 import { authorizeAntigravity } from '../src/oauth/authorize.ts'
 import { bootstrapAccount, exchangeAntigravity, extractOnboardTierId } from '../src/oauth/exchange.ts'
 import {
@@ -290,6 +298,105 @@ describe('credential blob', () => {
     const other = encodeCredentialBlob('codex', { access_token: 'at' })
     expect(() => decodeCredentialBlob(other)).toThrow(/provider mismatch/)
     expect(() => encodeCredentialBlob('agy', {})).toThrow(/access_token/)
+  })
+})
+
+describe('bootstrap UA version freshness', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    setResolvedAgyVersion(undefined)
+  })
+
+  /**
+   * Regression test for pinned control-plane versions.
+   *
+   * The resolved version used to be a function PARAMETER, and all six bootstrap
+   * call sites omitted it, so every control-plane request advertised the stale
+   * fallback while the generation path advertised the resolved version — one
+   * process presenting two different clients. The default now reads a published
+   * shared value, which makes that drift unrepresentable.
+   */
+  it('advertises the published version, not a per-call default', () => {
+    setResolvedAgyVersion('9.9.9')
+    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/9.9.9')
+    // The short form used by the version feeds agrees with the bootstrap form.
+    expect(antigravityUserAgent()).toBe('antigravity/9.9.9 darwin/arm64')
+  })
+
+  it('falls back to the pinned floor before any version is resolved', () => {
+    setResolvedAgyVersion(undefined)
+    expect(getAgyBootstrapUserAgent()).toContain(`Antigravity/${AGY_VERSION_FALLBACK}`)
+    expect(currentAgyVersion()).toBe(AGY_VERSION_FALLBACK)
+  })
+
+  it('publishes the resolved version for every User-Agent builder', async () => {
+    setResolvedAgyVersion(undefined)
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('antigravity-auto-updater')) {
+        return new Response(JSON.stringify([{ version: '1.2.3' }, { version: '1.20.1' }]), { status: 200 })
+      }
+      return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
+    }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+    expect(await resolveAntigravityVersion(fetchImpl)).toBe('1.19.0')
+    // Resolution must reach the bootstrap UA without any call site passing it.
+    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/1.19.0')
+    expect(antigravityUserAgent()).toBe('antigravity/1.19.0 darwin/arm64')
+  })
+
+  it('reports nothing observed when the feeds yield nothing', async () => {
+    // The freshness gate compares the compiled fallback against what the feeds
+    // actually said, so "unobserved" must be distinguishable from "the live
+    // version equals the fallback" — the latter is the healthy case.
+    _clearVersionCacheForTest()
+    const dead = vi.fn(async () => new Response('nope', { status: 503 })) as unknown as
+      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    expect(await resolveObservedAgyVersion(dead)).toBeUndefined()
+
+    // An observation whose value equals the fallback is still an observation,
+    // not a fallback substitution.
+    _clearVersionCacheForTest()
+    const same = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      return url.includes('antigravity-auto-updater')
+        ? new Response(JSON.stringify([{ version: AGY_VERSION_FALLBACK }]), { status: 200 })
+        : new Response(JSON.stringify({ tag_name: AGY_VERSION_FALLBACK }), { status: 200 })
+    }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    expect(await resolveObservedAgyVersion(same)).toBe(AGY_VERSION_FALLBACK)
+  })
+
+  it('probes through the fetch it is given, and gives up instead of hanging', async () => {
+    // The CLI login and the plugin boot both warm the version through a BOUNDED
+    // resolve, and both pass their own egress (the login proxy / the pool's
+    // representative account) — the feeds belong to no account, so the caller has
+    // to decide the route. The timeout matters as much as the value: a login that
+    // blocked on an unreachable feed would be worse than a stale version.
+    //
+    // The value reaching a User-Agent is the neighbouring test's subject; this one
+    // is about the ROUTE, which is why it asserts the resolve rather than the
+    // published slot (that slot is monotonic per process, so a lower test value
+    // would be refused by design and prove nothing).
+    _clearVersionCacheForTest()
+    const routed = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('antigravity-auto-updater')) {
+        return new Response(JSON.stringify([{ version: '1.21.0' }]), { status: 200 })
+      }
+      return new Response(JSON.stringify({ tag_name: '1.21.0' }), { status: 200 })
+    }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+    expect(await resolveAntigravityVersionBounded(1_000, routed)).toBe('1.21.0')
+    // Every request went through the injected fetch, never the global one.
+    expect(routed).toHaveBeenCalled()
+
+    // A feed that accepts and never answers must still return control.
+    _clearVersionCacheForTest()
+    const silent = vi.fn(async () => await new Promise<Response>(() => {})) as unknown as
+      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    const startedAt = Date.now()
+    expect(await resolveAntigravityVersionBounded(50, silent)).toBeUndefined()
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
   })
 })
 

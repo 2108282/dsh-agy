@@ -95,6 +95,31 @@ export function isQuotaStale(account: ManagedAccount, now = Date.now()): boolean
   return now - account.cachedQuotaUpdatedAt > ttl
 }
 
+/** How long a measured 5h/weekly window snapshot stays fresh. */
+export const LIMITS_CACHE_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Whether the display-only windows need a refresh.
+ *
+ * A SEPARATE rule from `isQuotaStale` on purpose: that one keys off
+ * `cachedQuota`/`cachedQuotaUpdatedAt`, which the scheduling path fills and a
+ * SOLO account never does (the pool gate skips it). Reusing it here would report
+ * "stale" on every single call for a solo account and re-probe the endpoint
+ * continuously — the exact case this feature exists to serve.
+ *
+ * A fixed TTL is also the honest choice: the windows come from their own
+ * endpoint, so there is no `remainingFraction` on hand to scale the interval by
+ * without reading the very data being validated.
+ *
+ * @param account - the account to test.
+ * @param now - current time (Unix ms).
+ */
+export function isLimitsStale(account: ManagedAccount, now = Date.now()): boolean {
+  const updatedAt = account.cachedLimits?.updatedAt
+  if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) return true
+  return now - updatedAt > LIMITS_CACHE_TTL_MS
+}
+
 /** Whether the requested family on this account is soft-quota-exhausted (below the pre-check threshold). */
 export function isFamilyDrained(account: ManagedAccount, family?: ModelFamily, now = Date.now()): boolean {
   const quota = familyQuotaFor(account, family)

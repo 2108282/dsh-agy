@@ -11,14 +11,29 @@ import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId, isLevelThinking
 
 export const AGY_PROVIDER = 'agy'
 
-/** Level-thinking: single id + selectable low/medium/high via thinkingLevel. Default is UI hint, not wire default. */
+/**
+ * Selectable thinking levels for a tiered model. Deliberately NO `defaultEffort`.
+ *
+ * `defaultEffort` is not a display hint: the harness reads it as
+ * `effective = requested ?? reasoning.defaultEffort`, and it also gates the
+ * selector's own "provider default" entry
+ * (`...reasoning.defaultEffort === void 0 ? [providerDefault] : []`). Setting it
+ * therefore did two things at once — it forced an effort onto every request, so
+ * `translate.ts` emitted `thinkingConfig` even when the user never chose a level,
+ * and it REMOVED the only option that expresses "let the model decide".
+ *
+ * Leaving it unset restores that option (host label "Default"): choosing it
+ * sends no `reasoningEffort`, `translate.ts` omits `thinkingConfig` entirely, and
+ * the upstream runs its own adaptive budget — measured on this channel as
+ * `thinkingBudget: -1` + `minThinkingBudget: 32` for every `*-tiered` model.
+ * The three explicit levels remain selectable alongside it.
+ */
 const LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
   efforts: Object.freeze([
     { id: ReasoningEffortId('low'), name: 'Low' },
     { id: ReasoningEffortId('medium'), name: 'Medium' },
     { id: ReasoningEffortId('high'), name: 'High' },
   ] as const),
-  defaultEffort: ReasoningEffortId('medium'),
 } as const)
 
 /**
@@ -182,6 +197,18 @@ export async function fetchAvailableModels(
     }
   }
   throw lastError instanceof Error ? lastError : new Error('fetchAvailableModels: all endpoints failed')
+}
+
+/**
+ * The discovered ids a chat session may actually use: upstream's `models` minus
+ * the `tab_`/role/deprecated set (see `hiddenDiscoveredIds`).
+ *
+ * Exported so surfaces other than the selector (the quota panel) present the
+ * same list. `mergeModelCatalog` consumes it too, so the two cannot drift.
+ */
+export function chatCallableDiscoveredIds(dynamic: DiscoveredModels): string[] {
+  const hidden = hiddenDiscoveredIds(dynamic)
+  return Object.keys(dynamic.models ?? {}).filter((id) => isChatCallableModelId(id) && !hidden.has(id))
 }
 
 /** Merge dynamic ids with catalog metadata; non-chat and superseded ids are dropped, unknown ids keep minimal info. */

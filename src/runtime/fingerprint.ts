@@ -14,17 +14,15 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { AGY_IDE_TYPE, AGY_PLATFORM_ENUM, currentAgyVersion } from '../oauth/constants.ts'
 import type { ClientMetadata, Fingerprint, FingerprintVersion } from '../types.ts'
 import fingerprintData from './fingerprint-data.json'
 
 export interface FingerprintData {
   versionPool: string[]
   platforms: string[]
-  architectures: string[]
-  osVersions: Record<string, string[]>
   sdkClients: string[]
   ideTypes: string[]
-  pluginTypes: string[]
 }
 
 export const DEFAULT_FINGERPRINT_DATA = fingerprintData as FingerprintData
@@ -62,6 +60,17 @@ function randomFrom<T>(arr: readonly T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]!
 }
 
+/**
+ * Replace the pool data for one test, and restore the real source with `undefined`.
+ *
+ * `getFingerprintData()` caches its result in-process, so a test cannot exercise a
+ * user override file (`$DSH_HOME/agy-fingerprint-data.json`) without a way to drop
+ * that cache.
+ */
+export function _setFingerprintDataForTest(data: FingerprintData | undefined): void {
+  cachedData = data ?? null
+}
+
 /** Generate a randomized device fingerprint representing one apparent device. */
 export function generateFingerprint(
   data: FingerprintData = getFingerprintData(),
@@ -73,33 +82,47 @@ export function generateFingerprint(
     sessionToken: randomBytes(16).toString('hex'),
     userAgent: `antigravity/${version} ${platform}`,
     apiClient: randomFrom(data.sdkClients),
-    // Client-Metadata must only transmit ideType (backend enum validation
-    // rejects freely-added platform/pluginType; AGENTS.md invariant).
+    // The metadata message, not a header (see `ClientMetadata` in types.ts). The
+    // version is stamped here as well as in the UA because the official message
+    // carries `ide_version` — a UA the SDK overwrites would otherwise be the only
+    // place this client states its version.
     clientMetadata: {
       ideType: randomFrom(data.ideTypes),
+      ideVersion: version,
+      platform: AGY_PLATFORM_ENUM,
     },
     createdAt: Date.now(),
   }
 }
 
-/** The only header composed from a fingerprint (the rest are per-request random). */
-export function buildFingerprintHeaders(fingerprint: Fingerprint | null): { 'User-Agent'?: string } {
-  if (!fingerprint) return {}
-  return { 'User-Agent': fingerprint.userAgent }
+/**
+ * Per-request randomized headers (platform + SDK client pools).
+ *
+ * No longer used on any production path: the account's identity is created once
+ * on first use and reused ({@link generateFingerprint}), so nothing re-rolls a
+ * platform per request. Kept as the pool-level primitive that
+ * {@link getStableHeaders} and the fingerprint tests are built on.
+ */
+/** The impersonation surface a fingerprint produces: two headers and the body message. */
+export interface ImpersonationHeaders {
+  'User-Agent': string
+  'X-Goog-Api-Client': string
+  clientMetadata: ClientMetadata
 }
 
-/** Per-request randomized headers (platform + SDK client pools). */
 export function getRandomizedHeaders(
   data: FingerprintData = getFingerprintData(),
   version = randomFrom(data.versionPool),
-): { 'User-Agent': string; 'X-Goog-Api-Client': string; 'Client-Metadata': string } {
+): ImpersonationHeaders {
   const platform = randomFrom(data.platforms)
   return {
     'User-Agent': `antigravity/${version} ${platform}`,
     'X-Goog-Api-Client': randomFrom(data.sdkClients),
-    'Client-Metadata': JSON.stringify({
+    clientMetadata: {
       ideType: randomFrom(data.ideTypes),
-    }),
+      ideVersion: version,
+      platform: AGY_PLATFORM_ENUM,
+    },
   }
 }
 
@@ -111,24 +134,40 @@ export function getRandomizedHeaders(
 export function getStableHeaders(
   data: FingerprintData = getFingerprintData(),
   version = data.versionPool[0] ?? '',
-): { 'User-Agent': string; 'X-Goog-Api-Client': string; 'Client-Metadata': string } {
-  const platform = data.platforms[0] ?? 'windows/amd64'
+): ImpersonationHeaders {
+  // `darwin/arm64` is the UA's platform TOKEN, a different vocabulary from the
+  // `DARWIN_ARM64` enum the metadata message takes. The UA token has no official
+  // confirmation (see docs/official-identity.json); the enum does.
+  const platform = data.platforms[0] ?? 'darwin/arm64'
+  // `currentAgyVersion()`, never a literal: the resolved live version or the
+  // pinned fallback. A frozen string here would outlive the release it names
+  // (that staleness is the detectable signal this module exists to avoid).
+  const resolved = version || currentAgyVersion()
   return {
-    'User-Agent': `antigravity/${version || '1.18.3'} ${platform}`,
+    'User-Agent': `antigravity/${resolved} ${platform}`,
     'X-Goog-Api-Client': data.sdkClients[0] ?? '',
-    'Client-Metadata': JSON.stringify({
-      ideType: data.ideTypes[0] ?? 'ANTIGRAVITY',
-    }),
+    clientMetadata: {
+      ideType: data.ideTypes[0] ?? AGY_IDE_TYPE,
+      ideVersion: resolved,
+      platform: AGY_PLATFORM_ENUM,
+    },
   }
 }
 
-/** Rewrite the version inside a fingerprint UA; reports whether it changed. */
+/**
+ * Rewrite the version inside a fingerprint UA; reports whether it changed.
+ *
+ * Carries the metadata message's `ideVersion` along: they state the same fact,
+ * and letting them drift is how one account comes to look like two clients.
+ */
 export function updateFingerprintVersion(fingerprint: Fingerprint, version: string): boolean {
   const pattern = /^(antigravity\/)([\d.]+)/
   const match = fingerprint.userAgent.match(pattern)
-  if (!match || match[2] === version) return false
-  fingerprint.userAgent = fingerprint.userAgent.replace(pattern, `$1${version}`)
-  return true
+  const uaChanged = match !== null && match[2] !== version
+  if (uaChanged) fingerprint.userAgent = fingerprint.userAgent.replace(pattern, `$1${version}`)
+  const metaChanged = fingerprint.clientMetadata.ideVersion !== version
+  if (metaChanged) fingerprint.clientMetadata.ideVersion = version
+  return uaChanged || metaChanged
 }
 
 /** Append a fingerprint to the account history (bounded), then use it as current. */
@@ -139,21 +178,4 @@ export function recordFingerprintVersion(
 ): FingerprintVersion[] {
   const next = [...(history ?? []), { fingerprint, timestamp: Date.now(), reason }]
   return next.slice(-MAX_FINGERPRINT_HISTORY)
-}
-
-/**
- * Restore a stable prior identity: the oldest restorable fingerprint
- * (`initial`, else most recent `restored`). Returns `current` when the history
- * holds nothing restorable (e.g. the initial entry was evicted).
- */
-export function restoreFingerprint(
-  history: FingerprintVersion[] | undefined,
-  current: Fingerprint | undefined,
-): Fingerprint | undefined {
-  if (!history || history.length === 0) return current
-  const initial = history.find((v) => v.reason === 'initial')
-  const restored = [...history].reverse().find((v) => v.reason === 'restored')
-  const restorable = initial ?? restored
-  if (!restorable) return current
-  return restorable.fingerprint
 }

@@ -214,6 +214,15 @@ function blockToParts(
       // (400). Replay the signature captured for this tool call id on the
       // previous turn; the sentinel is the established bypass when nothing is
       // cached (both reference implementations default to it).
+      //
+      // OPEN QUESTION, deliberately not changed yet: another implementation of
+      // this client stamps the sentinel ONLY on the FIRST functionCall of a model
+      // turn and leaves sibling calls unsigned ("unsigned sibling functionCalls
+      // preserve native parallel-call shape"), and never synthesizes a bypass
+      // signature anywhere else. This path stamps every call. Which is right is
+      // unverified for THIS channel — the sentinel is live-verified to work here,
+      // and a wrong change turns working parallel tool calls into 400s — so it
+      // needs one real multi-tool turn measured before any edit.
       const signature = getThoughtSignature(block.id) ?? THOUGHT_SIGNATURE_SENTINEL
       return [{
         thoughtSignature: signature,
@@ -363,6 +372,43 @@ export function toAgyRequestBody(
     sessionId?: string
     images?: Map<string, AgyResolvedImage>
     multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>
+    /**
+     * The request id, when the caller also stamps it on the wire
+     * (`x-goog-request-id`). Generating it here as well produced TWO different
+     * ids for one request — the body and the header disagreed, a shape no client
+     * produces. Callers that send the header must pass the same value.
+     */
+    requestId?: string
+    /**
+     * A configured token budget for a reasoning level, or undefined to leave the
+     * level's own budget to upstream.
+     *
+     * When this returns a number the budget REPLACES `thinkingLevel` rather than
+     * joining it, because measurement shows the level wins when both are sent:
+     * `{thinkingLevel:"low", thinkingBudget:16000}` spends what `low` alone
+     * spends (~180 thoughts, against ~330 for the budget alone), and
+     * `{thinkingLevel:"high", thinkingBudget:1000}` likewise tracks `high`
+     * (~316 vs ~173). Sending both would therefore make a configured number
+     * silently inert, which is worse than not offering the setting.
+     */
+    thinkingBudgetFor?: (level: string) => number | undefined
+    /**
+     * The configured Claude thinking budget, or undefined when unset.
+     *
+     * A single value, not a per-level map: the Claude family is id-bound (each
+     * capability is its own model id with no level selector), so there is no
+     * level to key by.
+     */
+    claudeBudgetFor?: () => number | undefined
+    /**
+     * The configured budget for the TIERED slot (the selector's "Default"
+     * effort), or undefined when unset.
+     *
+     * That effort arrives with NO level id, so it cannot go through
+     * `thinkingBudgetFor`. A value here sends a bare `thinkingBudget` with no
+     * `thinkingLevel` — the tiered model's adaptive entry, given an explicit cap.
+     */
+    tieredBudgetFor?: () => number | undefined
   },
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
@@ -388,21 +434,56 @@ export function toAgyRequestBody(
   }
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
-  // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.
+  // Id-bound models (thinking !== 'level') never emit it, and a tiered model
+  // emits NOTHING when no effort is requested — there is deliberately no default
+  // level, because "no level chosen" is what lets the model allocate its own
+  // thinking (see `LEVEL_REASONING` for why declaring a default broke that).
   // When purpose is 'session-title' or reasoning is off, thinkingBudget: 0 prevents
   // default thinking tokens from exhausting tight output caps (e.g. maxTokens: 64).
   const effort = options.reasoningEffort?.toLowerCase()
   if (isLevelThinkingModel(options.model)) {
     if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
       generationConfig.thinkingConfig = { thinkingBudget: 0 }
-    } else if (effort && LEVEL_THINKING_LEVELS.has(effort)) {
-      generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+    } else if (effort === undefined) {
+      // The selector's "Default" effort: no level was chosen. A configured tiered
+      // budget turns this into Max by sending a bare `thinkingBudget` (no
+      // `thinkingLevel`, so the number alone decides). Unset sends nothing at all,
+      // which leaves upstream's own adaptive allocation in charge.
+      const tiered = context.tieredBudgetFor?.()
+      if (tiered !== undefined) {
+        generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
+      }
+    } else if (LEVEL_THINKING_LEVELS.has(effort)) {
+      // A configured number for this level takes the place of the level token:
+      // both together would let the level win (see `thinkingBudgetFor`).
+      const configured = context.thinkingBudgetFor?.(effort)
+      generationConfig.thinkingConfig = configured === undefined
+        ? { thinkingLevel: effort, includeThoughts: true }
+        : { thinkingBudget: configured, includeThoughts: true }
+    }
+  } else if (claude && options.purpose !== 'session-title') {
+    // Claude thinking models are id-bound (no level selector), so their budget is
+    // a single configured value rather than one per level. Measured constraints,
+    // all of which must hold or the request is a 400:
+    //   - `max_tokens` must be STRICTLY greater than the budget. `budget=1024`
+    //     with `max_tokens=1024` is rejected, and so is a budget sent with no
+    //     `maxOutputTokens` at all.
+    //   - the floor is 1024 (not `-1`); the store validates that on save.
+    // So a budget that does not leave room is DROPPED rather than forced through
+    // by raising `maxTokens`: silently enlarging the caller's output cap would
+    // change the request's cost and truncation behaviour, while omitting the
+    // budget merely means this turn thinks with upstream's default. A 400 would
+    // be worse than either.
+    const claudeBudget = context.claudeBudgetFor?.()
+    const outputCap = generationConfig.maxOutputTokens
+    if (claudeBudget !== undefined && outputCap !== undefined && outputCap > claudeBudget) {
+      generationConfig.thinkingConfig = { thinkingBudget: claudeBudget, includeThoughts: true }
     }
   }
 
   return {
     project: context.projectId || undefined,
-    requestId: generateAntigravityRequestId(),
+    requestId: context.requestId ?? generateAntigravityRequestId(),
     model: options.model,
     userAgent: 'antigravity',
     requestType: 'agent',

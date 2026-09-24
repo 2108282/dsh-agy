@@ -1,6 +1,6 @@
 # Antigravity 上游协议事实（ANTIGRAVITY-API）
 
-> 从两个参考项目代码核对的事实清单（非推测）。wire 格式以本项目 `scripts/record-fixture.ts` 录制结果为准（可能随 Google 端迭代漂移）。
+> 线路事实测量自已安装的官方产物及其发布源。社区多账号项目是**线索（LEADS）而非参照物**：它们模仿的是不同产品、彼此矛盾，并停在其编写时的版本。wire 格式以本项目录制结果为准（可能随 Google 端迭代漂移）。
 
 ## 1. 端点与环境
 
@@ -23,19 +23,24 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 | 流式生成 | `POST /v1internal:streamGenerateContent?alt=sse` | 主通道 |
 | 非流式生成 | `POST /v1internal:generateContent` | 降级 |
 | 项目发现 | `POST /v1internal:loadCodeAssist` | 登录后拿 projectId / tier |
-| 新账号引导 | `POST /v1internal:onboardUser` | 无项目账号的 onboarding（带 `tier_id` + 仅 `{ideType:"ANTIGRAVITY"}` metadata；重试 3 次 + 3-7s jitter，ban-safety——固定节奏长循环像脚本自动化） |
-| 模型发现 | `POST /v1internal:fetchAvailableModels` | 每模型 `quotaInfo`（remainingFraction/resetTime） |
+| 新账号引导 | `POST /v1internal:onboardUser` | 无项目账号的 onboarding（带 `tier_id` + body 的 `metadata` 消息；重试 3 次 + 3-7s jitter，ban-safety——固定节奏长循环像脚本自动化） |
+| 模型发现 | `POST /v1internal:fetchAvailableModels` | 每模型 `quotaInfo`（remainingFraction/resetTime）；同时携带角色列表与 `tieredModelIds` |
+| 配额窗口 | `POST /v1internal:retrieveUserQuotaSummary` | 5 小时与每周窗口的**唯一**来源（按组，而非按模型）——见 §5 |
 | 模型列表（备选） | `/v1internal:models` | 第二条路 |
 
 ## 3. 认证与头
 
 - `Authorization: Bearer {access_token}`；`Content-Type: application/json`；流式加 `Accept: text/event-stream`。
-- `User-Agent: antigravity/{version} {platform}/{arch}`（platform ∈ {windows, darwin}，arch ∈ {amd64, arm64}；版本号需保持新鲜——外置 JSON）。
+- `User-Agent: antigravity/{version} {platform}`——**没有** `/{arch}` 段。`{platform}` 来自 UA 令牌池（外置 JSON，尚未从官方二进制捕获）；它与下方 `ClientMetadata.Platform` 的 Go 风格枚举是**两套不同的词汇**。版本号需保持新鲜——外置并动态解析。
 - `X-Goog-Api-Client`：池 `google-cloud-sdk vscode_cloudshelleditor/0.1`、`vscode/1.86.0`、`vscode/1.87.0`、`vscode/1.96.0`。
-- `Client-Metadata` 代码实际只发 `{ideType:"ANTIGRAVITY"}`（凭空多发的 `platform`/`pluginType` 会被后端枚举校验拒绝）。
+- **不存在 `Client-Metadata` 请求头**——它已被移除，两个官方二进制中都没有该名称。客户端身份走请求 **BODY** 的 `metadata`（`ClientMetadata`），携带 `ideType`、`ideVersion`、`platform`，每者都有已捕获的词汇表。旧的「只允许发 `ideType`」说法**作废**：实测拒绝发生在**值** `"MACOS"` 上，而它不是 `Platform` 枚举成员（`platform` 接受枚举**名**，如 `DARWIN_ARM64`，而不是 UA 令牌 `darwin/arm64`）。`pnpm run verify:metadata-acceptance` 会以旧 body 作对照重新测量接受度。
 - 双风格（antigravity vs gemini-cli）**不做**。
 - **请求 envelope（OmniRoute 活跃格式）**：顶层 `{project, requestId, model, userAgent:"antigravity", requestType:"agent", request:{contents, tools?, toolConfig:{functionCallingConfig:{mode:"VALIDATED"}}, generationConfig?, sessionId}}`。Claude 模型剥离尾部 model 轮；工具 schema 被裁剪到上游 allowlist 并归一化关键字值（后端拒绝任何未知关键字**以及**任何不符合 protobuf 形状的值；见 §3.1）。
-- **generationConfig.thinkingConfig**（仅 level-thinking 模型，三种形态）：`catalog thinking!=='level'`、或既无 `reasoningEffort` 且 purpose 非 `session-title` 时**不带**。当 `GenerateOptions.purpose==='session-title'` 或 `reasoningEffort` 为 `none`/`off` 时发 **`{thinkingBudget:0}`**——用于抑制默认思考，避免其吃掉紧张的 `maxTokens` 上限（会话标题的 cap 很小）。当 `reasoningEffort` 为三档之一时发 **`{thinkingLevel:"low"|"medium"|"high", includeThoughts:true}`**。Id 绑定模型（如 `gemini-3.6-flash-high`、`claude-*`）永不携带，误带上游 400。示例（当前 `gemini-3.7-flash-tiered`；未来 `gemini-4-flash` 无 `-tiered` 后缀但标 `thinking:'level'` 时行为一致）：`{"model":"gemini-3.7-flash-tiered","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"medium","includeThoughts":true}}}}`。
+- **generationConfig.thinkingConfig**（四种形态；前三种仅用于档位模型）：`catalog thinking!=='level'`、或既无 `reasoningEffort` 且 purpose 非 `session-title` 时**不带**。当 `GenerateOptions.purpose==='session-title'` 或 `reasoningEffort` 为 `none`/`off` 时发 **`{thinkingBudget:0}`**——用于抑制默认思考，避免其吃掉紧张的 `maxTokens` 上限（会话标题的 cap 很小）。当 `reasoningEffort` 为三档之一时发 **`{thinkingLevel:"low"|"medium"|"high", includeThoughts:true}`**。当配置了按档位预算时发 **`{thinkingBudget:N, includeThoughts:true}`**（完全替换该档的档位——两者绝不并行发送，因为同时存在时档位胜出、会让数值失效）；或在 Claude 路径上配置了 Claude 预算**且** `max_tokens` 严格大于它时。示例（当前 `gemini-3.7-flash-tiered`；未来 `gemini-4-flash` 无 `-tiered` 后缀但标 `thinking:'level'` 时行为一致）：`{"model":"gemini-3.7-flash-tiered","request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"medium","includeThoughts":true}}}}`。
+- **「不带」这一支就是自适应（adaptive）路径，且用户可达。** `models.ts` 刻意不声明 `reasoning.defaultEffort`：harness 以 `effective = requested ?? reasoning.defaultEffort` 求值，且选择器的「provider default」项以 `defaultEffort === void 0` 为条件——声明它等于同时做两件事：给每个请求强加档位（`thinkingConfig` 恒存在），并删掉唯一表达「让模型自己决定」的选项。不声明时，选择器在 low/medium/high 之外提供 Default；选它则 `reasoningEffort` 为 undefined、本字段不带，由上游跑自己的预算。实测 `gemini-3.8-flash-tiered`：`fetchAvailableModels` 对每个 `*-tiered` id 都报 `thinkingBudget: -1` + `minThinkingBudget: 32`，且省略 `thinkingConfig` 返回 200，`thoughtsTokenCount` 随任务变化。
+- **该通道接受显式数值预算**（与未来的预算设置相关）：可接受区间为 `[-1, 65535]`——`-2` 与 `65536` 均返回 400 并指明该区间。`{thinkingBudget:-1}`（自适应）本身即被接受，故自适应不必像另一实现那样用「省略字段」来表达。`0` 被接受、且确实**降低**思考，但**不能可靠地关闭**思考（四次实测 `thoughtsTokenCount` 为 53/69/126/67，而自适应路径为 112–236），故「0 = 关闭思考」不是可靠断言。`8192` 与 `32768` 返回 200 且 `thoughtsTokenCount` 上升。`{thinkingLevel:"auto"}` → **400** `Invalid value at 'request.generation_config.thinking_config.thinking_level'`，故档位词表封闭为 low/medium/high。以上全部由 `pnpm run verify:thinking-config` 重新测量——它已经抓出上面那条过宽的 `0` 断言。
+- **`minThinkingBudget` 不是校验。** 低于模型自报下限的预算（如模型报 `32` 而传 `1`）返回 200，故它绝不能用作客户端钳制——钳制会拒绝后端本可接受的值。
+- **本条中有两处结论已被小样本实测反证，不得视为已定。** (a) 上面「id 绑定模型带 level 会被 400 拒绝」未能复现：`gemini-3.6-flash-high`、`gemini-3.5-flash-low`、`gemini-2.5-flash`、`claude-opus-4-6-thinking` × low/medium/high（各 n=2）**全部 200**，且 id 绑定的 Gemini 上 `thoughtsTokenCount` 仍随档位变化。我们的代码不受影响（只在 `thinking:'level'` 时才发，id 绑定 id 依旧从不携带），但所述**理由**可能是错的。(b) §5 的「thoughts 从不流式输出」过宽：在 `gemini-3.8-flash-tiered` 上确实观察到 `{"thought":true,"text":...}` 分段，尽管该断言限定的四个模型都不是 `-tiered`。两句在改写前都需要专门的 `verify:*` 门禁重新测量。
 
 ### 3.1 工具 Schema 契约（实测确认；防打地鼠防线）
 
@@ -88,8 +93,9 @@ Claude 系模型由同一 `streamGenerateContent` envelope 背后的 **Anthropic
 - **思考内容不下发（实测确认）**：`usageMetadata.thoughtsTokenCount` 报告思考 token 数，但所有模型（gemini-3.6-flash-high / gemini-3-flash-agent / claude-opus-4-6-thinking / gemini-2.5-flash-thinking，含显式 `thinkingConfig`）的流式响应**均无 `{thought:true}` part**——思考要么蒸馏进最终 `text`（3.5 Flash 系把推理写进回答），要么完全隐藏（Claude 系直接输出答案）。DSH 前端因此不会有 reasoning 块；parse 保留 thought part 支持仅为防御性。
 - `fetchAvailableModels`：`{models: Record<id, {quotaInfo?: {remainingFraction, resetTime}, displayName, modelName}>}`；**无能力元数据**（contextLength 等需本地目录补齐）；含不可聊天模型需过滤。
 - **`models` 之外的角色列表（真实账号实测确认）**：`tabModelIds`、`commandModelIds`、`imageGenerationModelIds`、`mqueryModelIds`、`webSearchModelIds`、`commitMessageModelIds`、`audioTranscriptionModelIds`（均为 id 数组）；`deprecatedModelIds`（以被弃用 id 为键的对象，不是数组：`{oldId: {newModelId, oldModelEnum, newModelEnum}}`）；以及三个正向信号 `defaultAgentModelId`、`agentModelSorts`（`[{displayName, groups:[{modelIds}]}]`）、`tieredModelIds`（`{flash|pro|flashLite: [id]}`）。角色列表里的 id 不遵循任何命名规律：`tabModelIds` 含 `chat_20706`，`tab_` 前缀判断抓不到；`mqueryModelIds`、`webSearchModelIds`、`commitMessageModelIds` 三者都指向 `gemini-3.1-flash-lite`，即目录里已 pin 的聊天模型。两个 id 可以共用同一个 `displayName`：`gemini-3.1-pro-high` 与其 `newModelId` `gemini-pro-agent` 都叫 "Gemini 3.1 Pro (High)"。
-- **插件行为**：`mergeModelCatalog` 隐藏 `tabModelIds` / `imageGenerationModelIds` / `audioTranscriptionModelIds` 的成员，以及 `newModelId` 已存在、可聊天且未被角色隐藏的弃用 id（账号未携带替代模型时，被弃用 id 保留；替代模型是否可用只对照角色隐藏判断，因此弃用链的结果与键序无关）。工具类角色（command、mquery、webSearch、commitMessage）不参与过滤，因为它们指向的就是普通聊天模型。三个正向信号可否决隐藏，上游误标不会让可用模型消失。过滤只作用于 `listModels`：`resolveModel` 仍接受任意 id，配额视图（`dsh-agy status`、`/agy` 面板）仍统计 `models` 的全部条目。
-- 配额语义：`loadCodeAssist`/`fetchAvailableModels` 的 `quotaInfo` 为单一配额源（不做 retrieveUserQuota/GeminiCLI UA 路径）。
+- **插件行为**：`mergeModelCatalog` 隐藏 `tabModelIds` / `imageGenerationModelIds` / `audioTranscriptionModelIds` 的成员，以及 `newModelId` 已存在、可聊天且未被角色隐藏的弃用 id（账号未携带替代模型时，被弃用 id 保留；替代模型是否可用只对照角色隐藏判断，因此弃用链的结果与键序无关）。工具类角色（command、mquery、webSearch、commitMessage）不参与过滤，因为它们指向的就是普通聊天模型。三个正向信号可否决隐藏，上游误标不会让可用模型消失。过滤只作用于 `listModels`：`resolveModel` 仍接受任意 id，配额视图（`dsh-agy status`、设置 → Antigravity 分区）仍统计 `models` 的全部条目。
+- 配额语义：`fetchAvailableModels` 的 `quotaInfo` 是**逐模型**压力的来源（仅 `remainingFraction` + `resetTime`，实测所有 id 皆然，故它无法表达窗口），`loadCodeAssist` 提供 project/tier。它**不是**唯一配额源——此行原先「单一配额源、不做 retrieveUserQuota 路径」的结论据此更正。
+- **`v1internal:retrieveUserQuotaSummary` 是 5 小时与每周窗口的唯一来源（实测确认）。** 响应形态：`{groups:[{displayName, buckets:[{bucketId, window, remainingFraction, resetTime, displayName, description}]}]}`。实测账号：分组 `Gemini Models`（`gemini-5h`、`gemini-weekly`）与 `Claude and GPT models`（`3p-5h`、`3p-weekly`）；`window` 为 `5h` 或 `weekly`。两点值得留存：分组是**按组**而非按模型，且 `3p-*` 同时覆盖 Claude 与 GPT——`modelFamilyOf` 的任何前缀规则都无法复现该分组，故分组原样透传而非重新推导。它与 `fetchAvailableModels` 使用同一 bootstrap User-Agent 即返回 200，无需新增伪装。`dsh-agy` 将其存为账号上的 `cachedLimits`，刻意与 `cachedQuota` 分开：后者按模型并驱动轮换/排名，前者按分组且仅用于展示。这一分离是**承重**的而非装饰——`rankPoolCandidates` 会把实测 `remainingFraction <= 0` 变成 `blockedUntil`，所以若把窗口写进调度刷新，一次展示更新就可能封锁账号。因此窗口由**独立调用**获取（`session.refreshLimits`，经 `account.limits` RPC 暴露），只写 `cachedLimits`，对任意账号数都安全——包括调度刷新会跳过的单账号。
 - **隐式缓存上报（实测确认）**：`usageMetadata.cachedContentTokenCount` 并非总是出现——只有缓存已预热且前缀足够大时才上报（gemini 系 ~16k+ 前缀、约第 3 个请求起命中；claude 系预热更快、可第 2 个请求即命中且命中率 ~99%）。单轮/小前缀请求一律缺失该字段，不代表模型不支持缓存。实测脚本 `scripts/probe-cache-context.mts`（三模型均复现：gemini-3.7-flash-tiered / gemini-3-flash-agent / claude-opus-4-6-thinking）。
 - **缓存键 = 前缀内容，与 sessionId 无关（实测确认）**：`scripts/probe-cache-loss.mts` 用与先前 probe 逐字节相同的 20.5k system 前缀 + 全新 sessionId，第一轮即命中 20447 tokens——缓存按前缀哈希跨 session 共享。DSH 新对话首轮 0% 的真实原因是 system 前缀 ~13.5k < 16k 阈值（从未被缓存）且各对话历史不同，不是 sessionId 隔离。
 - **缓存写入异步、滞后约 2 轮、按块批量（实测确认，命中率上限的根因）**：请求体逐字节前缀完全一致（append-only 构造）时，`cached` 仍每轮少于上一轮完整 prompt——命中前缀以"上一轮新增块"为单位跳升（实测每次恰好 +4086 = 一个填充块），写入滞后约 2 轮；稳态每轮未命中 ≈ 1.5-2× 每轮新增 → 命中率上限 ~88-92%。对比 DeepSeek 的即时完整写入（每轮未命中 ≈ 仅新增 → ~99%），这是 agy 命中率到不了 99% 的根因；上游行为，不可控。

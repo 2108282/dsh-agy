@@ -29,7 +29,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # fixture-driven unit tests: no network, no real accounts
       - run: pnpm test
-      - run: pnpm exec tsc --noEmit
+      # The SCRIPT, not `pnpm exec tsc --noEmit`: the root tsconfig EXCLUDES
+      # src/client (the browser half needs DOM libs and its own settings), so
+      # the bare command left a type error there invisible to CI. `typecheck`
+      # runs both projects and is what publish.yml already used.
+      - run: pnpm run typecheck
       - run: pnpm run build
       # verify the publishable artifact assembles from a clean install
       - run: npm pack --dry-run

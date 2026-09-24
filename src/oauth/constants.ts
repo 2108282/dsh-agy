@@ -123,17 +123,83 @@ export async function fetchAgyFirstOk(
   throw new Error('all agy endpoints failed')
 }
 
-/** Default Antigravity client version used in User-Agent strings; overridden by the
- * runtime version fetcher (see runtime/fingerprint.ts). */
-export const AGY_VERSION_FALLBACK = '1.18.3'
+/**
+ * Pinned Antigravity version, used only until the runtime resolver has published
+ * a fresh one (see {@link setResolvedAgyVersion}).
+ *
+ * A stale version string is the most detectable fingerprint anomaly, so this
+ * value is a cold-start floor, not the version anything should normally send.
+ * It tracks the release feed's newest entry; refresh it when the feed moves.
+ *
+ * NAMESPACE: this is the **Antigravity CLI** line (`google-antigravity/antigravity-cli`),
+ * not the IDE or hub line, because that is the product this client claims to be
+ * (`docs/official-identity.json`). The three lines are separate version
+ * namespaces — IDE `2.0.0`, hub `2.15.1`, CLI `1.2.9` — so comparing them
+ * numerically is meaningless and mixing them advertises a version that does not
+ * exist for the product we name.
+ */
+export const AGY_VERSION_FALLBACK = '1.2.9'
+
+/**
+ * `ClientMetadata.platform` value: the proto enum NAME, as protobuf-JSON emits it.
+ *
+ * The official enumeration is `PLATFORM_UNSPECIFIED | DARWIN_AMD64 | DARWIN_ARM64
+ * | LINUX_AMD64 | LINUX_ARM64 | WINDOWS_AMD64` (read from the installed official
+ * CLI's own descriptor). The earlier `"MACOS"` that this backend rejected with
+ * `INVALID_ARGUMENT` was an invalid *value*, not a forbidden field — a
+ * distinction that mattered, because it had been read as "send `ideType` only".
+ */
+export const AGY_PLATFORM_ENUM = 'DARWIN_ARM64'
+
+/**
+ * Newest Antigravity version the runtime resolver has observed, or undefined
+ * before its first success.
+ *
+ * Deliberately lives in this module — the dependency leaf — rather than in
+ * `runtime/version.ts`. `oauth/` must not import `runtime/` (AGENTS.md), and the
+ * edge already runs the other way: `runtime/version.ts` imports THIS file. So the
+ * resolver publishes here and every User-Agent builder reads here.
+ *
+ * This shape is the fix for a real defect: the version used to be a function
+ * parameter, and all six bootstrap call sites silently took the default, pinning
+ * every control-plane request to the stale fallback while the data plane used the
+ * resolved version — one process presenting two different clients. Reading a
+ * shared value makes that drift unrepresentable rather than merely discouraged.
+ */
+let resolvedAgyVersion: string | undefined
+
+/** Publish a freshly resolved version for every User-Agent builder. */
+export function setResolvedAgyVersion(version: string | undefined): void {
+  resolvedAgyVersion = version
+}
+
+/** Version a User-Agent should advertise: the resolved one, else the pinned floor. */
+export function currentAgyVersion(): string {
+  return resolvedAgyVersion ?? AGY_VERSION_FALLBACK
+}
 
 /** Electron-style UA used for bootstrap calls (loadCodeAssist/onboardUser). */
-export function getAgyBootstrapUserAgent(version = AGY_VERSION_FALLBACK): string {
+export function getAgyBootstrapUserAgent(version = currentAgyVersion()): string {
   return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${version} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`
 }
 
-/** Client-Metadata payload for bootstrap calls — ideType only (backend enum
- * validation rejects freely-added platform/pluginType; AGENTS.md invariant). */
-export function getAgyBootstrapClientMetadata(): string {
-  return '{"ideType":"ANTIGRAVITY"}'
+/**
+ * Short-form client User-Agent: `antigravity/<version> <platform>`.
+ *
+ * Used where the full Electron string would be inappropriate but the request
+ * must still not self-identify as this tool (e.g. the version feeds, which the
+ * official client ecosystem also polls).
+ */
+export function antigravityUserAgent(version = currentAgyVersion(), platform = 'darwin/arm64'): string {
+  return `antigravity/${version} ${platform}`
 }
+
+/**
+ * `ClientMetadata.ideType` value.
+ *
+ * `ANTIGRAVITY` is retained rather than switched to the enumeration's newer
+ * `GEMINI_CLI`: the CLI's own `IdeType` is injected through its auth provider and
+ * has not been captured, so the established working value is kept and the
+ * alternative recorded (`docs/official-identity.json`) rather than guessed at.
+ */
+export const AGY_IDE_TYPE = 'ANTIGRAVITY'

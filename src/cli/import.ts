@@ -5,7 +5,13 @@
  * (MIT, see NOTICE.md).
  */
 import { randomUUID } from 'node:crypto'
-import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapClientMetadata, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
+import {
+  AGY_ENDPOINT_FALLBACKS,
+  AGY_IDE_TYPE,
+  AGY_PLATFORM_ENUM,
+  currentAgyVersion,
+  getAgyBootstrapUserAgent,
+} from '../oauth/constants.ts'
 import { decodeCredentialBlob } from '../oauth/blob.ts'
 import { normalizeProxyUrl, proxiedFetch } from '../proxy.ts'
 import type { AccountStore } from '../store/accounts.ts'
@@ -112,14 +118,23 @@ export async function enrichWithAntigravityBackend(
       Authorization: `Bearer ${parsed.accessToken}`,
       'Content-Type': 'application/json',
       'User-Agent': getAgyBootstrapUserAgent(),
-      'Client-Metadata': getAgyBootstrapClientMetadata(),
     }
+    // The identity rides in the BODY `metadata` message, matching
+    // `LoadCodeAssistRequest.metadata` in the official descriptor; there is no
+    // `Client-Metadata` header (neither official binary contains that name).
+    const loadBody = JSON.stringify({
+      metadata: {
+        ideType: AGY_IDE_TYPE,
+        ideVersion: currentAgyVersion(),
+        platform: AGY_PLATFORM_ENUM,
+      },
+    })
     for (const endpoint of AGY_ENDPOINT_FALLBACKS) {
       try {
         const res = await proxiedFetch(`${endpoint}/v1internal:loadCodeAssist`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } }),
+          body: loadBody,
           signal: loadController.signal,
         }, { proxyUrl: options.proxyUrl })
         if (!res.ok) continue

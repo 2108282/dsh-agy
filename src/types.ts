@@ -2,11 +2,26 @@
 
 /**
  * Device fingerprint persisted per account (rate-limit mitigation).
- * Client-Metadata must only transmit ideType: the backend's enum validation
- * rejects freely-added platform/pluginType fields (AGENTS.md invariant).
+ *
+ * Mirrors `google.internal.cloud.code.v1internal.ClientMetadata`, read out of the
+ * installed official CLI's own descriptor (`docs/official-identity.json`). The
+ * message has eight fields; only the three below are populated, because the rest
+ * (`pluginVersion`, `updateChannel`, `duetProject`, `pluginType`, `ideName`) have
+ * no captured value and a wrong value is a worse anomaly than an absent one.
+ *
+ * This is the BODY message (`metadata`), not a header. Nothing here is sent as a
+ * `Client-Metadata` header: neither official binary contains that header name.
  */
 export interface ClientMetadata {
   ideType: string
+  /** Client version for the claimed product line (the CLI's, not the IDE's). */
+  ideVersion?: string
+  /**
+   * `ClientMetadata.platform` enum NAME (`DARWIN_ARM64`), which is a DIFFERENT
+   * vocabulary from the UA's `darwin/arm64` token — both exist, and conflating
+   * them is how `"MACOS"` came to be sent and rejected.
+   */
+  platform?: string
 }
 
 export interface Fingerprint {
@@ -38,6 +53,45 @@ export interface CachedQuota {
   modelCount?: number
 }
 
+/**
+ * One window of one `QuotaGroup`, as `retrieveUserQuotaSummary` reports it.
+ *
+ * Declared here (the dependency-free leaf) because it is PERSISTED on the
+ * account; the parser that produces it lives in `adapter/quota-summary.ts`, which
+ * imports this module rather than the reverse.
+ */
+export interface QuotaWindow {
+  /** Upstream's own bucket id, e.g. `gemini-5h`, `3p-weekly`. Kept verbatim. */
+  bucketId: string
+  /** Upstream's window token: `5h` or `weekly` today. */
+  window: string
+  /** 0..1, or null when upstream omitted the fraction (unknown, not empty). */
+  remainingFraction: number | null
+  /** RFC3339 reset moment, or null when upstream omitted it. */
+  resetTime: string | null
+}
+
+/** One group of models sharing a 5-hour and a weekly window. */
+export interface QuotaGroup {
+  /** Upstream's group label, e.g. `Gemini Models`. */
+  name: string
+  windows: QuotaWindow[]
+}
+
+/**
+ * The grouped 5-hour / weekly windows, cached per account.
+ *
+ * Deliberately SEPARATE from `cachedQuota`: that map is per-model and feeds the
+ * rotation/ranking path (`familyQuotaFor`, `isFamilyDrained`), while this is
+ * per-GROUP and display-only. Merging them would put two different shapes under
+ * one key and let a display refresh influence scheduling.
+ */
+export interface CachedLimits {
+  groups: QuotaGroup[]
+  /** When this snapshot was taken (Unix ms). */
+  updatedAt: number
+}
+
 /** One account in the pool. `refresh` is the packed `refreshToken|projectId|managedProjectId` string. */
 export interface ManagedAccount {
   id?: string
@@ -52,6 +106,17 @@ export interface ManagedAccount {
   rateLimitResetTimes?: Record<string, number>
   coolingDownUntil?: number
   cooldownReason?: CooldownReason
+  /**
+   * When the CURRENT cooldown began (Unix ms).
+   *
+   * Separate from `coolingDownUntil`, which is its END: the duration is a
+   * backoff computed from the consecutive-failure count, so the start cannot be
+   * recovered from the end. Persisted because the reason is only useful with an
+   * age attached — "network-error" alone cannot distinguish a blip from seconds
+   * ago from one that has been sitting there for days. Cleared together with
+   * `cooldownReason` when the window expires.
+   */
+  cooldownSetAt?: number
   verificationRequired?: boolean
   verificationRequiredAt?: number
   verificationRequiredReason?: string
@@ -60,6 +125,8 @@ export interface ManagedAccount {
   fingerprintHistory?: FingerprintVersion[]
   cachedQuota?: Record<string, CachedQuota>
   cachedQuotaUpdatedAt?: number
+  /** Grouped 5h/weekly windows, display-only (see `CachedLimits`). */
+  cachedLimits?: CachedLimits
   /** Per-account proxy URL (e.g. http://user:pass@host:8080 or socks5://host:1080). Undefined = follow env. */
   proxy?: string
 }
@@ -167,11 +234,17 @@ export interface AgyAccountSession {
   auth: OAuthAuthDetails
   account: ManagedAccount
   index: number
-  /** Fingerprint + randomized impersonation headers for this request. */
+  /**
+   * Impersonation headers for this request.
+   *
+   * `clientMetadata` rides alongside rather than inside: it is a BODY message
+   * (`metadata` on the control-plane calls), because the `Client-Metadata` header
+   * this used to be is present in neither official binary.
+   */
   impersonation: {
     'User-Agent': string
     'X-Goog-Api-Client': string
-    'Client-Metadata': string
+    clientMetadata: ClientMetadata
   }
 }
 
@@ -217,13 +290,33 @@ export class AgyPoolBlockedError extends Error {
 export type FailureKind =
   | 'rate-limit'
   | 'auth-failure'
+  /**
+   * Upstream asked for account verification (`VALIDATION_REQUIRED`) rather than
+   * rejecting the credential. Deliberately distinct from `auth-failure` because
+   * it is RECOVERABLE: the account is temporarily walled, not dead, and the user
+   * can act on the returned URL. Treating it as `auth-failure` permanently
+   * disabled a healthy account on a signal that meant "come back after
+   * verifying", with no automatic way back.
+   */
+  | 'verification-required'
   | 'network-error'
   | 'project-error'
   | 'request-error'
   | 'transient'
   | 'proxy-unreachable'
 
-/** Rotation state machine decision for one failed attempt. */
+/**
+ * Rotation state machine decision for one failed attempt.
+ *
+ * `backoffMs` is **advisory**, and for `retry`/`rotate` no caller consumes it.
+ * It is not the mechanism that paces the pool: the account-level `cool` paths
+ * write it into `coolingDownUntil` themselves, `rotate` blocks the failed
+ * account through `rateLimitResetTimes`, and the delay before the retry of a
+ * single request belongs to DSH's retry policy (`providerRetryAfterMs`, else its
+ * own exponential `localDelay`). Do NOT "wire it up" by feeding it into
+ * `providerRetryAfterMs`: a tier above DSH's `maxDelayMs` makes the normal retry
+ * mode give up entirely, turning a recoverable 5xx into a failed turn.
+ */
 export type RotationAction =
   | { action: 'retry'; backoffMs: number }
   | { action: 'cool'; backoffMs: number }

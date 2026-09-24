@@ -14,15 +14,19 @@ OAuth 认证、多账号池 + 自动 429 轮换、设备指纹伪装，以及 CL
 - **OAuth 登录**: 通过浏览器 OAuth 回调一键登录，支持 headless 粘贴 URL 模式与远程粘贴凭据 blob 通道。
 - **双管理入口**: web 和 cli 任选其一，核心功能一致。
 - **多账号池**: 加密账号存储、用量感知选号（模型族配额 + OMP 对齐排名）、限流自动轮换、冷却到真实 reset 时间、每账号设备指纹。
-- **配额仪表盘**: 仅在 DSH Web 启动时有效，在你的 dsh web 地址后添加 `/agy` 访问：登录、账号管理、每模型配额条、模型测试、
-  凭据导出/导入、指纹管理。
+- **内联设置界面**: DSH 设置内的 Antigravity 分区，含四个标签页——账号（登录、激活、每模型配额条、测试调用、指纹与代理管理）、
+  模型（逐模型可见性）、用量（累计 token 与请求统计）、凭据（导入/导出）。不再是独立页面：入口只存在于 DSH 设置之内。
+- **模型可见性开关**: 把单个模型从 DSH 模型选择器中隐藏。黑名单语义——只有你主动关闭的才隐藏，
+  服务端后续新增的模型仍然可见。
+- **用量统计**: 输入 / 输出 / 缓存读 / 缓存写 token、请求数、失败数、限流、轮换、延迟与首 token 时间，
+  按账号与模型两个维度聚合。**包含不经过 DSH 的调用**（CLI、验证、测试），这是任何基于会话的统计都看不到的部分。
 - **CLI**: `dsh-agy login|status|import|verify|logout`，独立于 harness 运行。
 
 ## 效果演示
 
-DSH Web 内的 `/agy` 仪表盘——账号卡片、每模型配额条、单模型测试：
+DSH 设置内的 Antigravity 分区——账号列表、每模型配额、单模型测试：
 
-![dsh-agy 仪表盘](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/screenshot_zh.png)
+![dsh-agy 设置界面](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/screenshot_zh.png)
 
 ## 快速开始
 
@@ -38,11 +42,11 @@ dsh plugin --profile web add dsh-agy
 # 2. 启动 DSH Web
 dsh web
 
-# 3. 浏览器访问仪表盘：http://127.0.0.1:3080/agy
+# 3. 打开 设置 → Antigravity，点击该分区内的「登录」
 # 点击【Google 账号登录】，完成授权后即刻在 DSH 中直接调用 agy provider
 ```
 
-打开 **设置 → 插件 → Antigravity → 打开 Antigravity 仪表盘**；该按钮会在新标签页打开 `/agy`。
+该分区位于 **设置 → Antigravity**（与「通用」「模型」同级）。没有独立仪表盘页面：旧的 `/agy` 地址已废弃。
 
 
 ### 路径 B：无桌面 / 纯终端环境（CLI 独立使用）
@@ -91,7 +95,9 @@ dsh-agy status                              # 展示 proxy 列（脱敏 host:por
 
 回退：未配置每账号代理时，请求走 `EnvHttpProxyAgent`（`HTTP_PROXY`/`HTTPS_PROXY` 且遵循 `NO_PROXY`）。每账号代理忽略 `NO_PROXY`、fail-closed（代理不可达则跳过该账号、不写冷却并清除亲和），且 loopback 目标（`localhost`/`127.0.0.1`/`::1`）始终强制直连。
 
-Web 仪表盘（`/agy`）：每张账号卡片内联 Proxy 行 `[输入框] [Save][Clear][Test]`，显示脱敏 `host:port`；写入走 `POST /agy/api/proxy`，探测走 `POST /agy/api/proxy/test`。
+设置 → Antigravity → 账号详情内有 Proxy 行 `[输入框] [保存][清除][测试]`，显示脱敏 `host:port`；读写与探测都走管理 RPC（`account.proxy` / `account.proxyTest`）。「保存」要求输入非空——清除已有代理是显式的「清除」动作，不会因误点空保存而丢失。「测试」探测的是输入框里的内容，所以未保存的代理可以先测再存；结果在提示行里显示可达/不可达，无可探测对象时按钮置灰并把原因放在悬停提示上。
+
+工具栏「刷新」除重载账号列表与用量账本外，还会突破 5 小时/每周配额窗口的 10 分钟 TTL 缓存重新测量——这次强制探测会回报刷新了几个账号，因此点击不会毫无反馈。自动重载仍遵守 TTL，不产生上游调用。
 
 ### 路径 C：本地源码开发与调试（Link 模式）
 
@@ -114,7 +120,7 @@ npm uninstall -g dsh-agy
 
 # 3. 可选：删除本地账号数据（账号 + 主密钥 + 指纹覆盖）
 dsh-agy logout              # 先删除账号（或跳过）
-rm -f ~/.dsh/agy-accounts.json
+rm -f ~/.dsh/agy-accounts.json ~/.dsh/agy-stats.json ~/.dsh/agy-models.json
 # 只删除 ~/.dsh/.credentials.yaml 中的 AGY_MASTER_KEY 行——保留其他键！
 rm -f ~/.dsh/agy-fingerprint-data.json   # 仅当创建过覆盖文件
 
@@ -126,6 +132,31 @@ rm -f ~/.dsh/agy-fingerprint-data.json   # 仅当创建过覆盖文件
 安全设置中手动撤销前仍然有效。
 
 ## 其他你可能关心的事
+
+### 思考预算（reasoning effort）
+
+思考预算是 API 里的一个隐藏参数，用来控制模型思考的努力程度。上游给其中几个取值起了名字，这就是你在模型选择器里看到的 reasoning effort（high / medium / low）。填入预算会替换掉原本的 high / medium / low 传给模型，而不是叠加。
+
+因此，自定义预算可以达到以下效果：
+
+- **让低档想得更多** —— 在 `Low` 行填入较大数值。
+- **让高档想得更少**（更快、更省）—— 在 `High` 行填入较小数值。
+- **获得最大思考** —— 直接选 `High`，不必填值。
+- **恢复该档默认** —— 清空该行。
+
+模型会基于预算，根据问题难度自适应调整思考长短。这张表格展示了测试中，Gemini 3.8 Flash 在不同预算下，对不同难度题目的实际思考消耗（单位：token）：
+
+| 设置 | 简单题 | 中等题 | 困难题 |
+|---|---|---|---|
+| Default | ~135 | ~1,100 | ~48,700 |
+| Low | ~50 | 0 | ~9,000 |
+| Medium | ~150 | ~870 | ~60,400 |
+| High | ~165 | ~1,855 | ~63,400 |
+| 填入 65535 | ~185 | ~2,130 | ~62,900 |
+
+填入最大值（65535）与选 High 在困难题上完全相同，但可以提高简单题和中等题的思考程度（约 10–15%）。数值决定效果——同一数值填在任意一行，发出的请求完全相同。
+
+注：困难题使用一道组合计数推导题（推导铺砖递推式并求第 40 项），中等题使用一道数论证明题（证明 n⁴+4 恒为合数），简单题使用一道两位数乘法。
 
 ### 轮换机制
 
@@ -149,7 +180,7 @@ reset 时间。
 
 | 环境变量 | 作用 |
 |---|---|
-| `DSH_AGY_DISABLE=1` | 总开关：插件不注册任何东西（provider + `/agy` 路由），CLI 拒绝运行。 |
+| `DSH_AGY_DISABLE=1` | 总开关：插件不注册任何东西（provider + 设置分区 + OAuth 回调），CLI 拒绝运行。 |
 | `DSH_AGY_FINGERPRINT_MODE=stable` | 每账号固定一个客户端身份——不做逐请求随机头、不再生指纹（OMP 式固定客户端姿态）。默认 `dynamic` 保持逐请求随机。 |
 | `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | harness 内后台批量健康探测（按间隔 refresh + userinfo）；默认关闭。 |
 | `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | 自备 OAuth App 逃生通道：覆盖内置的公开 Antigravity 客户端凭据。 |
@@ -181,6 +212,9 @@ reset 时间。
 
 - 账号：`~/.dsh/agy-accounts.json`，AES-256-GCM 加密；主密钥在
   `~/.dsh/.credentials.yaml`（`AGY_MASTER_KEY`，0600）。`$DSH_HOME` 可整体迁移。
+- 模型可见性：`~/.dsh/agy-models.json`（0600）——被隐藏模型的名单，只记录你关闭掉的模型，重新打开即删除对应条目。
+- 用量统计：`~/.dsh/agy-stats.json`（0600）——累计计数器加一个滚动 30 天窗口。计数在文件锁下合并，
+  因此多个进程（桌面端、web profile 服务、CLI）可并发记录而不会互相覆盖。只存账号 email，不存 token、代理或 project id。
 - 指纹池（版本串/SDK 客户端）可通过 `~/.dsh/agy-fingerprint-data.json` 覆盖——
   无需发版即可更新。
 
