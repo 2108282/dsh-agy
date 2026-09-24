@@ -1,13 +1,5 @@
 {
   "$comment": [
-    "What the OFFICIAL Antigravity CLI actually is, as measured — not as inherited from",
-    "another implementation. This file exists because the three community projects we",
-    "compared against (Antigravity-Manager, OmniRoute, CLIProxyAPI) disagree with each",
-    "other, invent headers that exist in neither official binary, and are frozen at",
-    "whatever version they were written against; they are LEADS, never reference objects.",
-    "A reference object must be (a) the product we claim to be and (b) re-measurable at",
-    "will. That is the installed official artifact plus its release feed, and nothing else.",
-    "",
     "Provenance codes:",
     "  pclntab  - Go function names + addresses parsed out of the installed CLI binary,",
     "             then the strings/constants those functions reference.",
@@ -20,10 +12,8 @@
     "Confidence: 'confirmed' = read directly from the artifact; 'unresolved' = the",
     "artifact does not say, and a capture of a live authenticated request is needed.",
     "docs/ is not bundled with npm, and this is data rather than prose, so the EN+zh",
-    "mirror rule does not apply.",
-    "Credential literals: this file deliberately does NOT restate AGY_CLIENT_ID, AGY_CLIENT_SECRET or the second client id. The first two live in src/oauth/constants.ts (AGENTS.md: public client credentials, not project secrets) and repeating them here would both duplicate a credential into documentation and trip GitHub push protection, which classifies a Google OAuth client id as a secret to block on. The second client id is truncated so it stays identifying without being a usable literal; recover the full value by re-reading the artifact as the capture recipe above describes."
+    "The `unresolved` list at the end is the entry point for open questions: each is something the artifact does not answer and a live authenticated capture would."
   ],
-
   "capturedAt": "2026-09-23",
   "product": {
     "claimed": "cli",
@@ -36,8 +26,12 @@
       "`AGY_CLIENT_ID` appears verbatim in this binary."
     ],
     "siblingProviders": [
-      "CLIAuthProvider", "StandaloneAuthProvider", "IDEAuthProvider",
-      "HostAuthProvider", "AntigravityHubAuthProvider", "StubbyAuthProvider",
+      "CLIAuthProvider",
+      "StandaloneAuthProvider",
+      "IDEAuthProvider",
+      "HostAuthProvider",
+      "AntigravityHubAuthProvider",
+      "StubbyAuthProvider",
       "GeminiAPIKeyAuthProvider"
     ],
     "providerHeaderSetsDiffer": {
@@ -45,17 +39,27 @@
       "evidence": "(*CLIAuthProvider).SetHTTPHeaders and (*AntigravityHubAuthProvider).SetHTTPHeaders are each 576 bytes of real work and reference DIFFERENT constants (the CLI one references 'business_agent_platform_paygo'; the hub one references the other OAuth client id). The other five are 32-byte no-ops. The CLI and the hub therefore send different headers — so a header set copied from a hub-shaped client is wrong for us.",
       "source": "pclntab"
     },
-    "displayName": { "value": "Antigravity CLI", "source": "strings" },
-    "internalCodename": { "value": "jetski", "source": "strings", "note": "e.g. 'jetski-standalone-oauth-token' as the keyring service name" }
+    "displayName": {
+      "value": "Antigravity CLI",
+      "source": "strings"
+    },
+    "internalCodename": {
+      "value": "jetski",
+      "source": "strings",
+      "note": "e.g. 'jetski-standalone-oauth-token' as the keyring service name"
+    }
   },
-
   "version": {
     "claimedLine": "cli",
-    "installed": { "value": "1.2.5", "source": "cli", "detectedVia": "`agy --version`" },
+    "installed": {
+      "value": "1.2.5",
+      "source": "cli",
+      "detectedVia": "`agy --version`"
+    },
     "feed": {
-      "latest": "1.2.9",
+      "latest": "1.2.10",
       "url": "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest",
-      "shape": "{ tag_name: \"1.2.9\" } — no leading `v`",
+      "shape": "{ tag_name: \"1.2.10\" } — no leading `v`",
       "source": "feed",
       "note": "The binary also embeds this repository path (raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md) for its `changelog` subcommand."
     },
@@ -72,7 +76,6 @@
       "is why it stays in the 'keep' tier while the rest of the cosmetic axis is hygiene."
     ]
   },
-
   "userAgent": {
     "confidence": "unresolved",
     "finding": [
@@ -118,7 +121,6 @@
       "log request headers at the default verbosity, so the logs do not answer this."
     ]
   },
-
   "clientMetadata": {
     "confidence": "confirmed",
     "source": "proto",
@@ -145,18 +147,37 @@
     ],
     "enums": {
       "IdeType": [
-        "IDE_UNSPECIFIED", "VSCODE", "INTELLIJ", "VSCODE_CLOUD_WORKSTATION",
-        "INTELLIJ_CLOUD_WORKSTATION", "CLOUD_SHELL", "CIDER", "CLOUD_RUN",
-        "ANDROID_STUDIO", "ANTIGRAVITY", "JETSKI", "COLAB", "FIREBASE",
-        "CHROME_DEVTOOLS", "GEMINI_CLI"
+        "IDE_UNSPECIFIED",
+        "VSCODE",
+        "INTELLIJ",
+        "VSCODE_CLOUD_WORKSTATION",
+        "INTELLIJ_CLOUD_WORKSTATION",
+        "CLOUD_SHELL",
+        "CIDER",
+        "CLOUD_RUN",
+        "ANDROID_STUDIO",
+        "ANTIGRAVITY",
+        "JETSKI",
+        "COLAB",
+        "FIREBASE",
+        "CHROME_DEVTOOLS",
+        "GEMINI_CLI"
       ],
       "Platform": [
-        "PLATFORM_UNSPECIFIED", "DARWIN_AMD64", "DARWIN_ARM64",
-        "LINUX_AMD64", "LINUX_ARM64", "WINDOWS_AMD64"
+        "PLATFORM_UNSPECIFIED",
+        "DARWIN_AMD64",
+        "DARWIN_ARM64",
+        "LINUX_AMD64",
+        "LINUX_ARM64",
+        "WINDOWS_AMD64"
       ],
       "PluginType": [
-        "PLUGIN_UNSPECIFIED", "CLOUD_CODE", "GEMINI", "AIPLUGIN_INTELLIJ",
-        "AIPLUGIN_STUDIO", "PANTHEON"
+        "PLUGIN_UNSPECIFIED",
+        "CLOUD_CODE",
+        "GEMINI",
+        "AIPLUGIN_INTELLIJ",
+        "AIPLUGIN_STUDIO",
+        "PANTHEON"
       ]
     },
     "corrections": [
@@ -167,10 +188,25 @@
       "`darwin/arm64` token. Both exist; conflating them is what produced `\"MACOS\"`."
     ],
     "ours": {
-      "sentFields": ["ideType", "ideVersion", "platform"],
-      "ideType": { "value": "ANTIGRAVITY", "confidence": "unresolved", "note": "The CLI's own IdeType is injected through its auth provider and was not captured. `GEMINI_CLI` is the enum's newer CLI value and is the alternative to settle by capture; the established working value is kept rather than guessed." },
-      "ideVersion": { "value": "<resolved CLI version>", "confidence": "confirmed" },
-      "platform": { "value": "DARWIN_ARM64", "confidence": "measured", "note": "platform is pinned to darwin/arm64 (see AGENTS.md), so the enum takes its arm64 member." },
+      "sentFields": [
+        "ideType",
+        "ideVersion",
+        "platform"
+      ],
+      "ideType": {
+        "value": "ANTIGRAVITY",
+        "confidence": "unresolved",
+        "note": "The CLI's own IdeType is injected through its auth provider and was not captured. `GEMINI_CLI` is the enum's newer CLI value and is the alternative to settle by capture; the established working value is kept rather than guessed."
+      },
+      "ideVersion": {
+        "value": "<resolved CLI version>",
+        "confidence": "confirmed"
+      },
+      "platform": {
+        "value": "DARWIN_ARM64",
+        "confidence": "measured",
+        "note": "platform is pinned to darwin/arm64 (see AGENTS.md), so the enum takes its arm64 member."
+      },
       "liveCheck": {
         "script": "pnpm run verify:metadata-acceptance",
         "result": "200 — the backend accepts `{ideType, ideVersion, platform}` on loadCodeAssist",
@@ -185,18 +221,30 @@
           "googleapis.com/oauth2/v1/userinfo, which never reaches the Cloud Code backend."
         ]
       },
-      "omitted": { "fields": ["pluginVersion", "updateChannel", "duetProject", "pluginType", "ideName"], "why": "no captured value; an absent field is merely incomplete, a wrong one is a new anomaly" }
+      "omitted": {
+        "fields": [
+          "pluginVersion",
+          "updateChannel",
+          "duetProject",
+          "pluginType",
+          "ideName"
+        ],
+        "why": "no captured value; an absent field is merely incomplete, a wrong one is a new anomaly"
+      }
     }
   },
-
   "headers": {
     "confidence": "confirmed",
     "source": "strings + pclntab",
     "absentFromBothBinaries": {
       "note": "Zero occurrences in the CLI binary AND in the IDE language server. Anything here is community-invented, including two headers this project used to send.",
       "names": [
-        "x-client-name", "x-client-version", "x-machine-id", "x-vscode-sessionid",
-        "x-goog-request-id", "Client-Metadata"
+        "x-client-name",
+        "x-client-version",
+        "x-machine-id",
+        "x-vscode-sessionid",
+        "x-goog-request-id",
+        "Client-Metadata"
       ]
     },
     "presentInCli": {
@@ -204,10 +252,21 @@
         "setBy": "genai.buildRequest (with templates `google-genai-sdk/%s`, `gl-go/%s`, `%s %s`)",
         "note": "An SDK-level header, and it IS official — do not delete it. Our value pool (`google-cloud-sdk vscode*/...`) does NOT match the CLI's SDK-shaped value; recorded as a mismatch rather than silently changed."
       },
-      "X-Aicode-Prompt-Id": { "setBy": "(*CodeAssistClient).fetchAvailableModels", "note": "App-level custom header, real and unmodelled by us." },
-      "X-Aicode-Request-Id": { "setBy": "(*CodeAssistClient).fetchAvailableModels", "note": "The nearest official analogue of the request id we carry in the body." },
-      "X-Aicode-Trajectory-Id": { "setBy": "(*CodeAssistClient).fetchAvailableModels", "note": "Trajectory = conversation." },
-      "X-Vertex-AI-LLM-Shared-Request-Type": { "note": "Vertex path only." }
+      "X-Aicode-Prompt-Id": {
+        "setBy": "(*CodeAssistClient).fetchAvailableModels",
+        "note": "App-level custom header, real and unmodelled by us."
+      },
+      "X-Aicode-Request-Id": {
+        "setBy": "(*CodeAssistClient).fetchAvailableModels",
+        "note": "The nearest official analogue of the request id we carry in the body."
+      },
+      "X-Aicode-Trajectory-Id": {
+        "setBy": "(*CodeAssistClient).fetchAvailableModels",
+        "note": "Trajectory = conversation."
+      },
+      "X-Vertex-AI-LLM-Shared-Request-Type": {
+        "note": "Vertex path only."
+      }
     },
     "unresolved": [
       "Whether the X-Aicode-* trio is also sent on the GENERATE path. It is only evidenced on",
@@ -215,7 +274,6 @@
       "behaviour this file exists to stop."
     ]
   },
-
   "thoughtSignatureSentinel": {
     "confidence": "confirmed",
     "source": "pclntab",
@@ -228,20 +286,27 @@
     ],
     "finding": "The sentinel lives in the TRAJECTORY->CHAT CONVERSION (i.e. history replay), the model-output retry, and checkpointing — not in one-per-functionCall emission. This is the first direct evidence on the placement question; confirming whether it covers only the first functionCall still needs one live parallel-tool turn."
   },
-
   "rejections": {
     "confidence": "confirmed",
     "source": "proto",
     "message": "IneligibleTier.IneligibleTierReasonCodes",
     "values": [
-      "UNKNOWN", "INELIGIBLE_ACCOUNT", "UNKNOWN_LOCATION", "UNSUPPORTED_LOCATION",
-      "RESTRICTED_NETWORK", "RESTRICTED_AGE", "NON_USER_ACCOUNT", "DASHER_USER",
-      "BYOID_USER", "RESTRICTED_DASHER_USER", "VALIDATION_REQUIRED",
-      "GOOGLE_TOS_NOT_SUPPORTED_BY_CLIENT", "UNSUPPORTED_CLIENT"
+      "UNKNOWN",
+      "INELIGIBLE_ACCOUNT",
+      "UNKNOWN_LOCATION",
+      "UNSUPPORTED_LOCATION",
+      "RESTRICTED_NETWORK",
+      "RESTRICTED_AGE",
+      "NON_USER_ACCOUNT",
+      "DASHER_USER",
+      "BYOID_USER",
+      "RESTRICTED_DASHER_USER",
+      "VALIDATION_REQUIRED",
+      "GOOGLE_TOS_NOT_SUPPORTED_BY_CLIENT",
+      "UNSUPPORTED_CLIENT"
     ],
     "finding": "This is the official enumeration of why the backend declines to serve. Note that only VALIDATION_REQUIRED is one we have ever seen, and that UNSUPPORTED_CLIENT / GOOGLE_TOS_NOT_SUPPORTED_BY_CLIENT are the client-identity members — the surface a client-shape check would actually use. DASHER_USER and BYOID_USER name account TYPES, i.e. enforcement that no amount of impersonation addresses."
   },
-
   "oauth": {
     "confidence": "confirmed",
     "clientId": "<AGY_CLIENT_ID in src/oauth/constants.ts>",
@@ -253,11 +318,14 @@
     },
     "tokenAuthMethod": "client_secret_post",
     "redirectUri": "https://antigravity.google/oauth-callback",
-    "authorizeEndpoints": ["https://auth.cloud.google/authorize"],
-    "scopesSeen": ["offline_access"],
+    "authorizeEndpoints": [
+      "https://auth.cloud.google/authorize"
+    ],
+    "scopesSeen": [
+      "offline_access"
+    ],
     "store": "OS keyring, service `jetski-standalone-oauth-token`, falling back to a file; `JETSKI_OAUTH_TOKEN` overrides from the environment."
   },
-
   "endpoints": {
     "confidence": "confirmed",
     "source": "strings",
@@ -295,29 +363,44 @@
     },
     "note": "`preprod-daily-...` was initially recorded as the only sandbox host because the first pass read it out of the `printDebugInfo` string blob; a boundary-aware scan over the whole binary is what settled it."
   },
-
   "environment": {
     "confidence": "confirmed",
     "source": "strings",
     "names": [
-      "CLOUD_CODE_URL", "JETSKI_OAUTH_TOKEN", "AGY_ENABLE_HUB", "AICODE_DEV_PROJECT",
-      "GEMINI_API_KEY", "AGY_ADC_AUTH", "AGY_CLI_HIDE_LOGO", "AGY_CLI_FORCE_OSC8",
-      "AGY_BROWSER_WS_URL", "GOOGLE_LOG_DIR"
+      "CLOUD_CODE_URL",
+      "JETSKI_OAUTH_TOKEN",
+      "AGY_ENABLE_HUB",
+      "AICODE_DEV_PROJECT",
+      "GEMINI_API_KEY",
+      "AGY_ADC_AUTH",
+      "AGY_CLI_HIDE_LOGO",
+      "AGY_CLI_FORCE_OSC8",
+      "AGY_BROWSER_WS_URL",
+      "GOOGLE_LOG_DIR"
     ],
     "note": "`AGY_ENABLE_HUB` confirms a hub mode exists behind a flag, which is the concrete form of the CLI-vs-hub product question."
   },
-
   "cliOperational": {
     "confidence": "confirmed",
     "source": "cli",
     "stateDir": "~/.gemini/antigravity-cli/",
     "architecture": "`agy` is a client that spawns a LANGUAGE SERVER process; the LS does the upstream work and logs klog-style to ~/.gemini/antigravity-cli/log/cli-<ts>.log with a `Language server version: <v>` line.",
-    "subcommands": ["agent(s)", "changelog", "help", "install", "mcp", "mic-serve", "models", "plugin(s)", "remote-control", "update"],
+    "subcommands": [
+      "agent(s)",
+      "changelog",
+      "help",
+      "install",
+      "mcp",
+      "mic-serve",
+      "models",
+      "plugin(s)",
+      "remote-control",
+      "update"
+    ],
     "noLoginSubcommand": "Login is the interactive `/login` slash command, not a subcommand — so there is no non-interactive way to make the official CLI authenticated without injecting a token.",
     "changelogIsEmbedded": "`agy changelog` prints through a dead HTTPS_PROXY, i.e. it is served from the embedded copy; the live URL is only what it would refresh from.",
     "note": "This machine's CLI is NOT logged in ('You are not logged into Antigravity'), which is why every wire-level capture above is still 'unresolved' rather than 'confirmed'."
   },
-
   "unresolved": [
     "The CLI's User-Agent (see userAgent.captureRecipe).",
     "The CLI's IdeType value (ANTIGRAVITY vs GEMINI_CLI).",
