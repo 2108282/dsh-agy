@@ -307,13 +307,21 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
      * arrive, so a slow probe costs a placeholder, not the page.
      *
      * Server-side this is TTL-gated, so the upstream call happens at most once
-     * per window rather than once per view.
+     * per window rather than once per view. `force` bypasses that gate for an
+     * EXPLICIT refresh — without it the toolbar's Refresh button could not
+     * deliver "the latest numbers now", which is the only reason to click it
+     * while the snapshot is still inside its TTL.
      */
-    'account.limits': async () => {
+    'account.limits': async (payload) => {
+      const force = (payload as { force?: unknown } | undefined)?.force === true
       const storage = await store.load()
       // Best-effort: a failed refresh leaves whatever was cached, so this reply
-      // is always the current best knowledge rather than an error.
-      await sessions.refreshLimits(storage).catch(() => undefined)
+      // is always the current best knowledge rather than an error. The OUTCOME
+      // is still reported, because "probed and failed" and "was still fresh"
+      // both leave the numbers identical and the user needs to know which.
+      const result = await sessions
+        .refreshLimits(storage, { force })
+        .catch(() => ({ measured: [], failed: [], skipped: 0 }))
       const fresh = await store.load()
       return {
         limits: fresh.accounts.map((account, index) => ({
@@ -321,6 +329,9 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
           groups: account.cachedLimits?.groups ?? null,
           updatedAt: account.cachedLimits?.updatedAt ?? null,
         })),
+        measured: result.measured.length,
+        failed: result.failed.length,
+        skipped: result.skipped,
       }
     },
 

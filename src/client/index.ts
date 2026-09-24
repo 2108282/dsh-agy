@@ -55,6 +55,16 @@ const RPC_ENDPOINT = 'agy'
 
 type TabId = 'accounts' | 'models' | 'usage' | 'credentials'
 
+/**
+ * How long a one-shot action's verdict stays on screen.
+ *
+ * Both the success and the failure channel use this: an action's outcome is a
+ * transient acknowledgement, and the screen is in a valid state either way. A
+ * STANDING failure (the account list failing to load) deliberately does not use
+ * it — see `actionError` in `AgySettings`.
+ */
+const ACTION_MESSAGE_TTL_MS = 3_500
+
 /** Connection shape this plugin needs (structural, so no host-only import). */
 interface ConnectionLike {
   rpc: {
@@ -170,6 +180,27 @@ function average(total: number, count: number): number {
 /** Total tokens across the four disjoint buckets. */
 function totalTokens(counters: UsageCounters): number {
   return counters.input + counters.output + counters.cacheRead + counters.cacheWrite
+}
+
+/**
+ * The whole prompt side: everything the model read, cached or not.
+ *
+ * The LEDGER keeps `input` as the uncached portion alone, because that is DSH's
+ * own disjoint-bucket vocabulary (`usage-types.ts`, and the adapter's SSE parse
+ * subtracts the cached count for exactly this reason) — that split must not be
+ * redefined at the storage layer.
+ *
+ * The DISPLAY folds it, though: an input figure of 18.6M beside a cache figure
+ * of 62.2M reads as though 62.2M went unaccounted for, and a cache read LARGER
+ * than the input looks like a bug rather than the expected shape of a prefix
+ * cache. So the headline shows the whole prompt side and the cache line becomes
+ * a HIT count — a subset, which is why the two are never added together and the
+ * old explanatory footnote is gone.
+ * @param counters - one scope's counters.
+ * @returns prompt tokens including the cached portion.
+ */
+function promptTokens(counters: UsageCounters): number {
+  return counters.input + counters.cacheRead + counters.cacheWrite
 }
 
 /** Quota tint by remaining fraction: healthy / low / critical. */
@@ -429,7 +460,11 @@ interface AccountHandlers {
   onExport: (index: number) => void
   onRegenerateFingerprint: (index: number) => void
   onSetProxy: (index: number, proxy: string) => void
-  onTestProxy: (index: number) => void
+  /**
+   * Probe a proxy. The draft is passed alongside the index so an UNSAVED value
+   * can be tested; an empty string means "use the account's stored proxy".
+   */
+  onTestProxy: (index: number, proxy: string) => void
 }
 
 /** One account's detail: identity, cumulative usage, proxy, and its actions. */
@@ -547,7 +582,9 @@ function AccountDetail(props: {
   const usageBlock = usage === null ? null : card(
     t('usageCumulative'),
     metrics([
-      metric(t('kpiInput'), usage.totals.input, t('kpiInputDetail')),
+      metric(t('kpiInput'), promptTokens(usage.totals), t('kpiInputMissed', {
+        tokens: tokenText(usage.totals.input),
+      })),
       metric(t('kpiOutput'), usage.totals.output, t('kpiOutputDetail')),
       metric(t('kpiCacheRead'), usage.totals.cacheRead, t('kpiCacheHit', { percent: cacheHitPercent(usage.totals) ?? 0 })),
       metric(t('kpiRequests'), String(usage.totals.requests), t('kpiRequestsDetail', {
@@ -580,7 +617,15 @@ function AccountDetail(props: {
       handlers.onSetProxy(account.index, '')
       setProxyDraft('')
     }, { disabled: busy || account.proxy === null }),
-    button(t('actionTestProxy'), () => { handlers.onTestProxy(account.index) }, { disabled: busy })))
+    // A probe needs a subject: with an empty box and no stored proxy there is
+    // nothing to test, so the button is disabled with the reason on its tooltip
+    // rather than clicking through to the host's "no proxy configured" error.
+    (() => {
+      const noTarget = proxyDraft.trim() === '' && account.proxy === null
+      return button(t('actionTestProxy'),
+        () => { handlers.onTestProxy(account.index, proxyDraft.trim()) },
+        { disabled: busy || noTarget, ...(noTarget ? { title: t('proxyTestNoTarget') } : {}) })
+    })()))
 
   return h('div', { className: 'agy-detail' }, identity, actions, limitsBlock, usageBlock, proxyBlock)
 }
@@ -1023,12 +1068,19 @@ function numHeader(index: number, label: string): ReactNode {
 }
 
 /**
- * The Token composition bar rows: cache read, uncached input, output.
+ * The Token composition bar rows: cache hits, input misses, output.
  *
- * A plain-prefix cache makes the cache-read share dominate (it re-reads the whole
+ * A plain-prefix cache makes the cached share dominate (it re-reads the whole
  * prefix every turn), which is correct but reads as impossible without a
  * breakdown — hence this bar, which shows the proportion rather than restating
  * the numbers.
+ *
+ * The three rows must stay a PARTITION of `totalTokens` (they sum to 100%), so
+ * the prompt side is split rather than labelled: `kpiCacheRead` (the hit count)
+ * and `kpiInputMissed` (the rest). Using `kpiInput` for a row here would
+ * double-count every cached token, because the headline input figure is now the
+ * WHOLE prompt side — which already contains the hits. The split is what keeps
+ * the bar honest and still adds up.
  *
  * `labelKey` and `id` are SEPARATE fields on purpose. A single `key` field used
  * for both the i18n lookup and React's `key` prop is how the label position ended
@@ -1040,7 +1092,7 @@ function tokenComposition(counters: UsageCounters, t: T): ReactNode {
   const total = totalTokens(counters)
   const rows: Array<{ id: string, labelKey: AgyLocaleKey, value: number, tone: string }> = [
     { id: 'cacheRead', labelKey: 'kpiCacheRead', value: counters.cacheRead, tone: 'var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6)' },
-    { id: 'input', labelKey: 'kpiInput', value: counters.input, tone: 'var(--dsw-static-neutral-bluish-700, #8b8f96)' },
+    { id: 'missed', labelKey: 'kpiInputMissedLabel', value: counters.input, tone: 'var(--dsw-static-neutral-bluish-700, #8b8f96)' },
     { id: 'output', labelKey: 'kpiOutput', value: counters.output, tone: 'var(--dsw-alias-state-success-primary, #22c55e)' },
   ]
   return h('div', { className: 'agy-compose' }, ...rows.map((row) => {
@@ -1103,7 +1155,12 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
         requests: counters.requests,
         failed: counters.failed,
       })),
-      metric(t('kpiInput'), counters.input, t('kpiInputDetail')),
+      // The prompt side, whole. Its detail line states the MISSED portion, which
+      // is the complement of the cache line beside it — so the two figures
+      // answer "how much was cached" at a glance without either being a subset
+      // the reader has to subtract for.
+      metric(t('kpiInput'), promptTokens(counters),
+        t('kpiInputMissed', { tokens: tokenText(counters.input) })),
       metric(t('kpiCacheRead'), counters.cacheRead,
         hit === null ? t('kpiNoBilledInput') : t('kpiCacheHit', { percent: hit })),
       metric(t('kpiOutput'), counters.output, t('kpiOutputDetail')),
@@ -1117,9 +1174,12 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     [t('labelTtft'), formatDuration(average(counters.ttftMs, counters.ttftN))],
   ]))
 
-  // Column headers carry the semantics that used to sit in a card-head aside:
-  // "input" is the UNCACHED portion, so it is labelled as such rather than
-  // explained in prose the reader has to find.
+  // Column headers state the semantics directly, so no footnote is needed: the
+  // prompt side is one column (all of it, cached included) and the cache line
+  // beside it is the HIT count — a subset, which is why nobody adds the two up.
+  // The old pair (an uncached-only input column plus a disjoint cache column)
+  // required a sentence of prose to explain and still read as though the cache
+  // read had gone missing from the input.
   const byModel = view.models.length === 0 ? null : card(
     t('byModel'),
     h('div', { className: 'agy-table-wrap' },
@@ -1127,14 +1187,14 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
         h('tr', null,
           h('th', null, t('colModel')),
           numHeader(0, t('colRequests')),
-          numHeader(1, t('colInputUncached')),
-          numHeader(2, t('colCacheRead')),
+          numHeader(1, t('kpiInput')),
+          numHeader(2, t('kpiCacheRead')),
           numHeader(3, t('colOutput')),
           numHeader(4, t('colTokenShare'))),
         view.models.map((row) => h('tr', { key: row.model },
           h('td', { className: 'agy-strong' }, h('span', { className: 'agy-mail' }, row.model)),
           h('td', { className: 'agy-num' }, String(row.counters.requests)),
-          h('td', { className: 'agy-num' }, tokenText(row.counters.input)),
+          h('td', { className: 'agy-num' }, tokenText(promptTokens(row.counters))),
           h('td', { className: 'agy-num' }, tokenText(row.counters.cacheRead)),
           h('td', { className: 'agy-num' }, tokenText(row.counters.output)),
           // Token share, not request share: every neighbouring column is tokens,
@@ -1147,8 +1207,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
                   style: {
                     width: `${Math.round((totalTokens(row.counters) / Math.max(1, total)) * 100)}%`,
                   },
-                })))))))),
-    tokenShareNote(t))
+                })))))))))
 
   const byAccount = view.accounts.length === 0 ? null : card(t('byAccount'),
     h('div', { className: 'agy-table-wrap' },
@@ -1171,11 +1230,6 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
 
   return h('div', { className: 'agy-root' },
     rangePicker, summary, timing, byModel, byAccount)
-}
-
-/** The one-line footnote stating what the token columns count. */
-function tokenShareNote(t: T): ReactNode {
-  return h('p', { className: 'agy-hint agy-table-note' }, t('tokenColumnNote'))
 }
 
 // ─── Credentials tab ─────────────────────────────────────────────────────────
@@ -1233,6 +1287,16 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const [error, setError] = useState<string | undefined>(undefined)
   /** A non-fatal outcome worth reporting (e.g. a partial credential import). */
   const [notice, setNoticeState] = useState<string | undefined>(undefined)
+  /**
+   * The outcome of a one-shot action, timed like `notice`.
+   *
+   * A SEPARATE channel from `error` on purpose. `error` is also where a failed
+   * `refresh()` lands, and "the account list could not be loaded" is a standing
+   * condition: auto-dismissing it would leave a broken page looking fine 3.5s
+   * later. Only an action's own verdict is transient, because the user already
+   * knows what they clicked and the screen returns to a valid state either way.
+   */
+  const [actionError, setActionErrorState] = useState<string | undefined>(undefined)
 
   const [busy, setBusy] = useState(false)
   const [loaded, setLoaded] = useState(false)
@@ -1240,29 +1304,47 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const alive = useRef(true)
 
   /**
-   * Show a transient notice, then clear it.
+   * Show a transient message, then clear it.
    *
-   * A notice that never clears is indistinguishable from a stuck UI: the model
+   * A message that never clears is indistinguishable from a stuck UI: the model
    * test's "X is working." stayed on screen forever, through every later action.
    * The deleted dashboard's toasts auto-dismissed after 3.5s for the same
-   * reason; this keeps that behaviour, and a newer notice simply replaces the
+   * reason; this keeps that behaviour, and a newer message simply replaces the
    * pending timer.
+   *
+   * One factory rather than two near-identical setters: the timer bookkeeping is
+   * the part that must not drift between the success and failure channels. It
+   * takes the timer ref as an argument rather than creating one, because a
+   * `useCallback(timedChannel(...))` argument is evaluated on EVERY render — the
+   * discarded function would still have appended its timer to the cancel list.
+   * @param timer - the ref owning this channel's pending dismissal.
+   * @param set - the state setter this channel writes to.
+   * @returns a setter that arms the dismissal timer.
    */
-  const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const setNotice = useCallback((text: string | undefined) => {
-    if (noticeTimer.current !== undefined) clearTimeout(noticeTimer.current)
-    noticeTimer.current = undefined
-    setNoticeState(text)
+  const timedChannel = (
+    timer: { current: ReturnType<typeof setTimeout> | undefined },
+    set: (text: string | undefined) => void,
+  ): ((text: string | undefined) => void) => (text) => {
+    if (timer.current !== undefined) clearTimeout(timer.current)
+    timer.current = undefined
+    set(text)
     if (text === undefined) return
-    noticeTimer.current = setTimeout(() => {
-      noticeTimer.current = undefined
-      if (alive.current) setNoticeState(undefined)
-    }, 3_500)
-  }, [])
+    timer.current = setTimeout(() => {
+      timer.current = undefined
+      if (alive.current) set(undefined)
+    }, ACTION_MESSAGE_TTL_MS)
+  }
 
-  // Cancel a pending dismissal when the section unmounts.
+  /** Pending dismissal timers, one per channel, cancelled together on unmount. */
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const actionErrorTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const setNotice = useCallback(timedChannel(noticeTimer, setNoticeState), [])
+  const setActionError = useCallback(timedChannel(actionErrorTimer, setActionErrorState), [])
+
+  // Cancel every pending dismissal when the section unmounts.
   useEffect(() => () => {
     if (noticeTimer.current !== undefined) clearTimeout(noticeTimer.current)
+    if (actionErrorTimer.current !== undefined) clearTimeout(actionErrorTimer.current)
   }, [])
 
   useEffect(() => {
@@ -1307,10 +1389,16 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
    * It also works for a pool of ANY size: the scheduling quota refresh is skipped
    * for a single enabled account (measuring that one could block the only
    * account), so this endpoint is the only thing that fills `cachedLimits` there.
+   *
+   * @param force - re-probe inside the TTL. Only an EXPLICIT refresh does this;
+   *   an automatic one must respect the TTL, or every action that reloads the
+   *   page would spend an upstream quota call.
+   * @param report - whether to surface the outcome. Set only when the user asked
+   *   for the refresh, since an automatic one must stay silent.
    */
-  const loadLimits = useCallback(async () => {
+  const loadLimits = useCallback(async (force = false, report = false) => {
     try {
-      const result = await rpc.call('account.limits', {})
+      const result = await rpc.call('account.limits', force ? { force: true } : {})
       if (!alive.current) return
       const byIndex = new Map(result.limits.map((entry) => [entry.index, entry]))
       setAccounts((current) => current.map((account) => {
@@ -1320,18 +1408,50 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         if (entry === undefined || entry.groups === null) return account
         return { ...account, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
       }))
-    } catch {
-      // Display-only: a failed refresh leaves the existing windows in place and
-      // must never surface as an error banner over the accounts list.
+      // An explicit refresh reports itself. Without this a forced probe that
+      // failed changed nothing on screen — no new numbers, no new timestamp —
+      // so the click looked inert. "Still fresh" and "probe failed" are
+      // different facts and must not read the same.
+      if (report) {
+        if (result.failed > 0) setActionError(t('limitsRefreshFailed', { failed: result.failed }))
+        else if (result.measured > 0) setNotice(t('limitsRefreshOk', { measured: result.measured }))
+        else setNotice(t('limitsRefreshFresh'))
+      }
+    } catch (caught) {
+      // Display-only in the automatic case: a failed refresh leaves the existing
+      // windows in place and must never surface an error over the account list.
+      if (report) {
+        setActionError(caught instanceof Error ? caught.message : String(caught))
+      }
     }
-  }, [rpc])
+  }, [rpc, setActionError, setNotice, t])
 
   useEffect(() => { void refresh() }, [refresh])
   useEffect(() => {
     // Only on the tab that shows them, and after the rows exist so the merge has
     // something to write into.
+    //
+    // TTL-respecting (no `force`): this fires on mount and whenever the account
+    // COUNT changes, and neither is a request for fresh numbers. Note the
+    // dependency is the LENGTH, so a plain `refresh()` — which replaces the
+    // array without changing its length — does not re-run this. That is why the
+    // toolbar's Refresh calls `refreshAll` rather than relying on this effect.
     if (tab === 'accounts' && accounts.length > 0) void loadLimits()
   }, [tab, accounts.length, loadLimits])
+
+  /**
+   * The toolbar's Refresh: reload the page AND force the quota windows.
+   *
+   * The force is the whole point of a manual refresh — without it the click
+   * could not deliver anything newer than what the 10-minute TTL already holds,
+   * so "I want the latest numbers now" was unanswerable. The two halves are
+   * deliberately not awaited together: `refresh()` is the fast local reload,
+   * while the forced probe can take seconds, and the rows should not wait on it.
+   */
+  const refreshAll = useCallback(() => {
+    void refresh()
+    if (tab === 'accounts') void loadLimits(true, true)
+  }, [loadLimits, refresh, tab])
 
   /**
    * The model list loads separately: it is the one call that may reach upstream
@@ -1413,10 +1533,51 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     await navigator.clipboard?.writeText(text)
   }, [])
 
+  /**
+   * Run one one-shot action under the shared busy / clear / report envelope.
+   *
+   * Deliberately NOT `act()`. `act()` reads only a REJECTION and then calls
+   * `refresh()`, which clears the banner — so a handler whose failure arrives
+   * IN BAND (`{ ok: false }`, which is how `account.verify`, `account.test` and
+   * `account.proxyTest` all report) had its verdict both discarded and erased:
+   * the click fired, the host answered, and the panel showed nothing. The
+   * reload is also not always wanted; each caller decides.
+   *
+   * A thrown error still lands here, so a request-level failure (a rejected
+   * promise, e.g. "no proxy configured") reports through the same channel.
+   * @param run - the action, which reports its own in-band verdict.
+   */
+  const runAction = useCallback(async (run: () => Promise<void>): Promise<void> => {
+    setBusy(true)
+    // A fresh action supersedes the previous outcome; a stale verdict next to a
+    // new one would read as if both were current.
+    setNotice(undefined)
+    setActionError(undefined)
+    try {
+      await run()
+    } catch (caught) {
+      if (alive.current) {
+        setActionError(caught instanceof Error ? caught.message : String(caught))
+      }
+    } finally {
+      if (alive.current) setBusy(false)
+    }
+  }, [setActionError, setNotice])
+
   const handlers: AccountHandlers = useMemo(() => ({
     t,
     onActivate: (index) => { void act(() => rpc.call('account.activate', { index })) },
-    onVerify: (index) => { void act(() => rpc.call('account.verify', { index })) },
+    onVerify: (index) => {
+      void runAction(async () => {
+        const result = await rpc.call('account.verify', { index })
+        // Reload BEFORE reporting: a live credential re-enables the account, so
+        // the row must show the new state even when the verdict is a failure.
+        if (alive.current) await refresh()
+        if (!alive.current) return
+        if (result.ok) setNotice(t('verifyOk', { email: result.email ?? `#${index}` }))
+        else setActionError(t('verifyFail') + (result.error === undefined ? '' : `\n${result.error}`))
+      })
+    },
     onDelete: (index) => {
       if (!window.confirm(t('confirmDelete'))) return
       void act(() => rpc.call('account.delete', { index }))
@@ -1424,13 +1585,19 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     onTest: (index) => {
       // Test needs a model id; discover the first visible one rather than
       // guessing, and report clearly when there is none.
-      void act(async () => {
+      void runAction(async () => {
         const listed = models.length > 0 ? models : (await rpc.call('model.list', {})).models
         const target = listed.find((entry) => !entry.disabled)?.id
         if (target === undefined) throw new Error(t('noModelToTest'))
         // Carry the clicked row's index: without it the host tested whichever
         // account affinity picked and reported that result here.
-        await rpc.call('account.test', { model: target, index })
+        const result = await rpc.call('account.test', { model: target, index })
+        // The test billed a real request, so the ledger reload is meaningful.
+        if (alive.current) await refresh()
+        if (!alive.current) return
+        if (result.ok) setNotice(t('modelTestOk', { model: target }))
+        else setActionError(t('modelTestFail', { model: target })
+          + (result.error === undefined ? '' : `\n${result.error}`))
       })
     },
     onExport: (index) => {
@@ -1444,8 +1611,30 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
       void act(() => rpc.call('account.fingerprint', { index, action: 'regenerate' }))
     },
     onSetProxy: (index, proxy) => { void act(() => rpc.call('account.proxy', { index, proxy })) },
-    onTestProxy: (index) => { void act(() => rpc.call('account.proxyTest', { index })) },
-  }), [act, copyText, models, rpc, t])
+    /**
+     * Probe the proxy and REPORT the verdict.
+     *
+     * `account.proxyTest` answers in band (`{ ok, masked, error? }`) and only
+     * throws for a request-level failure, so the in-band verdict is read here
+     * rather than left to `act()`. No `refresh()`: the probe mutates no account
+     * state, so reloading would be a second `account.list` + `stats.get` round
+     * trip bought for nothing.
+     */
+    onTestProxy: (index, proxy) => {
+      void runAction(async () => {
+        // The draft wins when present, so a proxy can be probed BEFORE it is
+        // saved; the host normalizes it exactly as `account.proxy` does.
+        const result = await rpc.call('account.proxyTest', {
+          index,
+          ...(proxy === '' ? {} : { proxy }),
+        })
+        if (!alive.current) return
+        if (result.ok) setNotice(t('proxyTestOk', { proxy: result.masked }))
+        else setActionError(t('proxyTestFail', { proxy: result.masked })
+          + (result.error === undefined ? '' : `\n${result.error}`))
+      })
+    },
+  }), [act, copyText, models, refresh, rpc, runAction, setActionError, setNotice, t])
 
   const tabButton = (id: TabId, label: string, count?: number): ReactNode =>
     h('button', {
@@ -1590,7 +1779,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         // button but left the pair visibly mismatched. Copying Refresh is the
         // correct answer: `outline` is a bordered transparent capsule that reads
         // correctly in both themes, and it needs no token reasoning of ours.
-        button(t('refresh'), () => { void refresh() }, { size: 'sm', disabled: busy }),
+        button(t('refresh'), refreshAll, { size: 'sm', disabled: busy }),
         button(t('login'), startLogin, { size: 'sm', disabled: busy }))),
     h('div', { className: 'agy-tabs' },
       tabButton('accounts', t('tabAccounts'), accounts.length),
@@ -1598,6 +1787,12 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
       tabButton('usage', t('tabUsage')),
       tabButton('credentials', t('tabCredentials'))),
     error === undefined ? null : h('div', { className: 'agy-error' }, error),
+    // The action's own verdict, in the same red as a standing error because it
+    // IS one — it simply expires, since the page is still usable and the user
+    // already knows what they clicked. `pre-wrap` is not inherited from
+    // `.agy-notice`, so the two-line "what failed + why" form relies on the
+    // stylesheet keeping newlines (see `.agy-error`).
+    actionError === undefined ? null : h('div', { className: 'agy-error' }, actionError),
     notice === undefined ? null : h('div', { className: 'agy-notice' }, notice),
     body,
     loaded || error !== undefined ? null : h('div', { className: 'agy-empty' }, t('loading')))

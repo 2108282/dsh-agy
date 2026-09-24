@@ -110,7 +110,9 @@ dsh-agy status                              # shows proxy column (masked host:po
 
 Fallback: with no per-account proxy, requests use `EnvHttpProxyAgent` (`HTTP_PROXY`/`HTTPS_PROXY` with `NO_PROXY` honored). Per-account proxies ignore `NO_PROXY`, are fail-closed (unreachable proxy skips the account without cooldown and clears affinity), and loopback targets (`localhost`/`127.0.0.1`/`::1`) are always forced direct.
 
-Settings → Antigravity → account detail shows a Proxy row `[input] [Save][Clear][Test]` with the masked `host:port`; writes and probes go over the management RPC (`account.proxy` / `account.proxyTest`). Save requires a non-empty value — clearing an existing proxy is the explicit `Clear` action, never an accidental empty Save.
+Settings → Antigravity → account detail shows a Proxy row `[input] [Save][Clear][Test]` with the masked `host:port`; writes and probes go over the management RPC (`account.proxy` / `account.proxyTest`). Save requires a non-empty value — clearing an existing proxy is the explicit `Clear` action, never an accidental empty Save. `Test` probes whatever is in the box, so an UNSAVED proxy can be checked before it is written; it reports reachable/unreachable in the notice line, and is disabled (with the reason on its tooltip) when there is nothing to probe.
+
+The toolbar's `Refresh` reloads the account list and usage ledger, and additionally re-measures the 5h/weekly quota windows past their 10-minute TTL cache — that forced probe reports how many accounts it refreshed, so a click is never silent. Automatic reloads respect the TTL and spend no upstream call.
 
 ### Path C: Local Development & Link
 

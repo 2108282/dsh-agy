@@ -97,6 +97,35 @@ describe('agy section i18n', () => {
     expect(unused, `locale keys never referenced by index.ts: ${unused.join(', ')}`).toEqual([])
   })
 
+  it('passes every placeholder a key declares at every call site', () => {
+    // The host's translator substitutes `{name}` only when `name in params`, and
+    // otherwise returns the match UNCHANGED — so a forgotten argument renders the
+    // literal braces to the user (`代理可达：{proxy}`) instead of failing. The
+    // parity test above compares the two dictionaries and so cannot see this:
+    // both sides agree on a placeholder that no caller ever supplies.
+    const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+    const missing: string[] = []
+    for (const [key, template] of Object.entries(zh)) {
+      const names = [...template.matchAll(/\{(\w+)\}/g)].map((match) => match[1] as string)
+      if (names.length === 0) continue
+      // Every `t('key', ...)` call, up to the closing paren of its first argument
+      // list — enough to see the params object literal that follows.
+      const calls = [...source.matchAll(new RegExp(`t\\('${key}'\\s*(,\\s*\\{[^}]*\\})?`, 'g'))]
+      expect(calls.length, `key "${key}" has placeholders but no call site`).toBeGreaterThan(0)
+      for (const call of calls) {
+        const params = call[1] ?? ''
+        for (const name of names) {
+          // Accept both an explicit property (`{ proxy: result.masked }`) and the
+          // shorthand that just forwards a same-named binding (`{ value }`).
+          const supplied = new RegExp(`\\b${name}\\s*:`).test(params)
+            || new RegExp(`[{,]\\s*${name}\\s*[,}]`).test(params)
+          if (!supplied) missing.push(`${key} -> {${name}}`)
+        }
+      }
+    }
+    expect(missing, `placeholder never supplied at its call site: ${missing.join(', ')}`).toEqual([])
+  })
+
   it('has no CJK literals outside the dictionaries', () => {
     // The UI's copy belongs in locales.ts; a literal here is untranslatable and
     // invisible to every other i18n check. `styles.ts` carries no user-visible

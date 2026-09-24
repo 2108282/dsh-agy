@@ -168,13 +168,25 @@ export interface AgyRpcMethods {
    * refresh skips (measuring that one could block the only account).
    */
   'account.limits': {
-    payload: Record<string, never>
+    /**
+     * `force` re-probes inside the TTL, for an explicit user refresh.
+     *
+     * Absent (the default) keeps the TTL, so an automatic reload never spends an
+     * upstream call it did not need.
+     */
+    payload: { force?: boolean }
     result: {
       limits: Array<{
         index: number
         groups: QuotaGroup[] | null
         updatedAt: number | null
       }>
+      /** Accounts measured by THIS call. */
+      measured: number
+      /** Accounts whose probe was attempted and failed. */
+      failed: number
+      /** Accounts left alone because their snapshot was still fresh. */
+      skipped: number
     }
   }
   'account.test': {

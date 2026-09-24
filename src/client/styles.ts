@@ -54,7 +54,12 @@ const CSS = `
 }
 .agy-tab .agy-count { margin-left: 5px; font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
 
+/* A failed action states WHAT failed and then WHY, on two lines. The default
+   white-space (normal) folds that newline into a space and runs the verdict
+   into the upstream error, so the separator has to be preserved here exactly as
+   .agy-notice already does for its own multi-line form. */
 .agy-error { padding: 9px 12px; border-radius: 8px; font: var(--dsw-font-xxs-12);
+  white-space: pre-wrap; overflow-wrap: anywhere;
   color: var(--dsw-alias-state-error-primary, #ec1313);
   background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 10%, transparent); }
 /* A non-fatal outcome (a partial import). Neutral, not alarming, and it keeps

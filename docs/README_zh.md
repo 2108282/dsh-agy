@@ -95,7 +95,9 @@ dsh-agy status                              # 展示 proxy 列（脱敏 host:por
 
 回退：未配置每账号代理时，请求走 `EnvHttpProxyAgent`（`HTTP_PROXY`/`HTTPS_PROXY` 且遵循 `NO_PROXY`）。每账号代理忽略 `NO_PROXY`、fail-closed（代理不可达则跳过该账号、不写冷却并清除亲和），且 loopback 目标（`localhost`/`127.0.0.1`/`::1`）始终强制直连。
 
-设置 → Antigravity → 账号详情内有 Proxy 行 `[输入框] [保存][清除][测试]`，显示脱敏 `host:port`；读写与探测都走管理 RPC（`account.proxy` / `account.proxyTest`）。「保存」要求输入非空——清除已有代理是显式的「清除」动作，不会因误点空保存而丢失。
+设置 → Antigravity → 账号详情内有 Proxy 行 `[输入框] [保存][清除][测试]`，显示脱敏 `host:port`；读写与探测都走管理 RPC（`account.proxy` / `account.proxyTest`）。「保存」要求输入非空——清除已有代理是显式的「清除」动作，不会因误点空保存而丢失。「测试」探测的是输入框里的内容，所以未保存的代理可以先测再存；结果在提示行里显示可达/不可达，无可探测对象时按钮置灰并把原因放在悬停提示上。
+
+工具栏「刷新」除重载账号列表与用量账本外，还会突破 5 小时/每周配额窗口的 10 分钟 TTL 缓存重新测量——这次强制探测会回报刷新了几个账号，因此点击不会毫无反馈。自动重载仍遵守 TTL，不产生上游调用。
 
 ### 路径 C：本地源码开发与调试（Link 模式）
 

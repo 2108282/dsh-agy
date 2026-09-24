@@ -95,6 +95,23 @@ export interface AccountHealthResult {
 }
 
 /**
+ * What one 5h/weekly window refresh actually did.
+ *
+ * Exists so an EXPLICIT refresh can report its outcome. The three lists are
+ * separate because they read identically on screen otherwise: "nothing was due
+ * (TTL)" and "every probe failed" both leave the displayed numbers untouched,
+ * so a caller that cannot tell them apart cannot say anything truthful.
+ */
+export interface LimitsRefreshResult {
+  /** Account keys whose windows were measured and written. */
+  measured: string[]
+  /** Account keys whose probe was attempted and failed. */
+  failed: string[]
+  /** Accounts not probed because their snapshot was still fresh. */
+  skipped: number
+}
+
+/**
  * Session affinity window: reuse the last-used account for new requests within
  * this window (proxy for one DSH conversation, which exposes no id). After the
  * window or on failure the pool re-balances.
@@ -402,21 +419,35 @@ export class AgySessionManager {
    * frequent or the pool grows enough that the extra calls matter.
    *
    * @param storage - the loaded storage document, overlaid in memory on success.
+   * @param options - `force` re-probes inside the TTL.
+   * @returns which accounts were measured, so a caller that asked for a refresh
+   *   can REPORT it. Without this a forced refresh that failed was completely
+   *   silent: no cache write, no `updatedAt` change, nothing on screen — the
+   *   same "clicked it, saw a flicker" defect as an unread RPC verdict.
    */
-  async refreshLimits(storage: AccountStorageV4): Promise<void> {
+  async refreshLimits(
+    storage: AccountStorageV4,
+    options: { force?: boolean } = {},
+  ): Promise<LimitsRefreshResult> {
     const now = Date.now()
     // A separate staleness rule: `isQuotaStale` is driven by the SCHEDULING
     // cache, which a solo account never fills, so reusing it would report
-    // "stale" on every call and re-probe continuously.
-    const stale = storage.accounts.filter((account) =>
-      account.enabled !== false && isLimitsStale(account, now))
-    if (stale.length === 0) return
+    // "stale" on every call and re-probe continuously. `force` bypasses it for
+    // an explicit user request, which is the only thing that may spend an
+    // upstream call inside the TTL.
+    const candidates = storage.accounts.filter((account) => account.enabled !== false)
+    const targets = options.force === true
+      ? candidates
+      : candidates.filter((account) => isLimitsStale(account, now))
+    if (targets.length === 0) {
+      return { measured: [], failed: [], skipped: candidates.length }
+    }
 
-    const updates = (await Promise.all(stale.map(async (account) => {
+    const probes = await Promise.all(targets.map(async (account) => {
       const key = this.accountKey(account)
       try {
         const auth = await this.accessTokenFor(account)
-        if (!auth) return null
+        if (!auth) return { key, ok: false as const }
         const { fetchQuotaSummary } = await import('./adapter/quota-summary.ts')
         const routed = accountFetch({ proxyUrl: account.proxy })
         const bounded = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -425,16 +456,28 @@ export class AgySessionManager {
           return routed(input, { ...init, signal })
         }
         const groups = await fetchQuotaSummary(auth.access, account.projectId, bounded)
-        if (groups.length === 0) return null
-        return { key, groups, updatedAt: Date.now() }
+        if (groups.length === 0) return { key, ok: false as const }
+        return { key, ok: true as const, groups, updatedAt: Date.now() }
       } catch {
         // Best-effort: a failed probe leaves the previous windows in place.
-        return null
+        return { key, ok: false as const }
       }
-    }))).filter((update): update is { key: string, groups: QuotaGroup[], updatedAt: number } =>
-      update !== null)
+    }))
 
-    if (updates.length === 0) return
+    const updates = probes.filter((probe): probe is
+      { key: string, ok: true, groups: QuotaGroup[], updatedAt: number } => probe.ok)
+    const failed = probes.filter((probe) => !probe.ok).map((probe) => probe.key)
+    // Report the skip count so a caller can distinguish "nothing was due" from
+    // "everything failed" — the two read identically on screen otherwise.
+    // Counted over the same eligible set the early return uses, so a disabled
+    // account never inflates it into a phantom "still fresh".
+    const result: LimitsRefreshResult = {
+      measured: updates.map((update) => update.key),
+      failed,
+      skipped: candidates.length - targets.length,
+    }
+    if (updates.length === 0) return result
+
     for (const update of updates) {
       const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
       // Only `cachedLimits` — never `cachedQuota`, which is what keeps this
@@ -451,6 +494,7 @@ export class AgySessionManager {
     } catch {
       // A derived display cache; a failed write degrades gracefully.
     }
+    return result
   }
 
   /**

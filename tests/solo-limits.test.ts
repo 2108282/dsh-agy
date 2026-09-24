@@ -108,6 +108,70 @@ describe('solo-account limits', () => {
     expect(calls.filter((url) => url.includes('retrieveUserQuotaSummary')).length).toBe(2)
   })
 
+  it('force re-probes INSIDE the TTL, which is what an explicit refresh needs', async () => {
+    // The toolbar's Refresh button is the only caller allowed to do this: without
+    // it, clicking Refresh while the snapshot was still fresh could not deliver
+    // anything newer, so "give me the latest numbers now" was unanswerable.
+    const calls: string[] = []
+    stubSummary(calls)
+    const store = new InMemoryAccountStore(storage([account('solo@x')]))
+    const sessions = new AgySessionManager({ store })
+    await sessions.refreshLimits(await store.load())
+    const probed = (): number => calls.filter((url) => url.includes('retrieveUserQuotaSummary')).length
+    expect(probed()).toBe(1)
+
+    // Still fresh, so the TTL path skips it and reports the skip.
+    const skipped = await sessions.refreshLimits(await store.load())
+    expect(probed()).toBe(1)
+    expect(skipped).toEqual({ measured: [], failed: [], skipped: 1 })
+
+    // Force is the one thing that spends the call inside the TTL.
+    const beforeForce = await store.load()
+    const forced = await sessions.refreshLimits(beforeForce, { force: true })
+    expect(probed()).toBe(2)
+    // Keyed by the store-assigned account id, not the email: `accountKey` prefers
+    // `id` so two accounts sharing an email cannot collide.
+    expect(forced.measured).toEqual([beforeForce.accounts[0]!.id])
+    expect(forced.failed).toEqual([])
+    expect(forced.skipped).toBe(0)
+  })
+
+  it('reports a failed probe instead of leaving the caller unable to tell', async () => {
+    // The defect this closes: a forced refresh that failed wrote no cache and no
+    // timestamp, so the click looked inert — "probed and failed" and "was still
+    // fresh" were indistinguishable from the UI. The result must separate them.
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('retrieveUserQuotaSummary')) throw new TypeError('fetch failed')
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+    const store = new InMemoryAccountStore(storage([account('solo@x')]))
+    const sessions = new AgySessionManager({ store })
+    const loaded = await store.load()
+    const result = await sessions.refreshLimits(loaded, { force: true })
+    expect(result.measured).toEqual([])
+    expect(result.failed).toEqual([loaded.accounts[0]!.id])
+    expect(result.skipped).toBe(0)
+  })
+
+  it('force still never writes cachedQuota', async () => {
+    // The safety argument must survive the new bypass: `force` changes WHICH
+    // accounts are probed, never WHERE the result lands. Writing `cachedQuota`
+    // here would let a forced refresh block a solo account outright.
+    const calls: string[] = []
+    stubSummary(calls)
+    const store = new InMemoryAccountStore(storage([account('solo@x')]))
+    const sessions = new AgySessionManager({ store })
+    await sessions.refreshLimits(await store.load(), { force: true })
+    const after = await store.load()
+    expect(after.accounts[0]!.cachedQuota).toBeUndefined()
+    expect(after.accounts[0]!.cachedQuotaUpdatedAt).toBeUndefined()
+    expect(after.accounts[0]!.cachedLimits?.groups).toHaveLength(1)
+  })
+
   it('leaves previous windows intact when the probe fails', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)

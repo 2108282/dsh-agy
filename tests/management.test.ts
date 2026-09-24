@@ -52,6 +52,7 @@ function makeHarness(options: {
   testResult?: unknown
   exportBlob?: unknown
   checkAccounts?: unknown
+  limitsResult?: { measured: string[], failed: string[], skipped: number }
 } = {}): Harness {
   const accounts = options.accounts ?? [account()]
   const store = makeStore(accounts, options.activeIndex ?? 0)
@@ -87,6 +88,10 @@ function makeHarness(options: {
     checkAccounts: async (indices?: number[]) => {
       calls.push({ method: 'checkAccounts', args: [indices] })
       return options.checkAccounts ?? [{ index: 0, ok: true }]
+    },
+    refreshLimits: async (_storage: unknown, refreshOptions?: { force?: boolean }) => {
+      calls.push({ method: 'refreshLimits', args: [refreshOptions] })
+      return options.limitsResult ?? { measured: [], failed: [], skipped: 0 }
     },
   } as unknown as AgySessionManager
   let notifications = 0
@@ -616,6 +621,47 @@ describe('agy management RPC', () => {
       }
       expect(result.proxy).toBeNull()
       expect((await harness.store.load()).accounts[0]?.proxy).toBeUndefined()
+    })
+  })
+
+  describe('limits refresh', () => {
+    it('defaults to the TTL, so an automatic reload spends no upstream call', async () => {
+      // `account.limits` is called on mount and on tab entry. Forcing there would
+      // turn every page view into a quota probe.
+      const harness = makeHarness()
+      await harness.management.call('account.limits', {})
+      const refresh = harness.calls.find((call) => call.method === 'refreshLimits')
+      expect(refresh?.args).toEqual([{ force: false }])
+    })
+
+    it('threads force through, which is what the toolbar Refresh needs', async () => {
+      // Without this the button could not deliver anything newer than the TTL
+      // already held, so "the latest numbers now" was unanswerable.
+      const harness = makeHarness()
+      await harness.management.call('account.limits', { force: true })
+      const refresh = harness.calls.find((call) => call.method === 'refreshLimits')
+      expect(refresh?.args).toEqual([{ force: true }])
+    })
+
+    it('reports the outcome so a forced refresh is never silent', async () => {
+      // A failed force leaves the numbers and the timestamp untouched, so the
+      // reply itself is the only thing that can distinguish it from "still
+      // fresh" — the difference between a working button and an inert one.
+      const harness = makeHarness({ limitsResult: { measured: ['a'], failed: ['b'], skipped: 2 } })
+      const result = await harness.management.call('account.limits', { force: true }) as {
+        measured: number, failed: number, skipped: number
+      }
+      expect(result).toMatchObject({ measured: 1, failed: 1, skipped: 2 })
+    })
+
+    it('degrades to zeroed counts when the refresh itself throws', async () => {
+      const harness = makeHarness()
+      ;(harness.sessions as unknown as { refreshLimits: () => Promise<never> }).refreshLimits =
+        async () => { throw new Error('boom') }
+      const result = await harness.management.call('account.limits', { force: true }) as {
+        measured: number, failed: number, skipped: number
+      }
+      expect(result).toMatchObject({ measured: 0, failed: 0, skipped: 0 })
     })
   })
 
