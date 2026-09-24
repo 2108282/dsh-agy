@@ -862,39 +862,38 @@ function thinkingRow(
  * Measured thinking-token samples, one row per effort THE PICKER ACTUALLY OFFERS.
  *
  * The rows are exactly the picker's entries — Default, Low, Medium, High — and
- * nothing else. `Max` is deliberately absent: it is a chip that fills the input
- * with the maximum, not a tier, so listing it as a row would send a reader to
- * the model picker looking for an option that does not exist. Its measurements
- * are also indistinguishable from `High` in every sample (the cap does not bind
- * at this difficulty), so the row carried no information the note does not.
+ * nothing else. `Max` is deliberately absent: it was a chip that filled the input
+ * with the maximum, and measurement showed it buys nothing. At the model's real
+ * ceiling (65536) `high` reaches ~63k, i.e. 96% of it, so there is no higher
+ * ceiling for a bigger number to unlock.
  *
  * WHY A TABLE AND NOT A SENTENCE. These numbers only mean anything compared
- * DOWN a column: the same `High` spends ~175 tokens on a trivial question and
- * ~25000 on a hard one. A sentence listing both is unreadable, and a single
- * number per tier is worse than useless — it reads as a fixed value when the
- * real behaviour is a range. The grid makes the trend visible at a glance.
+ * DOWN a column: `High` spends ~165 tokens on `17*23` and ~63,000 on a hard
+ * derivation. A sentence listing both is unreadable, and a single number per tier
+ * reads as a fixed value when the real behaviour is a range.
  *
- * `null` renders as `-`: `Low` on a demanding prompt reports no
- * `thoughtsTokenCount` at all, and inventing a number there would be a lie.
+ * MEASUREMENT TRAP, recorded because it wasted a full investigation: thinking and
+ * output SHARE `maxOutputTokens` (measured exactly — cap 2048 gave 1962 thoughts
+ * + 82 output = 2044). A harness that pins the cap below the thinking demand
+ * measures its own pin. Six runs at cap 60000 all reported ~24k regardless of
+ * level and looked like "the tiers are equivalent"; at cap 65536 they separate.
+ * The hard column below was re-measured at the ceiling. `pnpm run
+ * verify:thinking-levels` re-derives all of it.
  *
- * Samples, not guarantees: the "hard" column is four competition problems
- * requiring full derivations. A harder task can go higher, up to the cap.
+ * `null` renders as `-`: `Low` reports no `thoughtsTokenCount` on the medium
+ * prompt, and inventing a number there would be a lie.
  *
- * Every cell is the rounded mean of 2-3 live samples. They are NOT estimates:
- * an earlier draft of this table carried a `Max` row whose medium-column values
- * (1880/2098) were never measured — they were inferred from `High` and happened
- * to look plausible. The row was deleted for a different reason (Max is a chip,
- * not a picker tier), but the fabricated cells are why the row is not coming
- * back, and why every number here is traceable to a run.
+ * Every value is the mean of 2-11 live samples, rounded — the hard column's
+ * spread is wide (Default: 34k and 57k), which is why these are labelled samples
+ * and not a specification.
  */
 const THINKING_SAMPLES: ReadonlyArray<{ level: string, easy: number | null, medium: number | null, hard: number | null }> = [
-  { level: 'Default', easy: 135, medium: null, hard: null },
-  { level: 'Low', easy: 50, medium: null, hard: null },
-  { level: 'Medium', easy: 150, medium: 870, hard: 11_400 },
-  { level: 'High', easy: 175, medium: 1830, hard: 25_000 },
+  { level: 'Default', easy: 135, medium: 1_100, hard: 46_000 },
+  { level: 'Low', easy: 50, medium: null, hard: 9_000 },
+  { level: 'Medium', easy: 150, medium: 870, hard: 60_000 },
+  { level: 'High', easy: 165, medium: 1_855, hard: 63_000 },
 ]
 
-/** The measured-reference disclosure: collapsed by default, it is reference data. */
 function thinkingSamples(t: T): ReactNode {
   const [show, setShow] = useState(false)
   const cell = (value: number | null): ReactNode =>
@@ -1063,10 +1062,7 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
               const stored = tieredBudget === null ? '' : String(tieredBudget)
               if (value.trim() !== stored) saveTiered(value)
             },
-            chips: [
-              { label: t('thinkingChipDefault'), value: '' },
-              { label: t('thinkingChipMax'), value: String(THINKING_BUDGET_MAX) },
-            ],
+            chips: [{ label: t('thinkingChipClear'), value: '' }],
           }),
           ...THINKING_LEVELS.map((level) => thinkingRow(level, levelLabel(level, t), drafts[level] ?? '', t, {
             onInput: (value) => { setDrafts((c) => ({ ...c, [level]: value })) },
@@ -1094,10 +1090,7 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
               const stored = claudeBudget === null ? '' : String(claudeBudget)
               if (value.trim() !== stored) saveClaude(value)
             },
-            chips: [
-              { label: t('thinkingChipDefault'), value: '' },
-              { label: t('thinkingChipMax'), value: String(CLAUDE_BUDGET_MAX) },
-            ],
+            chips: [{ label: t('thinkingChipClear'), value: '' }],
           })))
       : null)
 

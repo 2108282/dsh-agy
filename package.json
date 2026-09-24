@@ -59,7 +59,8 @@
     "verify:official-identity": "tsx scripts/verify-official-identity.mts",
     "verify:metadata-acceptance": "tsx scripts/verify-metadata-acceptance.mts",
     "verify:claude-parts": "tsx scripts/verify-claude-parts.mts",
-    "verify:thinking-config": "tsx scripts/verify-thinking-config.mts"
+    "verify:thinking-config": "tsx scripts/verify-thinking-config.mts",
+    "verify:thinking-levels": "tsx scripts/verify-thinking-levels.mts"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
