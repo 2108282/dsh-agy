@@ -180,6 +180,14 @@ export function ingestQuotaGroups(groups: QuotaGroup[]): Record<string, CachedQu
         const weeklyResetTime = earliestResetTime(current?.weeklyResetTime, weekly.resetTime ?? undefined)
         if (weeklyResetTime) record.weeklyResetTime = weeklyResetTime
       }
+      // A group whose only windows are a kind this cache cannot hold (`daily`,
+      // `monthly`) would otherwise materialize an EMPTY record and replace a real
+      // reading another group already wrote for this family. The two window
+      // vocabularies disagree about `daily`: `windowKind` here drops it, while
+      // `windowRank` in adapter/quota-summary sorts it for display.
+      if (record.remainingFraction === undefined && record.weeklyFraction === undefined && !current) {
+        continue
+      }
       families.set(key, record)
     }
   }
@@ -237,12 +245,24 @@ export function ingestFamilyQuotas(
   if (previous) {
     for (const [key, prev] of Object.entries(previous)) {
       const current = families.get(key)
-      if (!current) continue
+      if (!current) {
+        // Absent from BOTH sources. Either the model probe does not cover this
+        // family at all — a Gemini-only pool never reports anthropic/openai — or
+        // its request failed, and `fetchQuotaSummary` answers a failure with `[]`
+        // rather than throwing, so "no groups" and "endpoint down" are the SAME
+        // input here. Dropping the record in that state erases a spent week:
+        // `isFamilyDrained` flips true -> false and `rankPoolCandidates` loses the
+        // weekly `blockedUntil`, putting an exhausted account straight back into
+        // rotation. Carry the last measurement instead. It cannot manufacture a
+        // block: both consumers ignore a window whose reset has already passed
+        // (`resetInPast` / `parseFutureResetMs`), and the weekly value keeps the
+        // reset moment it was measured with.
+        families.set(key, { ...prev })
+        continue
+      }
       // Carry the weekly reading forward only. It is the one field the per-model
       // probe cannot supply, so its absence means "this probe did not ask", not
-      // "the weekly budget is empty". A family absent from BOTH sources is left
-      // out on purpose: upstream treats an unreported family as unmeasured, and
-      // resurrecting the whole record would keep a stale 5-hour fraction alive.
+      // "the weekly budget is empty".
       if (current.weeklyFraction === undefined && prev.weeklyFraction !== undefined) {
         families.set(key, {
           ...current,
@@ -273,7 +293,16 @@ export function familyQuotaFor(account: ManagedAccount, family?: ModelFamily): C
 export function isQuotaStale(account: ManagedAccount, now = Date.now()): boolean {
   if (!account.cachedQuota || !account.cachedQuotaUpdatedAt) return true
   const mostPressured = familyQuotaFor(account)
-  const ttl = computeSoftQuotaCacheTtlMs(mostPressured?.remainingFraction, mostPressured?.weeklyFraction)
+  // A window whose reset has already passed describes a window that no longer
+  // exists, so it must not drive the refresh INTERVAL either. A carried weekly
+  // value kept returning the 60s TTL long after its reset, which re-probed both
+  // endpoints every minute for as long as the summary endpoint stayed down — the
+  // same reason `isFamilyDrained` ignores an expired window when it decides the
+  // account is usable. Both fractions are guarded, since the 5-hour reading can
+  // be carried forward by the same rule.
+  const rolling = resetInPast(mostPressured?.resetTime, now) ? undefined : mostPressured?.remainingFraction
+  const weekly = resetInPast(mostPressured?.weeklyResetTime, now) ? undefined : mostPressured?.weeklyFraction
+  const ttl = computeSoftQuotaCacheTtlMs(rolling, weekly, now)
   return now - account.cachedQuotaUpdatedAt > ttl
 }
 
@@ -346,6 +375,16 @@ export function isFamilyDrained(account: ManagedAccount, family?: ModelFamily, n
  * Required drain rate: headroomFraction / remainingHours — how fast the
  * family's remaining quota must be consumed to avoid expiring unused at its
  * reset (mirrors AuthStorage.#computeWindowRequiredDrain with a daily window).
+ *
+ * DELIBERATELY FIVE-HOUR ONLY, and this is a decision rather than an omission.
+ * The weekly window influences `blockedUntil` and `hot` instead of the ranking
+ * ORDER, because a week is not a spend-by deadline: the `DAY_MS` clamp below
+ * caps the horizon at 24h, so a weekly reset ~5 days out would report ~24h of
+ * urgency for a budget that cannot be spent faster to any benefit — and every
+ * family would then be ranked by a number that no longer distinguishes them.
+ * Making this weekly-aware therefore means replacing that clamp with a horizon
+ * the weekly window can actually express, not adding a second fraction to the
+ * numerator.
  */
 export function requiredDrainFor(quota: CachedQuota | undefined, now = Date.now()): number {
   const remaining = quota?.remainingFraction

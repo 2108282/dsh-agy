@@ -625,9 +625,20 @@ export class AgySessionManager {
       const quotaExhausted = (account: ManagedAccount): boolean => {
         if (account.cooldownReason === 'quota-exhausted' && (account.coolingDownUntil ?? 0) > now) return true
         const quota = familyQuotaFor(account, family)
-        if ((quota?.remainingFraction ?? 1) > 0 || !quota?.resetTime) return false
-        const resetAt = Date.parse(quota.resetTime)
-        return !Number.isNaN(resetAt) && resetAt > now
+        if (!quota) return false
+        // BOTH windows, matching `rankPoolCandidates`, which blocks on a spent week
+        // as well as on a spent 5-hour bucket. Reading only `remainingFraction`
+        // here classified a weekly-decided block as retryable, and that path ends
+        // at `RATE_LIMIT` + a ~5-day `providerRetryAfterMs`, which DSH's 10s retry
+        // cap turns into giving up on the turn — a quota condition reported to the
+        // user as a rate limit.
+        const spent = (fraction: number | undefined, resetTime: string | undefined): boolean => {
+          if (typeof fraction !== 'number' || fraction > 0 || !resetTime) return false
+          const resetAt = Date.parse(resetTime)
+          return !Number.isNaN(resetAt) && resetAt > now
+        }
+        return spent(quota.remainingFraction, quota.resetTime)
+          || spent(quota.weeklyFraction, quota.weeklyResetTime)
       }
       const retryable = ranked.filter((candidate) => !quotaExhausted(candidate.account))
       const blocked = retryable.length > 0 ? retryable : ranked

@@ -793,15 +793,55 @@ describe('family quota ingestion', () => {
     })
   })
 
-  it('does not resurrect a family neither source reported', () => {
+  it('keeps a spent week for a family neither source reported this round', () => {
+    // A Gemini-only pool never reports anthropic/openai through
+    // `fetchAvailableModels`, and `fetchQuotaSummary` answers a failure with []
+    // rather than throwing — so a failing summary is exactly the state that used
+    // to erase a spent week: `isFamilyDrained` flipped true -> false and
+    // `rankPoolCandidates` lost the weekly `blockedUntil`, putting an exhausted
+    // account straight back into rotation.
     const previous = {
-      anthropic: { remainingFraction: 0.01, weeklyFraction: 0.002, weeklyResetTime: '2026-09-25T01:22:55Z' },
+      anthropic: { remainingFraction: 0.4, weeklyFraction: 0, weeklyResetTime: '2099-01-01T00:00:00Z' },
     }
-    // An unreported family stays unmeasured (upstream's rule); keeping the whole
-    // old record would hold a stale 5-hour fraction alive indefinitely.
-    expect(
-      ingestFamilyQuotas({ models: { 'gemini-a': { quotaInfo: { remainingFraction: 0.7 } } } }, [], previous),
-    ).toEqual({ google: { remainingFraction: 0.7, modelCount: 1 } })
+    const ingested = ingestFamilyQuotas(
+      { models: { 'gemini-a': { quotaInfo: { remainingFraction: 0.7 } } } },
+      [],
+      previous,
+    )
+    expect(ingested.anthropic).toEqual(previous.anthropic)
+
+    const acc = { ...account(), cachedQuota: ingested, cachedQuotaUpdatedAt: Date.now() }
+    expect(isFamilyDrained(acc, 'anthropic')).toBe(true)
+    const [candidate] = rankPoolCandidates([{ account: acc, index: 0 }], 'claude-sonnet-4-6')
+    expect(candidate.blockedUntil).toBe(Date.parse('2099-01-01T00:00:00Z'))
+    expect(candidate.measured).toBe(true)
+  })
+
+  it('cannot manufacture a block from a carried window whose reset has passed', () => {
+    // The carry-forward is safe precisely because both consumers ignore a window
+    // that no longer exists, so resurrecting a record cannot strand a usable
+    // account.
+    const previous = {
+      anthropic: { remainingFraction: 0.4, weeklyFraction: 0, weeklyResetTime: '2000-01-01T00:00:00Z' },
+    }
+    const ingested = ingestFamilyQuotas({ models: {} }, [], previous)
+    expect(ingested.anthropic).toEqual(previous.anthropic)
+
+    const acc = { ...account(), cachedQuota: ingested, cachedQuotaUpdatedAt: Date.now() }
+    expect(isFamilyDrained(acc, 'anthropic')).toBe(false)
+    const [candidate] = rankPoolCandidates([{ account: acc, index: 0 }], 'claude-sonnet-4-6')
+    expect(candidate.blockedUntil).toBeNull()
+  })
+
+  it('does not materialize an empty record for a window kind the cache cannot hold', () => {
+    // `daily` is display-sorted by `windowRank` (adapter/quota-summary) but has no
+    // field in `CachedQuota`, so such a group can contribute nothing — yet it used
+    // to still claim the family key with `{}`, which is what replaced a real
+    // 5-hour reading.
+    expect(ingestQuotaGroups([{
+      name: 'Gemini Models',
+      windows: [{ bucketId: 'gemini-daily', window: 'daily', remainingFraction: 0.1, resetTime: null }],
+    }])).toEqual({})
   })
 })
 
@@ -888,6 +928,24 @@ describe('family quota helpers', () => {
     acc.cachedQuotaUpdatedAt = updatedAt
     return acc
   }
+
+  it('ignores a window whose reset has passed when sizing the refresh interval', () => {
+    // A carried weekly value kept returning the 60s TTL long after its reset, so
+    // that account re-probed BOTH endpoints every minute for as long as the
+    // summary endpoint was down.
+    const expired = withQuota(
+      { google: { remainingFraction: 0.9, weeklyFraction: 0, weeklyResetTime: '2000-01-01T00:00:00Z' } },
+      Date.now() - 5 * 60 * 1000,
+    )
+    expect(isQuotaStale(expired)).toBe(false)
+
+    // The same reading with a live reset DOES shrink the interval to 60s.
+    const live = withQuota(
+      { google: { remainingFraction: 0.9, weeklyFraction: 0, weeklyResetTime: '2099-01-01T00:00:00Z' } },
+      Date.now() - 5 * 60 * 1000,
+    )
+    expect(isQuotaStale(live)).toBe(true)
+  })
 
   it('detects drained families below the soft threshold, ignoring past resets', () => {
     const acc = withQuota({ google: { remainingFraction: 0.05 } })

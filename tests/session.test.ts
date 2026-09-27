@@ -1122,6 +1122,33 @@ describe('usage-driven selection', () => {
       blockedUntil: resetAt,
     })
   })
+
+  it('classifies a weekly-decided block as quota-exhausted, not retryable', async () => {
+    // The weekly window holds `rankPoolCandidates` back without touching
+    // `remainingFraction`, so a pool blocked ONLY by the week was reported as
+    // `retryable` — a path that ends at RATE_LIMIT plus a ~5-day
+    // `providerRetryAfterMs`, which DSH's 10s retry cap turns into giving up on
+    // the turn instead of surfacing a quota condition.
+    stubTokenEndpoint()
+    const weeklyResetAt = Date.now() + 5 * 24 * 60 * 60 * 1000
+    const weeklyQuota = {
+      google: {
+        remainingFraction: 0.9,
+        weeklyFraction: 0,
+        weeklyResetTime: new Date(weeklyResetAt).toISOString(),
+      },
+    }
+    const a = { ...account('wa@x'), cachedQuota: weeklyQuota, cachedQuotaUpdatedAt: Date.now() }
+    const b = { ...account('wb@x'), cachedQuota: weeklyQuota, cachedQuotaUpdatedAt: Date.now() }
+    const store = new InMemoryAccountStore(storage([a, b]))
+    const sessions = new AgySessionManager({ store })
+
+    await expect(sessions.getSession('gemini-3.5-flash')).rejects.toMatchObject({
+      name: 'AgyPoolBlockedError',
+      kind: 'quota-exhausted',
+      blockedUntil: weeklyResetAt,
+    })
+  })
 })
 
 describe('verifyAccount', () => {
