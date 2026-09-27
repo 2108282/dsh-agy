@@ -1,5 +1,6 @@
 # dsh-agy
-npm install github:2108282/dsh-agy#feat/v0.3.2-merge
+npm install github:2108282/dsh-agy#feat/v0.3.2-merge  
+(echo allowBuilds: & echo   dsh-agy@https://codeload.github.com/2108282/dsh-agy/tar.gz/c043650d77de43570411ca86064e7324665077d2: true) > pnpm-workspace.yaml & pnpm add github:2108282/dsh-agy#feat/v0.3.2-merge
 [![CI](https://github.com/chaos-03x/dsh-agy/actions/workflows/ci.yml/badge.svg)](https://github.com/chaos-03x/dsh-agy/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/dsh-agy)](https://www.npmjs.com/package/dsh-agy)
 
