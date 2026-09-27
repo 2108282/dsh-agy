@@ -515,13 +515,25 @@ export class AgySessionManager {
           const auth = await this.accessTokenFor(account)
           if (!auth) return null
           const { fetchAvailableModels } = await import('./adapter/models.ts')
+          const { fetchQuotaSummary } = await import('./adapter/quota-summary.ts')
           const routed = accountFetch({ proxyUrl: account.proxy })
-          const discovered = await fetchAvailableModels(auth.access, account.projectId, (input, init) => {
+          // ONE timeout per probe, both bounded by the same budget the model
+          // probe already used; the account's proxy is honoured on both, or the
+          // summary call would egress direct and leak the account's real IP.
+          const bounded: typeof fetch = (input, init) => {
             const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
             const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
             return routed(input, { ...init, signal })
-          })
-          const quotas = ingestFamilyQuotas(discovered)
+          }
+          // The weekly window comes ONLY from the summary endpoint, so it is read
+          // HERE (the scheduling path) and never in `refreshLimits`: that one is
+          // display-only, and a display refresh must not reach `cachedQuota`,
+          // which decides blocking.
+          const [discovered, groups] = await Promise.all([
+            fetchAvailableModels(auth.access, account.projectId, bounded),
+            fetchQuotaSummary(auth.access, account.projectId, bounded),
+          ])
+          const quotas = ingestFamilyQuotas(discovered, groups, account.cachedQuota)
           return { key, quotas, updatedAt: Date.now() }
         } catch {
           return null
@@ -613,9 +625,20 @@ export class AgySessionManager {
       const quotaExhausted = (account: ManagedAccount): boolean => {
         if (account.cooldownReason === 'quota-exhausted' && (account.coolingDownUntil ?? 0) > now) return true
         const quota = familyQuotaFor(account, family)
-        if ((quota?.remainingFraction ?? 1) > 0 || !quota?.resetTime) return false
-        const resetAt = Date.parse(quota.resetTime)
-        return !Number.isNaN(resetAt) && resetAt > now
+        if (!quota) return false
+        // BOTH windows, matching `rankPoolCandidates`, which blocks on a spent week
+        // as well as on a spent 5-hour bucket. Reading only `remainingFraction`
+        // here classified a weekly-decided block as retryable, and that path ends
+        // at `RATE_LIMIT` + a ~5-day `providerRetryAfterMs`, which DSH's 10s retry
+        // cap turns into giving up on the turn — a quota condition reported to the
+        // user as a rate limit.
+        const spent = (fraction: number | undefined, resetTime: string | undefined): boolean => {
+          if (typeof fraction !== 'number' || fraction > 0 || !resetTime) return false
+          const resetAt = Date.parse(resetTime)
+          return !Number.isNaN(resetAt) && resetAt > now
+        }
+        return spent(quota.remainingFraction, quota.resetTime)
+          || spent(quota.weeklyFraction, quota.weeklyResetTime)
       }
       const retryable = ranked.filter((candidate) => !quotaExhausted(candidate.account))
       const blocked = retryable.length > 0 ? retryable : ranked
