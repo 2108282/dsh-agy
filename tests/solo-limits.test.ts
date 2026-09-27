@@ -192,6 +192,67 @@ describe('solo-account limits', () => {
     expect((await store.load()).accounts[0]!.cachedLimits?.groups[0]?.name).toBe('old')
   })
 
+  it('shares ONE in-flight summary probe per account between the display and scheduling paths', async () => {
+    // #54 item 1: since #48 both paths read `retrieveUserQuotaSummary` for the
+    // same account in one cycle, so a stale multi-account pool paid two round
+    // trips per account. `quotaRefreshInFlight` de-duplicated within the
+    // scheduling path; `refreshLimits` did not consult it.
+    // RED (pre-fix): 4 summary calls for a two-account pool. GREEN: 2.
+    const calls: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('retrieveUserQuotaSummary')) {
+        // Held open so the two paths genuinely overlap.
+        await gate
+        return new Response(JSON.stringify({
+          groups: [{
+            displayName: 'Gemini Models',
+            buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.16, resetTime: '2026-09-23T19:29:55Z' }],
+          }],
+        }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: { 'gemini-3.5-flash': { quotaInfo: { remainingFraction: 0.4 } } } }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')]))
+    const sessions = new AgySessionManager({ store })
+    const loaded = await store.load()
+    const summaryCalls = (): number => calls.filter((url) => url.includes('retrieveUserQuotaSummary')).length
+    const modelCalls = (): number => calls.filter((url) => url.includes('fetchAvailableModels')).length
+
+    const limits = sessions.refreshLimits(loaded, { force: true })
+    const session = sessions.getSession('gemini-3.5-flash')
+    // Wait until BOTH paths have started: `fetchAvailableModels` is only called by
+    // the scheduling path, and it is issued alongside that path's summary probe.
+    for (let i = 0; i < 200 && (modelCalls() < 2 || summaryCalls() < 2); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    expect(modelCalls()).toBe(2)
+    // WHILE the first probe per account is still in flight, the other path joins
+    // it instead of paying a second round trip.
+    expect(summaryCalls()).toBe(2)
+
+    release()
+    await limits
+    await session
+
+    expect(summaryCalls()).toBe(2)
+    const after = await store.load()
+    // Sharing the probe must not change WHERE a result lands: the display path
+    // still fills `cachedLimits`, the scheduling path still fills `cachedQuota`.
+    expect(after.accounts.every((a) => a.cachedLimits?.groups.length === 1)).toBe(true)
+    expect(after.accounts.every((a) => a.cachedQuota?.google?.remainingFraction === 0.16)).toBe(true)
+  })
+
   it('treats an absent or non-numeric snapshot as stale', () => {
     expect(isLimitsStale(account())).toBe(true)
     expect(isLimitsStale({ ...account(), cachedLimits: { groups: [], updatedAt: Number.NaN } })).toBe(true)
