@@ -50,6 +50,7 @@ import {
   requiredDrainFor,
 } from '../src/runtime/quota.ts'
 import { fingerprintMode, isAgyDisabled } from '../src/runtime/risk.ts'
+import { QUOTA_WINDOWS } from '../src/types.ts'
 import type { ManagedAccount } from '../src/types.ts'
 
 function account(): ManagedAccount {
@@ -801,20 +802,59 @@ describe('family quota ingestion', () => {
     // `rankPoolCandidates` lost the weekly `blockedUntil`, putting an exhausted
     // account straight back into rotation.
     const previous = {
-      anthropic: { remainingFraction: 0.4, weeklyFraction: 0, weeklyResetTime: '2099-01-01T00:00:00Z' },
+      anthropic: {
+        remainingFraction: 0.4,
+        resetTime: '2099-01-01T00:00:00Z',
+        weeklyFraction: 0,
+        weeklyResetTime: '2099-06-01T00:00:00Z',
+      },
     }
     const ingested = ingestFamilyQuotas(
       { models: { 'gemini-a': { quotaInfo: { remainingFraction: 0.7 } } } },
       [],
       previous,
     )
-    expect(ingested.anthropic).toEqual(previous.anthropic)
+    // ONLY the weekly window travels. The 5-hour fields are dropped: a dead
+    // 5-hour reading has no reset guard downstream, so carrying it forward would
+    // hand this record the maximum drain score (see the test below).
+    expect(ingested.anthropic).toEqual({
+      weeklyFraction: 0,
+      weeklyResetTime: '2099-06-01T00:00:00Z',
+    })
 
     const acc = { ...account(), cachedQuota: ingested, cachedQuotaUpdatedAt: Date.now() }
     expect(isFamilyDrained(acc, 'anthropic')).toBe(true)
     const [candidate] = rankPoolCandidates([{ account: acc, index: 0 }], 'claude-sonnet-4-6')
-    expect(candidate.blockedUntil).toBe(Date.parse('2099-01-01T00:00:00Z'))
+    expect(candidate.blockedUntil).toBe(Date.parse('2099-06-01T00:00:00Z'))
     expect(candidate.measured).toBe(true)
+  })
+
+  it('does not let a carried-forward 5-hour reading inflate the ranking score', () => {
+    // Why the carry is weekly-only. `requiredDrainFor` has no reset guard: it
+    // computes `Math.max(resetAt - now, 0)`, so a reset that has already passed
+    // collapses to DRAIN_FLOOR_MS and scores the MAXIMUM urgency. A resurrected
+    // 5-hour window therefore outranks an identical live reading 24.0 to 0.1 and
+    // wins the selection outright — for a window that no longer exists.
+    const previous = {
+      anthropic: {
+        remainingFraction: 0.4,
+        resetTime: '2000-01-01T00:00:00Z',
+        weeklyFraction: 0.9,
+        weeklyResetTime: '2099-06-01T00:00:00Z',
+      },
+    }
+    const ingested = ingestFamilyQuotas({ models: {} }, [], previous)
+    expect(ingested.anthropic).toEqual({
+      weeklyFraction: 0.9,
+      weeklyResetTime: '2099-06-01T00:00:00Z',
+    })
+
+    const [candidate] = rankPoolCandidates(
+      [{ account: { ...account(), cachedQuota: ingested }, index: 0 }],
+      'claude-sonnet-4-6',
+    )
+    expect(candidate.requiredDrain).toBe(0)
+    expect(candidate.usedFraction).toBeUndefined()
   })
 
   it('cannot manufacture a block from a carried window whose reset has passed', () => {
@@ -822,7 +862,7 @@ describe('family quota ingestion', () => {
     // that no longer exists, so resurrecting a record cannot strand a usable
     // account.
     const previous = {
-      anthropic: { remainingFraction: 0.4, weeklyFraction: 0, weeklyResetTime: '2000-01-01T00:00:00Z' },
+      anthropic: { weeklyFraction: 0, weeklyResetTime: '2000-01-01T00:00:00Z' },
     }
     const ingested = ingestFamilyQuotas({ models: {} }, [], previous)
     expect(ingested.anthropic).toEqual(previous.anthropic)
@@ -842,6 +882,26 @@ describe('family quota ingestion', () => {
       name: 'Gemini Models',
       windows: [{ bucketId: 'gemini-daily', window: 'daily', remainingFraction: 0.1, resetTime: null }],
     }])).toEqual({})
+  })
+
+  it('routes every shared window token to a field, and never to an empty record', () => {
+    // The parser and the scheduler read ONE table now (`QUOTA_WINDOWS`), because
+    // when they drifted a `daily` group parsed and display-sorted fine while the
+    // scheduler dropped it — and the empty record it left replaced a real
+    // measurement. This walks the shared table so each token lands in a field, or
+    // in no record at all, but never in `{ family: {} }`.
+    for (const [token, spec] of Object.entries(QUOTA_WINDOWS)) {
+      // `gemini-` prefix so the bucket id resolves to a family and the only
+      // variable under test is the WINDOW token.
+      const group = { name: 'x', windows: [{ bucketId: `gemini-${token}`, window: token, remainingFraction: 0.5, resetTime: null }] }
+      const ingested = ingestQuotaGroups([group])
+      for (const record of Object.values(ingested)) {
+        expect(Object.keys(record).length).toBeGreaterThan(0)
+      }
+      if (spec.kind === 'rolling') expect(ingested['google']?.remainingFraction).toBe(0.5)
+      else if (spec.kind === 'weekly') expect(ingested['google']?.weeklyFraction).toBe(0.5)
+      else expect(ingested).toEqual({})
+    }
   })
 })
 

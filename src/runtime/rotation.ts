@@ -284,12 +284,16 @@ export function pickNextAccountIndex(
  * is discovered only when a request fails.
  *
  * `weeklyFraction` is the optional SECOND parameter, so the two fractions sit
- * adjacent and `now` moved to third. No caller passes a timestamp.
+ * adjacent.
+ *
+ * Takes NO timestamp on purpose: deciding which fractions are still meaningful is
+ * `isQuotaStale`'s job, because a window whose reset has passed must not drive the
+ * interval either. It applies that guard before calling in here, so both
+ * arguments this function sees describe windows that still exist.
  */
 export function computeSoftQuotaCacheTtlMs(
   remainingFraction: number | undefined,
   weeklyFraction?: number,
-  now = Date.now(),
 ): number {
   if (typeof remainingFraction === 'number' && remainingFraction < SOFT_QUOTA_THRESHOLD) return 60 * 1000
   if (typeof weeklyFraction === 'number' && weeklyFraction <= WEEKLY_QUOTA_THRESHOLD) return 60 * 1000
