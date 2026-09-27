@@ -16,6 +16,7 @@ import {
   pickProbeProxyUrl,
   recordRateLimit,
   VERIFICATION_COOLDOWN_MS,
+  WEEKLY_QUOTA_THRESHOLD,
 } from '../src/runtime/rotation.ts'
 import {
   generateFingerprint,
@@ -36,8 +37,12 @@ import { _clearVersionCacheForTest, resolveAntigravityVersion } from '../src/run
 import { parseQuotaSummary } from '../src/adapter/quota-summary.ts'
 import {
   FAMILY_UNKNOWN,
+  familiesForBucketId,
+  familiesForGroup,
+  familiesForGroupName,
   familyKeyOf,
   ingestFamilyQuotas,
+  ingestQuotaGroups,
   isFamilyDrained,
   isQuotaStale,
   modelFamilyOf,
@@ -45,6 +50,7 @@ import {
   requiredDrainFor,
 } from '../src/runtime/quota.ts'
 import { fingerprintMode, isAgyDisabled } from '../src/runtime/risk.ts'
+import { QUOTA_WINDOWS } from '../src/types.ts'
 import type { ManagedAccount } from '../src/types.ts'
 
 function account(): ManagedAccount {
@@ -403,6 +409,12 @@ describe('rotation state machine', () => {
     expect(computeSoftQuotaCacheTtlMs(0.3)).toBe(5 * 60 * 1000)
     expect(computeSoftQuotaCacheTtlMs(0.9)).toBe(15 * 60 * 1000)
     expect(computeSoftQuotaCacheTtlMs(undefined)).toBe(10 * 60 * 1000)
+    // The weekly window drives the interval too: a healthy 5-hour bucket with a
+    // nearly spent week still has to be re-measured on the short interval.
+    expect(computeSoftQuotaCacheTtlMs(0.9, WEEKLY_QUOTA_THRESHOLD)).toBe(60 * 1000)
+    expect(computeSoftQuotaCacheTtlMs(0.9, 0.1)).toBe(5 * 60 * 1000)
+    expect(computeSoftQuotaCacheTtlMs(0.9, undefined)).toBe(15 * 60 * 1000)
+    expect(computeSoftQuotaCacheTtlMs(undefined, 0.9)).toBe(15 * 60 * 1000)
   })
 })
 
@@ -640,6 +652,33 @@ describe('quota family mapping', () => {
     expect(modelFamilyOf(undefined)).toBeUndefined()
     expect(familyKeyOf('some-custom-model')).toBe(FAMILY_UNKNOWN)
   })
+
+  it('maps quota groups onto families from their bucket ids, then their labels', () => {
+    // The bucket ids are upstream's own counter names (measured: gemini-5h,
+    // gemini-weekly, 3p-5h, 3p-weekly), so they are the machine-readable half.
+    expect(familiesForBucketId('gemini-5h')).toEqual(['google'])
+    expect(familiesForBucketId('gemini-weekly')).toEqual(['google'])
+    // One third-party counter covers Claude AND GPT, so it maps to both — a
+    // split no model-id prefix rule can reproduce.
+    expect(familiesForBucketId('3p-weekly')).toEqual(['anthropic', 'openai'])
+    expect(familiesForBucketId('claude-5h')).toEqual(['anthropic'])
+    expect(familiesForBucketId('mystery-5h')).toEqual([])
+
+    expect(familiesForGroupName('Gemini Models')).toEqual(['google'])
+    expect(familiesForGroupName('Claude and GPT models')).toEqual(['anthropic', 'openai'])
+    // An unrecognized label maps to NOTHING rather than guessing: attributing an
+    // unknown group to a real family would block healthy accounts.
+    expect(familiesForGroupName('Something Brand New')).toEqual([])
+
+    const group = (name: string, bucketId: string) => ({
+      name,
+      windows: [{ bucketId, window: '5h', remainingFraction: 0.5, resetTime: null }],
+    })
+    // The bucket id wins over a label that disagrees with it.
+    expect(familiesForGroup(group('Claude and GPT models', 'gemini-5h'))).toEqual(['google'])
+    // The label is consulted only when no bucket id is recognizable.
+    expect(familiesForGroup(group('Claude and GPT models', 'renamed-5h'))).toEqual(['anthropic', 'openai'])
+  })
 })
 
 describe('family quota ingestion', () => {
@@ -666,6 +705,203 @@ describe('family quota ingestion', () => {
     })
     expect(ingestFamilyQuotas({})).toEqual({})
     expect(ingestFamilyQuotas({ models: undefined })).toEqual({})
+  })
+
+  it('takes the weekly window from the summary groups, per family', () => {
+    const groups = parseQuotaSummary({
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.16, resetTime: '2026-09-23T19:29:55Z' },
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.61, resetTime: '2026-09-25T01:22:55Z' },
+          ],
+        },
+        {
+          displayName: 'Claude and GPT models',
+          buckets: [
+            { bucketId: '3p-5h', window: '5h', remainingFraction: 0.99 },
+            { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.03, resetTime: '2026-09-25T01:22:55Z' },
+          ],
+        },
+      ],
+    })
+    // The shared 3p counter means ONE weekly reading lands on both families.
+    expect(ingestQuotaGroups(groups)).toEqual({
+      google: {
+        remainingFraction: 0.16,
+        resetTime: '2026-09-23T19:29:55Z',
+        weeklyFraction: 0.61,
+        weeklyResetTime: '2026-09-25T01:22:55Z',
+      },
+      anthropic: { remainingFraction: 0.99, weeklyFraction: 0.03, weeklyResetTime: '2026-09-25T01:22:55Z' },
+      openai: { remainingFraction: 0.99, weeklyFraction: 0.03, weeklyResetTime: '2026-09-25T01:22:55Z' },
+    })
+    expect(ingestQuotaGroups([])).toEqual({})
+  })
+
+  it('merges both sources, keeping the most-pressured reading of each window', () => {
+    const groups = parseQuotaSummary({
+      groups: [{
+        displayName: 'Gemini Models',
+        buckets: [
+          { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.8 },
+          { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.4, resetTime: '2026-09-25T01:22:55Z' },
+        ],
+      }],
+    })
+    const ingested = ingestFamilyQuotas(
+      {
+        models: {
+          'gemini-a': { quotaInfo: { remainingFraction: 0.2, resetTime: '2026-09-23T19:29:55Z' } },
+          'gemini-b': { quotaInfo: { remainingFraction: 0.3 } },
+        },
+      },
+      groups,
+    )
+    // The per-model counter is the bottleneck at 0.2, not the group's 0.8; the
+    // weekly value survives the merge because the model probe never reports one.
+    expect(ingested.google).toEqual({
+      remainingFraction: 0.2,
+      resetTime: '2026-09-23T19:29:55Z',
+      weeklyFraction: 0.4,
+      weeklyResetTime: '2026-09-25T01:22:55Z',
+      modelCount: 2,
+    })
+  })
+
+  it('carries a weekly reading forward when a probe does not report one', () => {
+    const previous = {
+      google: {
+        remainingFraction: 0.1,
+        resetTime: '2026-09-23T19:29:55Z',
+        weeklyFraction: 0.004,
+        weeklyResetTime: '2026-09-25T01:22:55Z',
+      },
+    }
+    // fetchQuotaSummary returns [] instead of throwing, so a failed summary must
+    // not erase a known-drained week and put the account back into rotation.
+    const ingested = ingestFamilyQuotas(
+      { models: { 'gemini-a': { quotaInfo: { remainingFraction: 0.7 } } } },
+      [],
+      previous,
+    )
+    expect(ingested.google).toEqual({
+      remainingFraction: 0.7,
+      weeklyFraction: 0.004,
+      weeklyResetTime: '2026-09-25T01:22:55Z',
+      modelCount: 1,
+    })
+  })
+
+  it('keeps a spent week for a family neither source reported this round', () => {
+    // A Gemini-only pool never reports anthropic/openai through
+    // `fetchAvailableModels`, and `fetchQuotaSummary` answers a failure with []
+    // rather than throwing — so a failing summary is exactly the state that used
+    // to erase a spent week: `isFamilyDrained` flipped true -> false and
+    // `rankPoolCandidates` lost the weekly `blockedUntil`, putting an exhausted
+    // account straight back into rotation.
+    const previous = {
+      anthropic: {
+        remainingFraction: 0.4,
+        resetTime: '2099-01-01T00:00:00Z',
+        weeklyFraction: 0,
+        weeklyResetTime: '2099-06-01T00:00:00Z',
+      },
+    }
+    const ingested = ingestFamilyQuotas(
+      { models: { 'gemini-a': { quotaInfo: { remainingFraction: 0.7 } } } },
+      [],
+      previous,
+    )
+    // ONLY the weekly window travels. The 5-hour fields are dropped: a dead
+    // 5-hour reading has no reset guard downstream, so carrying it forward would
+    // hand this record the maximum drain score (see the test below).
+    expect(ingested.anthropic).toEqual({
+      weeklyFraction: 0,
+      weeklyResetTime: '2099-06-01T00:00:00Z',
+    })
+
+    const acc = { ...account(), cachedQuota: ingested, cachedQuotaUpdatedAt: Date.now() }
+    expect(isFamilyDrained(acc, 'anthropic')).toBe(true)
+    const [candidate] = rankPoolCandidates([{ account: acc, index: 0 }], 'claude-sonnet-4-6')
+    expect(candidate.blockedUntil).toBe(Date.parse('2099-06-01T00:00:00Z'))
+    expect(candidate.measured).toBe(true)
+  })
+
+  it('does not let a carried-forward 5-hour reading inflate the ranking score', () => {
+    // Why the carry is weekly-only. `requiredDrainFor` has no reset guard: it
+    // computes `Math.max(resetAt - now, 0)`, so a reset that has already passed
+    // collapses to DRAIN_FLOOR_MS and scores the MAXIMUM urgency. A resurrected
+    // 5-hour window therefore outranks an identical live reading 24.0 to 0.1 and
+    // wins the selection outright — for a window that no longer exists.
+    const previous = {
+      anthropic: {
+        remainingFraction: 0.4,
+        resetTime: '2000-01-01T00:00:00Z',
+        weeklyFraction: 0.9,
+        weeklyResetTime: '2099-06-01T00:00:00Z',
+      },
+    }
+    const ingested = ingestFamilyQuotas({ models: {} }, [], previous)
+    expect(ingested.anthropic).toEqual({
+      weeklyFraction: 0.9,
+      weeklyResetTime: '2099-06-01T00:00:00Z',
+    })
+
+    const [candidate] = rankPoolCandidates(
+      [{ account: { ...account(), cachedQuota: ingested }, index: 0 }],
+      'claude-sonnet-4-6',
+    )
+    expect(candidate.requiredDrain).toBe(0)
+    expect(candidate.usedFraction).toBeUndefined()
+  })
+
+  it('cannot manufacture a block from a carried window whose reset has passed', () => {
+    // The carry-forward is safe precisely because both consumers ignore a window
+    // that no longer exists, so resurrecting a record cannot strand a usable
+    // account.
+    const previous = {
+      anthropic: { weeklyFraction: 0, weeklyResetTime: '2000-01-01T00:00:00Z' },
+    }
+    const ingested = ingestFamilyQuotas({ models: {} }, [], previous)
+    expect(ingested.anthropic).toEqual(previous.anthropic)
+
+    const acc = { ...account(), cachedQuota: ingested, cachedQuotaUpdatedAt: Date.now() }
+    expect(isFamilyDrained(acc, 'anthropic')).toBe(false)
+    const [candidate] = rankPoolCandidates([{ account: acc, index: 0 }], 'claude-sonnet-4-6')
+    expect(candidate.blockedUntil).toBeNull()
+  })
+
+  it('does not materialize an empty record for a window kind the cache cannot hold', () => {
+    // `daily` is display-sorted by `windowRank` (adapter/quota-summary) but has no
+    // field in `CachedQuota`, so such a group can contribute nothing — yet it used
+    // to still claim the family key with `{}`, which is what replaced a real
+    // 5-hour reading.
+    expect(ingestQuotaGroups([{
+      name: 'Gemini Models',
+      windows: [{ bucketId: 'gemini-daily', window: 'daily', remainingFraction: 0.1, resetTime: null }],
+    }])).toEqual({})
+  })
+
+  it('routes every shared window token to a field, and never to an empty record', () => {
+    // The parser and the scheduler read ONE table now (`QUOTA_WINDOWS`), because
+    // when they drifted a `daily` group parsed and display-sorted fine while the
+    // scheduler dropped it — and the empty record it left replaced a real
+    // measurement. This walks the shared table so each token lands in a field, or
+    // in no record at all, but never in `{ family: {} }`.
+    for (const [token, spec] of Object.entries(QUOTA_WINDOWS)) {
+      // `gemini-` prefix so the bucket id resolves to a family and the only
+      // variable under test is the WINDOW token.
+      const group = { name: 'x', windows: [{ bucketId: `gemini-${token}`, window: token, remainingFraction: 0.5, resetTime: null }] }
+      const ingested = ingestQuotaGroups([group])
+      for (const record of Object.values(ingested)) {
+        expect(Object.keys(record).length).toBeGreaterThan(0)
+      }
+      if (spec.kind === 'rolling') expect(ingested['google']?.remainingFraction).toBe(0.5)
+      else if (spec.kind === 'weekly') expect(ingested['google']?.weeklyFraction).toBe(0.5)
+      else expect(ingested).toEqual({})
+    }
   })
 })
 
@@ -743,12 +979,33 @@ describe('quota summary (5h / weekly windows)', () => {
 })
 
 describe('family quota helpers', () => {
-  function withQuota(quota: Record<string, { remainingFraction?: number; resetTime?: string }>, updatedAt = Date.now()): ManagedAccount {
+  function withQuota(
+    quota: Record<string, { remainingFraction?: number; resetTime?: string; weeklyFraction?: number; weeklyResetTime?: string }>,
+    updatedAt = Date.now(),
+  ): ManagedAccount {
     const acc = account()
     acc.cachedQuota = quota
     acc.cachedQuotaUpdatedAt = updatedAt
     return acc
   }
+
+  it('ignores a window whose reset has passed when sizing the refresh interval', () => {
+    // A carried weekly value kept returning the 60s TTL long after its reset, so
+    // that account re-probed BOTH endpoints every minute for as long as the
+    // summary endpoint was down.
+    const expired = withQuota(
+      { google: { remainingFraction: 0.9, weeklyFraction: 0, weeklyResetTime: '2000-01-01T00:00:00Z' } },
+      Date.now() - 5 * 60 * 1000,
+    )
+    expect(isQuotaStale(expired)).toBe(false)
+
+    // The same reading with a live reset DOES shrink the interval to 60s.
+    const live = withQuota(
+      { google: { remainingFraction: 0.9, weeklyFraction: 0, weeklyResetTime: '2099-01-01T00:00:00Z' } },
+      Date.now() - 5 * 60 * 1000,
+    )
+    expect(isQuotaStale(live)).toBe(true)
+  })
 
   it('detects drained families below the soft threshold, ignoring past resets', () => {
     const acc = withQuota({ google: { remainingFraction: 0.05 } })
@@ -757,6 +1014,39 @@ describe('family quota helpers', () => {
     const resetting = withQuota({ google: { remainingFraction: 0.05, resetTime: '2000-01-01T00:00:00Z' } })
     expect(isFamilyDrained(resetting, 'google')).toBe(false)
     expect(isFamilyDrained(account())).toBe(false)
+  })
+
+  it('treats a spent weekly window as drained even when the 5-hour bucket is healthy', () => {
+    // The case that motivated this: the 5-hour counter refills four times a day,
+    // so it says nothing about a week that is already over.
+    const weekly = withQuota({
+      google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' },
+    })
+    expect(isFamilyDrained(weekly, 'google')).toBe(true)
+    // A weekly reset in the past means the reading describes a window that is
+    // over, so it is ignored until the next measurement replaces it.
+    const refilled = withQuota({
+      google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2000-01-01T00:00:00Z' },
+    })
+    expect(isFamilyDrained(refilled, 'google')).toBe(false)
+    // 0.02 is low but above the weekly threshold, and the 5-hour bucket is fine.
+    const lowButUsable = withQuota({
+      google: { remainingFraction: 0.9, weeklyFraction: 0.02, weeklyResetTime: '2099-01-01T00:00:00Z' },
+    })
+    expect(isFamilyDrained(lowButUsable, 'google')).toBe(false)
+    // The 5-hour window still drains on its own.
+    const fiveHour = withQuota({
+      google: { remainingFraction: 0.05, weeklyFraction: 0.9, weeklyResetTime: '2099-01-01T00:00:00Z' },
+    })
+    expect(isFamilyDrained(fiveHour, 'google')).toBe(true)
+  })
+
+  it('shortens the cache TTL for a nearly spent week', () => {
+    const weekly = withQuota(
+      { google: { remainingFraction: 0.9, weeklyFraction: 0.004 } },
+      Date.now() - 2 * 60 * 1000,
+    )
+    expect(isQuotaStale(weekly)).toBe(true)
   })
 
   it('flags stale caches by health-based TTL', () => {
@@ -779,7 +1069,11 @@ describe('family quota helpers', () => {
 })
 
 describe('pool candidate ranking', () => {
-  function entry(index: number, quota?: { remainingFraction?: number; resetTime?: string }, extra: Partial<ManagedAccount> = {}) {
+  function entry(
+    index: number,
+    quota?: { remainingFraction?: number; resetTime?: string; weeklyFraction?: number; weeklyResetTime?: string },
+    extra: Partial<ManagedAccount> = {},
+  ) {
     const acc: ManagedAccount = { email: `a${index}@x`, refresh: `rt-${index}|p`, addedAt: 0, lastUsed: 0 }
     if (quota) {
       acc.cachedQuota = { google: quota }
@@ -828,6 +1122,55 @@ describe('pool candidate ranking', () => {
     googleHeavy.account.cachedQuotaUpdatedAt = Date.now()
     const ranked = rankPoolCandidates([anthropic, googleHeavy], 'gemini-3.5-flash')
     // For gemini: entry 0 has more headroom (0.9) than entry 1 (0.3) → ranked first.
+    expect(ranked.map((c) => c.index)).toEqual([0, 1])
+  })
+
+  it('blocks a weekly-exhausted account until the WEEKLY reset, not the 5-hour one', () => {
+    const fiveHourReset = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    const weeklyReset = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString()
+    const bothSpent = entry(0, {
+      remainingFraction: 0, resetTime: fiveHourReset, weeklyFraction: 0, weeklyResetTime: weeklyReset,
+    })
+    const weeklySpent = entry(1, {
+      remainingFraction: 0.9, weeklyFraction: 0, weeklyResetTime: weeklyReset,
+    })
+    const usable = entry(2, {
+      remainingFraction: 0.9, weeklyFraction: 0.5, weeklyResetTime: weeklyReset,
+    })
+    const ranked = rankPoolCandidates([bothSpent, weeklySpent, usable], 'gemini-3.5-flash')
+    // The usable account is unblocked; both blocked ones wait for the week, and
+    // the spent week alone is enough to block — the refilling 5-hour bucket does
+    // not rescue it.
+    expect(ranked.map((c) => c.index)).toEqual([2, 0, 1])
+    expect(ranked[1]!.blockedUntil).toBe(Date.parse(weeklyReset))
+    expect(ranked[2]!.blockedUntil).toBe(Date.parse(weeklyReset))
+  })
+
+  it('marks a nearly spent week as hot and as measured', () => {
+    const ranked = rankPoolCandidates(
+      [
+        entry(0, { remainingFraction: 0.9, weeklyFraction: 0.05, weeklyResetTime: '2099-01-01T00:00:00Z' }),
+        entry(1),
+      ],
+      'gemini-3.5-flash',
+    )
+    const weeklyHot = ranked.find((c) => c.index === 0)!
+    expect(weeklyHot.hot).toBe(true)
+    expect(weeklyHot.measured).toBe(true)
+    // Ordering among unblocked accounts is still driven by the 5-hour reading.
+    expect(weeklyHot.usedFraction).toBeCloseTo(0.1, 5)
+    // An account with no reading at all is neither hot nor measured, and hot
+    // windows sort last, so it leads here.
+    expect(ranked.map((c) => c.index)).toEqual([1, 0])
+  })
+
+  it('counts a weekly-only reading as measured', () => {
+    const weeklyOnly = entry(0, { weeklyFraction: 0.5, weeklyResetTime: '2099-01-01T00:00:00Z' })
+    const ranked = rankPoolCandidates([entry(1), weeklyOnly], 'gemini-3.5-flash')
+    const measured = ranked.find((c) => c.index === 0)!
+    expect(measured.measured).toBe(true)
+    expect(measured.usedFraction).toBeUndefined()
+    // Measured before unmeasured, so the weekly-only account leads.
     expect(ranked.map((c) => c.index)).toEqual([0, 1])
   })
 })

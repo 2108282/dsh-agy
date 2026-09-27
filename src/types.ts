@@ -46,11 +46,69 @@ export type CooldownReason =
   | 'quota-exhausted'
   | 'validation-required'
 
-/** Per-account quota cache keyed by model id. */
+/**
+ * Per-account quota cache keyed by model FAMILY (`google` / `anthropic` /
+ * `openai`, or `unknown`) — never by model id. See `familyKeyOf` in
+ * `runtime/quota.ts`.
+ *
+ * The keying is load-bearing for the fields below: a family has exactly ONE
+ * record, so a family-scoped reading stored here cannot disagree with a
+ * per-model copy of itself, and there is no second key to keep in sync.
+ */
 export interface CachedQuota {
+  /** 0..1 left in the family's rolling 5-hour window. */
   remainingFraction?: number
+  /** When the 5-hour window refills (RFC3339). */
   resetTime?: string
+  /**
+   * 0..1 left in the family's 7-day window, when `retrieveUserQuotaSummary`
+   * reported one.
+   *
+   * A genuinely SEPARATE window, not a second view of `remainingFraction`: the
+   * 5-hour bucket refills four times a day while the weekly budget only drains,
+   * so an account can be comfortable on one and exhausted on the other.
+   *
+   * It always travels with its own `weeklyResetTime`, and that timestamp is what
+   * bounds the value's life: once it passes, every consumer ignores the reading
+   * (`isFamilyDrained`, `parseFutureResetMs`, `rankPoolCandidates`), so a weekly
+   * value carried forward across a failed probe cannot outlive its window.
+   */
+  weeklyFraction?: number
+  /** When the 7-day window refills (RFC3339). */
+  weeklyResetTime?: string
+  /** How many models the per-model probe contributed to this family's reading. */
   modelCount?: number
+}
+
+/**
+ * The upstream `window` tokens we understand: their ORDER by duration, and which
+ * of them `CachedQuota` has a field for.
+ *
+ * ONE table for a vocabulary that used to live in two places giving two different
+ * answers: `adapter/quota-summary.ts` sorted by its own token table while
+ * `runtime/quota.ts` classified windows with `includes()` checks. The
+ * disagreement was not academic — `daily` existed in one and not the other, so a
+ * daily group parsed and display-sorted correctly, then contributed an EMPTY
+ * record that replaced a real measurement.
+ *
+ * Keeping both facts in one row is deliberate: a token cannot be rankable in one
+ * consumer and unknown to the other, because there is only one place to add it.
+ * A missing `kind` means the cache has nowhere to put that reading, which is what
+ * stops the empty-record overwrite.
+ *
+ * Declared in this leaf rather than in either consumer because BOTH need it:
+ * `runtime/` must not reach into `adapter/`, and the persisted `QuotaWindow` is
+ * already defined here.
+ *
+ * `rank` is explicit rather than inferred from token length so it states the
+ * intended duration ordering: `daily` (5 chars) would otherwise sort before
+ * `weekly` (6) for the wrong reason.
+ */
+export const QUOTA_WINDOWS: Record<string, { rank: number, kind?: 'rolling' | 'weekly' }> = {
+  '5h': { rank: 0, kind: 'rolling' },
+  daily: { rank: 1 },
+  weekly: { rank: 2, kind: 'weekly' },
+  monthly: { rank: 3 },
 }
 
 /**
@@ -81,7 +139,7 @@ export interface QuotaGroup {
 /**
  * The grouped 5-hour / weekly windows, cached per account.
  *
- * Deliberately SEPARATE from `cachedQuota`: that map is per-model and feeds the
+ * Deliberately SEPARATE from `cachedQuota`: that map is per-FAMILY and feeds the
  * rotation/ranking path (`familyQuotaFor`, `isFamilyDrained`), while this is
  * per-GROUP and display-only. Merging them would put two different shapes under
  * one key and let a display refresh influence scheduling.

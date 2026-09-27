@@ -20,8 +20,8 @@ fingerprinting, and both CLI and web management.
   rate limits, per-account cooldown to the real reset time, per-account device
   fingerprints.
 - **Inline Settings UI**: an Antigravity section inside DSH Settings with four
-  tabs — accounts (login, activation, per-model quota bars, test calls,
-  fingerprint and proxy management), models (per-model visibility), usage
+  tabs — accounts (login, activation, grouped 5-hour/weekly quota windows, test
+  calls, fingerprint and proxy management), models (per-model visibility), usage
   (cumulative token and request statistics), and credentials (import/export).
   No separate page: the surface only exists where DSH Settings does.
 - **Model visibility toggles**: hide individual models from the DSH model
@@ -37,10 +37,14 @@ fingerprinting, and both CLI and web management.
 
 ## Screenshots
 
-The Antigravity section inside DSH Settings — accounts, per-model quota, and
-one-shot model tests:
+The Antigravity section inside DSH Settings. Account emails and project names are
+redacted.
 
-![dsh-agy settings](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/screenshot_en.png)
+| Accounts | Models |
+|:---:|:---:|
+| ![accounts](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/en_accounts.png) | ![models](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/en_models.png) |
+| **Limits** — 5-hour and weekly windows | **Usage** — cumulative, per-model and per-account |
+| ![limits](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/en_limits.png) | ![usage](https://raw.githubusercontent.com/chaos-03x/dsh-agy/main/assets/en_usage.png) |
 
 ## Quickstart
 
@@ -192,6 +196,26 @@ by the requested model's backend counter family (`gemini-*` → Google,
 reset with headroom left are used first ("use it or lose it"), near-exhausted
 families are avoided, and exhausted families block the account until the real
 reset time.
+
+Each family is measured on **both** of its windows, because they refill on
+different clocks:
+
+| Window | Refills | Exhausted when | Blocks until |
+|---|---|---|---|
+| Rolling 5-hour | every 5 hours | below 15% left | the 5-hour reset |
+| Weekly | every 7 days | 1% or less left | the **weekly** reset |
+
+The two gates are independent. A family can sit at 90% of its 5-hour budget
+while its week is spent — four 5-hour refills do not return a weekly budget —
+so a week-exhausted account is rotated away instead of being selected and
+failing. The thresholds are deliberately different (15% of five hours is ~45
+minutes of runway; 1% of a week is ~1.7 hours): judging the 5-hour window too
+late costs a wait of at most five hours, while judging the week too late parks
+the account for days.
+
+The weekly reading comes only from `retrieveUserQuotaSummary` — the per-model
+`fetchAvailableModels` probe has no window field at all — and a probe that
+reports neither window cannot erase a known-drained one.
 
 429 (Too Many Requests) responses:
 
