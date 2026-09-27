@@ -293,14 +293,48 @@ export function ingestFamilyQuotas(
   return Object.fromEntries(families)
 }
 
-/** The quota record for one family, or the most-pressured family when the model is unknown. */
+/**
+ * The lowest fraction a record reports across BOTH tracked windows — its overall
+ * pressure.
+ *
+ * `undefined` means the record carries no usable reading at all (neither window
+ * measured), which is deliberately different from a measured zero: only a real
+ * number can size a refresh interval.
+ */
+function pressureScore(entry: CachedQuota): number | undefined {
+  const fractions = [entry.remainingFraction, entry.weeklyFraction]
+    .filter((fraction): fraction is number => typeof fraction === 'number' && Number.isFinite(fraction))
+  return fractions.length === 0 ? undefined : Math.min(...fractions)
+}
+
+/**
+ * The quota record for one family, or the most-pressured family when the model
+ * is unknown.
+ *
+ * "Most pressured" compares BOTH windows and reports the record whose LOWEST
+ * window is the lowest of all of them. That matters because `isQuotaStale` sizes
+ * the refresh TTL from whichever record this returns: a family at 0.9 / weekly
+ * 0.004 is more pressured than one at 0.2, and comparing the 5-hour fraction
+ * alone picked the 0.2 record — so the weekly-driven 60s TTL was never applied
+ * to the family actually being requested and a spent week was discovered late.
+ *
+ * A record carrying ONLY a weekly reading participates for the same reason: #48
+ * produces that shape legitimately (the anthropic/openai entries of a
+ * Gemini-only pool), and the old `typeof entry.remainingFraction !== 'number'`
+ * guard skipped it outright, leaving the week invisible to TTL sizing.
+ */
 export function familyQuotaFor(account: ManagedAccount, family?: ModelFamily): CachedQuota | undefined {
   const cache = account.cachedQuota ?? {}
   if (family) return cache[family]
   let worst: CachedQuota | undefined
+  let worstScore: number | undefined
   for (const entry of Object.values(cache)) {
-    if (typeof entry.remainingFraction !== 'number') continue
-    if (!worst || entry.remainingFraction < (worst.remainingFraction ?? 1)) worst = entry
+    const score = pressureScore(entry)
+    if (score === undefined) continue
+    if (worstScore === undefined || score < worstScore) {
+      worst = entry
+      worstScore = score
+    }
   }
   return worst
 }
