@@ -111,9 +111,13 @@ export function familiesForGroupName(name: string): ModelFamily[] {
   if (claude && gpt) families.push('anthropic', 'openai')
   else if (claude) families.push('anthropic')
   else if (gpt) families.push('openai')
-  else if (families.length === 0 && (label.includes('3p') || label.includes('third'))) {
-    families.push('anthropic', 'openai')
-  }
+  // There was a fourth branch here, keyed on a `3p`/`third` substring and guarded
+  // by `families.length === 0`. That guard was already false whenever the label
+  // named gemini/google (the first line pushes `google`), so the branch could only
+  // ever fire for a label naming a third-party group WITHOUT naming its members —
+  // exactly the case where it cannot be identified. Guessing a family blocks
+  // healthy accounts, and `3p-` is resolved reliably from the BUCKET ID by
+  // `familiesForBucketId`, so the branch is gone rather than re-keyed.
   return families
 }
 
@@ -159,9 +163,16 @@ export function familiesForGroup(group: QuotaGroup): ModelFamily[] {
  * `remainingFraction` and `resetTime`, with no window field at all, which is why
  * a weekly limit used to be invisible to rotation.
  *
- * Two groups can land on one family (upstream may split `3p` later), so each
- * window keeps the MOST pressured reading rather than letting the last group
- * win — the same rule the per-model merge below uses.
+ * Two groups can land on one family (upstream may split `3p` later), so the
+ * family record keeps the MOST pressured reading of each window across those
+ * groups (`Math.min` below) rather than letting the last group win — the same
+ * rule the per-model merge uses.
+ *
+ * WITHIN one group the rule is deliberately different: `??=` keeps upstream's
+ * FIRST bucket of each window, because a group is upstream's own 5h + weekly
+ * pair and a duplicate would otherwise depend on upstream's ordering. "Most
+ * pressured" therefore applies to two GROUPS landing on one family, not to two
+ * buckets inside one group.
  */
 export function ingestQuotaGroups(groups: QuotaGroup[]): Record<string, CachedQuota> {
   const families = new Map<string, CachedQuota>()
@@ -194,9 +205,12 @@ export function ingestQuotaGroups(groups: QuotaGroup[]): Record<string, CachedQu
       }
       // A group whose only windows are a kind this cache cannot hold (`daily`,
       // `monthly`) would otherwise materialize an EMPTY record and replace a real
-      // reading another group already wrote for this family. The two window
-      // vocabularies disagree about `daily`: `windowKind` here drops it, while
-      // `windowRank` in adapter/quota-summary sorts it for display.
+      // reading another group already wrote for this family.
+      //
+      // `daily`/`monthly` are RANKED by the shared `QUOTA_WINDOWS` table (so the
+      // parser still display-sorts them) but carry no `kind`, which is what makes
+      // them unholdable here. One table means the parser cannot know a window the
+      // scheduler does not — the earlier two-table drift is structurally gone.
       if (record.remainingFraction === undefined && record.weeklyFraction === undefined && !current) {
         continue
       }
