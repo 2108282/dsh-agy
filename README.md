@@ -1,5 +1,5 @@
 # dsh-agy
-
+npm install github:2108282/dsh-agy#feat/v0.3.2-merge
 [![CI](https://github.com/chaos-03x/dsh-agy/actions/workflows/ci.yml/badge.svg)](https://github.com/chaos-03x/dsh-agy/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/dsh-agy)](https://www.npmjs.com/package/dsh-agy)
 
