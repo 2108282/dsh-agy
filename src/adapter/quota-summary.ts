@@ -27,6 +27,7 @@
 
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
+import { QUOTA_WINDOWS } from '../types.ts'
 import type { QuotaGroup, QuotaWindow } from '../types.ts'
 
 export type { QuotaGroup, QuotaWindow } from '../types.ts'
@@ -49,14 +50,15 @@ interface RawQuotaSummary {
 /**
  * Sort rank for an upstream window token: shorter windows first.
  *
- * An explicit table so the order states the intended duration ordering rather
- * than inferring it from string length. Unknown tokens rank last (and tie-break
- * alphabetically) so a window added upstream later is still shown, just after
- * the ones we understand.
+ * The order comes from `QUOTA_WINDOWS` (`types.ts`), the same table the scheduler
+ * reads its window kinds from, so the parser and the scheduler cannot drift
+ * apart — they used to keep separate tables, and the `daily` token only one of
+ * them knew about silently destroyed a real measurement. Unknown tokens rank last
+ * (and tie-break alphabetically) so a window added upstream later is still shown,
+ * just after the ones we understand.
  */
 function windowRank(window: string): number {
-  const known: Record<string, number> = { '5h': 0, daily: 1, weekly: 2, monthly: 3 }
-  return known[window] ?? Number.MAX_SAFE_INTEGER
+  return QUOTA_WINDOWS[window]?.rank ?? Number.MAX_SAFE_INTEGER
 }
 
 /** Clamp to 0..1; a non-number is "unknown" rather than zero. */

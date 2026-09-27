@@ -20,6 +20,7 @@
  */
 
 import type { DiscoveredModels } from '../adapter/models.ts'
+import { QUOTA_WINDOWS } from '../types.ts'
 import type { CachedQuota, ManagedAccount, QuotaGroup, QuotaWindow } from '../types.ts'
 import {
   SOFT_QUOTA_THRESHOLD,
@@ -116,12 +117,23 @@ export function familiesForGroupName(name: string): ModelFamily[] {
   return families
 }
 
-/** Which of the two tracked windows an upstream window token names. */
+/**
+ * Which of the two tracked windows an upstream token names, or `undefined` for a
+ * token `CachedQuota` has no field for (`daily`, `monthly`).
+ *
+ * Read from `QUOTA_WINDOWS` (`types.ts`), the SAME table `adapter/quota-summary`
+ * orders windows by. These were two independent tables once, and the gap between
+ * them was a real defect: `daily` was orderable in the parser but unknown here, so
+ * the group materialized an empty record that overwrote a live measurement. One
+ * table makes that drift structurally impossible rather than merely tested for.
+ *
+ * Lookup is exact on the measured vocabulary (`5h`, `weekly`). A variant spelling
+ * therefore classifies as unknown — which is safe, because the guard in
+ * `ingestQuotaGroups` then skips the record rather than emptying it, and the
+ * per-model probe still supplies the 5-hour reading.
+ */
 function windowKind(window: string): 'rolling' | 'weekly' | undefined {
-  const token = window.toLowerCase()
-  if (token.includes('5h')) return 'rolling'
-  if (token.includes('weekly') || token.includes('week') || token.includes('7d')) return 'weekly'
-  return undefined
+  return QUOTA_WINDOWS[window.toLowerCase()]?.kind
 }
 
 /** The families one group belongs to: its bucket ids first, its label second. */
@@ -245,33 +257,37 @@ export function ingestFamilyQuotas(
   if (previous) {
     for (const [key, prev] of Object.entries(previous)) {
       const current = families.get(key)
-      if (!current) {
-        // Absent from BOTH sources. Either the model probe does not cover this
-        // family at all — a Gemini-only pool never reports anthropic/openai — or
-        // its request failed, and `fetchQuotaSummary` answers a failure with `[]`
-        // rather than throwing, so "no groups" and "endpoint down" are the SAME
-        // input here. Dropping the record in that state erases a spent week:
-        // `isFamilyDrained` flips true -> false and `rankPoolCandidates` loses the
-        // weekly `blockedUntil`, putting an exhausted account straight back into
-        // rotation. Carry the last measurement instead. It cannot manufacture a
-        // block: both consumers ignore a window whose reset has already passed
-        // (`resetInPast` / `parseFutureResetMs`), and the weekly value keeps the
-        // reset moment it was measured with.
-        families.set(key, { ...prev })
-        continue
-      }
-      // Carry the weekly reading forward only. It is the one field the per-model
-      // probe cannot supply, so its absence means "this probe did not ask", not
-      // "the weekly budget is empty".
-      if (current.weeklyFraction === undefined && prev.weeklyFraction !== undefined) {
-        families.set(key, {
-          ...current,
-          weeklyFraction: prev.weeklyFraction,
-          ...(current.weeklyResetTime === undefined && prev.weeklyResetTime !== undefined
-            ? { weeklyResetTime: prev.weeklyResetTime }
-            : {}),
-        })
-      }
+      // Carry the weekly reading forward and NOTHING else — never the 5-hour
+      // fields. It is the one field the per-model probe cannot supply, so its
+      // absence means "this probe did not ask", not "the weekly budget is empty".
+      //
+      // `current` is absent when the family came from NEITHER source: either the
+      // model probe does not cover it at all (a Gemini-only pool never reports
+      // anthropic/openai) or its request failed, and `fetchQuotaSummary` answers a
+      // failure with `[]` rather than throwing, so "no groups" and "endpoint down"
+      // are the SAME input here. Dropping the record in that state erases a spent
+      // week: `isFamilyDrained` flips true -> false and `rankPoolCandidates` loses
+      // the weekly `blockedUntil`, putting an exhausted account straight back into
+      // rotation. Hence the carry even with no `current`.
+      //
+      // A resurrected record cannot manufacture a block, because both consumers
+      // ignore a window whose reset has already passed (`resetInPast` /
+      // `parseFutureResetMs`) and the weekly value keeps its own reset moment.
+      // The 5-hour fields get no such protection: `requiredDrainFor` has no reset
+      // guard and clamps an elapsed reset to `DRAIN_FLOOR_MS`, so carrying a dead
+      // 5-hour reading forward scores MAXIMUM drain urgency (24 vs 0.1 for an
+      // identical live reading) and wins the ranking outright. That is why only
+      // the weekly window travels.
+      if (prev.weeklyFraction === undefined) continue
+      // A fresh summary reading always wins; the carry only fills a gap.
+      if (current?.weeklyFraction !== undefined) continue
+      families.set(key, {
+        ...current,
+        weeklyFraction: prev.weeklyFraction,
+        ...(current?.weeklyResetTime === undefined && prev.weeklyResetTime !== undefined
+          ? { weeklyResetTime: prev.weeklyResetTime }
+          : {}),
+      })
     }
   }
   return Object.fromEntries(families)
@@ -302,7 +318,7 @@ export function isQuotaStale(account: ManagedAccount, now = Date.now()): boolean
   // be carried forward by the same rule.
   const rolling = resetInPast(mostPressured?.resetTime, now) ? undefined : mostPressured?.remainingFraction
   const weekly = resetInPast(mostPressured?.weeklyResetTime, now) ? undefined : mostPressured?.weeklyFraction
-  const ttl = computeSoftQuotaCacheTtlMs(rolling, weekly, now)
+  const ttl = computeSoftQuotaCacheTtlMs(rolling, weekly)
   return now - account.cachedQuotaUpdatedAt > ttl
 }
 

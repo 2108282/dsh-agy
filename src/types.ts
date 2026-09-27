@@ -81,6 +81,37 @@ export interface CachedQuota {
 }
 
 /**
+ * The upstream `window` tokens we understand: their ORDER by duration, and which
+ * of them `CachedQuota` has a field for.
+ *
+ * ONE table for a vocabulary that used to live in two places giving two different
+ * answers: `adapter/quota-summary.ts` sorted by its own token table while
+ * `runtime/quota.ts` classified windows with `includes()` checks. The
+ * disagreement was not academic — `daily` existed in one and not the other, so a
+ * daily group parsed and display-sorted correctly, then contributed an EMPTY
+ * record that replaced a real measurement.
+ *
+ * Keeping both facts in one row is deliberate: a token cannot be rankable in one
+ * consumer and unknown to the other, because there is only one place to add it.
+ * A missing `kind` means the cache has nowhere to put that reading, which is what
+ * stops the empty-record overwrite.
+ *
+ * Declared in this leaf rather than in either consumer because BOTH need it:
+ * `runtime/` must not reach into `adapter/`, and the persisted `QuotaWindow` is
+ * already defined here.
+ *
+ * `rank` is explicit rather than inferred from token length so it states the
+ * intended duration ordering: `daily` (5 chars) would otherwise sort before
+ * `weekly` (6) for the wrong reason.
+ */
+export const QUOTA_WINDOWS: Record<string, { rank: number, kind?: 'rolling' | 'weekly' }> = {
+  '5h': { rank: 0, kind: 'rolling' },
+  daily: { rank: 1 },
+  weekly: { rank: 2, kind: 'weekly' },
+  monthly: { rank: 3 },
+}
+
+/**
  * One window of one `QuotaGroup`, as `retrieveUserQuotaSummary` reports it.
  *
  * Declared here (the dependency-free leaf) because it is PERSISTED on the
