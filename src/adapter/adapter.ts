@@ -39,7 +39,7 @@ import {
 } from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
-import type { AgyResolvedImage } from './translate.ts'
+import type { AgyResolvedImage, ToolNameMapping } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
 import { parseAgySse } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
@@ -331,6 +331,10 @@ export class AgyAdapter extends LlmAdapter {
     // must surface UNSUPPORTED_CONTENT (user story 8) instead of being masked
     // by account-pool errors, and must not touch pool state at all.
     const images = await this.resolveRequestImages(options)
+    const toolMapping: ToolNameMapping = {
+      originalToSanitized: new Map(),
+      sanitizedToOriginal: new Map(),
+    }
     /**
      * The DSH agent loop stamps `options.sessionId` on every request it builds,
      * so it is the conversation identity — used both to scope account affinity
@@ -425,7 +429,8 @@ export class AgyAdapter extends LlmAdapter {
             : { tieredBudgetFor: this.options.tieredBudgetFor }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
-          appendBehaviorInstruction: true,
+          toolMapping,
+          appendBehaviorInstruction: process.env.DSH_AGY_PROMPT_INJECT !== '0',
         })
         let response: Response
         try {
@@ -441,6 +446,13 @@ export class AgyAdapter extends LlmAdapter {
             routing,
           )
         } catch (error) {
+          const isAborted =
+            options.signal?.aborted ||
+            (error instanceof DOMException && error.name === 'AbortError') ||
+            (error as { name?: string })?.name === 'AbortError'
+          if (isAborted) {
+            throw new LlmError('agy request aborted', 'ABORTED', { cause: error })
+          }
           const classified = classifyFetchError(error, { proxyUrl: session.account.proxy })
           await this.options.reportFailure(classified.kind, session)
           // A transport failure consumed no tokens, but it is a real attempt
@@ -561,6 +573,7 @@ export class AgyAdapter extends LlmAdapter {
         onToolSignature: (toolCallId, signature) => {
           setThoughtSignature(toolCallId, signature)
         },
+        restoreToolName: (name) => toolMapping.sanitizedToOriginal.get(name) ?? name,
       })) {
         if (chunk.type === 'usage') {
           usage = {

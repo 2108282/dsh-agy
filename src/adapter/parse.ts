@@ -87,6 +87,8 @@ export interface ParseAgySseOptions {
    * for replay on the next turn (see signature-cache.ts).
    */
   onToolSignature?(toolCallId: string, signature: string): void
+  /** Restore sanitized functionCall name to its original declared tool name. */
+  restoreToolName?(sanitizedName: string): string
 }
 
 export async function* parseAgySse(
@@ -179,10 +181,10 @@ export async function* parseAgySse(
             finishReason = mapFinishReason(candidate.finishReason)
           }
           for (const part of candidate.content?.parts ?? []) {
+            if (part.text !== undefined && part.text.length === 0) {
+              continue
+            }
             if (part.text !== undefined && part.thought !== true) {
-              if (part.text.length === 0 && (!open || (open as any).kind !== 'text')) {
-                continue
-              }
               for (const chunk of ensureBlock('text')) yield chunk
               open!.text += part.text
               yield { type: 'text-delta', index: blockIndex, text: part.text }
@@ -203,9 +205,13 @@ export async function* parseAgySse(
                 const end = closeBlock()
                 if (end) yield end
               }
+              const rawName = part.functionCall.name
+              const originalName = rawName !== undefined
+                ? (options.restoreToolName?.(rawName) ?? rawName)
+                : undefined
               const start = ensureBlock('tool-call', {
                 id: upstreamId,
-                name: part.functionCall.name,
+                name: originalName,
               })
               if (start.length > 0) yield start[0]!
               if (part.thoughtSignature) {

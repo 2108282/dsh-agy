@@ -169,6 +169,7 @@ function blockToParts(
   images: Map<string, AgyResolvedImage>,
   /** Claude path: replayed thought blocks are rejected outright (see below). */
   dropThoughts = false,
+  toolMapping?: ToolNameMapping,
 ): AgyPart[] {
   switch (block.type) {
     case 'text':
@@ -224,13 +225,15 @@ function blockToParts(
       // and a wrong change turns working parallel tool calls into 400s — so it
       // needs one real multi-tool turn measured before any edit.
       const signature = getThoughtSignature(block.id) ?? THOUGHT_SIGNATURE_SENTINEL
+      const upstreamToolName = toolMapping?.originalToSanitized.get(block.name) ?? block.name
       return [{
         thoughtSignature: signature,
-        functionCall: { id: block.id, name: block.name, args },
+        functionCall: { id: block.id, name: upstreamToolName, args },
       }]
     }
     case 'tool-result': {
-      const name = toolNames.get(block.toolCallId) ?? block.toolCallId
+      const rawName = toolNames.get(block.toolCallId) ?? block.toolCallId
+      const upstreamName = toolMapping?.originalToSanitized.get(rawName) ?? rawName
       const text = block.content
         .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
         .map((b) => b.text)
@@ -242,7 +245,7 @@ function blockToParts(
           // Field required"); the Gemini path accepts the id too, so it is
           // always carried rather than branched per family (live-verified).
           id: block.toolCallId,
-          name,
+          name: upstreamName,
           response: { result: text, is_error: block.isError === true },
         },
       }]
@@ -268,6 +271,7 @@ function messageToContent(
   multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>,
   messageIndex?: number,
   dropThoughts = false,
+  toolMapping?: ToolNameMapping,
 ): AgyContent | null {
   const parts = message.content.flatMap((block) =>
     // Non-user images are out of scope by policy (docs ANTIGRAVITY-API §3.2):
@@ -275,7 +279,7 @@ function messageToContent(
     // unresolved-map guard, which protects only the user-image invariant.
     block.type === 'image' && message.role !== 'user'
       ? []
-      : blockToParts(block, toolNames, images, dropThoughts),
+      : blockToParts(block, toolNames, images, dropThoughts, toolMapping),
   )
 
   if (message.role === 'user' && multimodalFiles) {
@@ -354,14 +358,25 @@ function sanitizeToolName(name: string, seen: Set<string>): string {
   return candidate
 }
 
-function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['request']['tools'] {
+export interface ToolNameMapping {
+  originalToSanitized: Map<string, string>
+  sanitizedToOriginal: Map<string, string>
+}
+
+export function toolsToDeclarations(
+  tools: ToolSchema[] | undefined,
+  mapping?: ToolNameMapping,
+): AgyRequestBody['request']['tools'] {
   if (!tools || tools.length === 0) return undefined
   const seenNames = new Set<string>()
   const declarations = []
   for (const tool of tools) {
     if (AGY_BUILTIN_TOOL_NAMES.has(tool.name)) continue
+    const sanitized = sanitizeToolName(tool.name, seenNames)
+    mapping?.originalToSanitized.set(tool.name, sanitized)
+    mapping?.sanitizedToOriginal.set(sanitized, tool.name)
     declarations.push({
-      name: sanitizeToolName(tool.name, seenNames),
+      name: sanitized,
       description: tool.description,
       parameters: sanitizeToolSchema(tool.parameters),
     })
@@ -378,6 +393,7 @@ export function toAgyRequestBody(
     sessionId?: string
     images?: Map<string, AgyResolvedImage>
     multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>
+    toolMapping?: ToolNameMapping
     /**
      * The request id, when the caller also stamps it on the wire
      * (`x-goog-request-id`). Generating it here as well produced TWO different
@@ -418,12 +434,16 @@ export function toAgyRequestBody(
     appendBehaviorInstruction?: boolean
   },
 ): AgyRequestBody {
+  const toolMapping: ToolNameMapping = context.toolMapping ?? {
+    originalToSanitized: new Map(),
+    sanitizedToOriginal: new Map(),
+  }
   const toolNames = buildToolNameIndex(options.messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
   const multimodalFiles = supportsMultimodalFiles(options.model) ? context.multimodalFiles : undefined
   const claude = isClaudeModel(options.model)
   let contents = options.messages
-    .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude))
+    .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude, toolMapping))
     .filter((c): c is AgyContent => c !== null)
   if (claude) {
     contents = stripTrailingModelTurn(contents)
@@ -436,7 +456,7 @@ export function toAgyRequestBody(
       : AGY_BEHAVIOR_INSTRUCTION
   }
 
-  const tools = toolsToDeclarations(options.tools)
+  const tools = toolsToDeclarations(options.tools, toolMapping)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
   if (options.maxTokens !== undefined) {

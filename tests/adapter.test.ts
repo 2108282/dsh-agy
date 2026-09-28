@@ -647,6 +647,28 @@ describe('parseAgySse', () => {
     expect(ends[1]).toMatchObject({ block: { type: 'tool-call', id: 'c1' } })
   })
 
+  it('restores sanitized tool names in tool-call blocks when restoreToolName is provided', async () => {
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"mcp_read_file","args":{}}}]}}]}]',
+      'data: [DONE]',
+    ]), {
+      restoreToolName: (name) => name === 'mcp_read_file' ? 'mcp:read-file' : name,
+    }))
+    const deltas = chunks.filter((c) => (c as { type: string }).type === 'tool-call-delta')
+    expect(deltas[0]).toMatchObject({ name: 'mcp:read-file' })
+  })
+
+  it('filters empty text parts without yielding empty deltas or opening empty blocks', async () => {
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":""}]}}]}]',
+      'data: [{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}]',
+      'data: [DONE]',
+    ])))
+    const textDeltas = chunks.filter((c) => (c as { type: string }).type === 'text-delta')
+    expect(textDeltas).toHaveLength(1)
+    expect(textDeltas[0]).toMatchObject({ text: 'hello' })
+  })
+
   it('captures functionCall thoughtSignature and upstream id via callback', async () => {
     const captured: Array<[string, string]> = []
     const chunks = await collect(parseAgySse(sseStream([

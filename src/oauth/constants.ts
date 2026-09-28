@@ -108,6 +108,13 @@ export async function fetchAgyFirstOk(
       if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
       lastSkipped = response
     } catch (error) {
+      if (
+        init.signal?.aborted ||
+        (error instanceof DOMException && error.name === 'AbortError') ||
+        (error as { name?: string })?.name === 'AbortError'
+      ) {
+        throw error
+      }
       lastNetworkError = error
       // Fail-closed only while an explicit per-account proxy is in effect: the
       // request must not be retried on another endpoint or go direct.
