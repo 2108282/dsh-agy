@@ -181,18 +181,7 @@ export async function* parseAgySse(
             finishReason = mapFinishReason(candidate.finishReason)
           }
           for (const part of candidate.content?.parts ?? []) {
-            if (part.text !== undefined && part.text.length === 0) {
-              continue
-            }
-            if (part.text !== undefined && part.thought !== true) {
-              for (const chunk of ensureBlock('text')) yield chunk
-              open!.text += part.text
-              yield { type: 'text-delta', index: blockIndex, text: part.text }
-            } else if (part.text !== undefined && part.thought === true) {
-              for (const chunk of ensureBlock('reasoning')) yield chunk
-              open!.text += part.text
-              yield { type: 'reasoning-delta', index: blockIndex, text: part.text }
-            } else if (part.functionCall) {
+            if (part.functionCall) {
               // Use the upstream functionCall id when present so the signature
               // captured on this part can be replayed for the same id next turn.
               const upstreamId = part.functionCall.id || String(blockIndex)
@@ -228,6 +217,20 @@ export async function* parseAgySse(
                 name: open!.name,
                 argumentsDelta: argsJson,
               }
+            } else if (part.text !== undefined && part.thought === true) {
+              if (part.text.length === 0) {
+                continue
+              }
+              for (const chunk of ensureBlock('reasoning')) yield chunk
+              open!.text += part.text
+              yield { type: 'reasoning-delta', index: blockIndex, text: part.text }
+            } else if (part.text !== undefined && part.thought !== true) {
+              if (part.text.length === 0 && (!open || (open as any).kind !== 'text')) {
+                continue
+              }
+              for (const chunk of ensureBlock('text')) yield chunk
+              open!.text += part.text
+              yield { type: 'text-delta', index: blockIndex, text: part.text }
             }
           }
         }

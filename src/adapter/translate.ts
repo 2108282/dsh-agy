@@ -438,6 +438,7 @@ export function toAgyRequestBody(
     originalToSanitized: new Map(),
     sanitizedToOriginal: new Map(),
   }
+  const tools = toolsToDeclarations(options.tools, toolMapping)
   const toolNames = buildToolNameIndex(options.messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
   const multimodalFiles = supportsMultimodalFiles(options.model) ? context.multimodalFiles : undefined
@@ -456,7 +457,6 @@ export function toAgyRequestBody(
       : AGY_BEHAVIOR_INSTRUCTION
   }
 
-  const tools = toolsToDeclarations(options.tools, toolMapping)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
   if (options.maxTokens !== undefined) {

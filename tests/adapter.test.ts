@@ -669,6 +669,18 @@ describe('parseAgySse', () => {
     expect(textDeltas[0]).toMatchObject({ text: 'hello' })
   })
 
+  it('parses functionCall even when part carries empty text or thought payload', async () => {
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}]}]',
+      'data: [{"candidates":[{"content":{"parts":[{"text":"","functionCall":{"id":"c1","name":"bash","args":{"cmd":"ls"}}}]}}]}]',
+      'data: [DONE]',
+    ])))
+    const ends = chunks.filter((c) => (c as { type: string }).type === 'block-end')
+    expect(ends).toHaveLength(2)
+    expect(ends[0]).toMatchObject({ block: { type: 'reasoning', text: 'thinking' } })
+    expect(ends[1]).toMatchObject({ block: { type: 'tool-call', id: 'c1', name: 'bash' } })
+  })
+
   it('captures functionCall thoughtSignature and upstream id via callback', async () => {
     const captured: Array<[string, string]> = []
     const chunks = await collect(parseAgySse(sseStream([
