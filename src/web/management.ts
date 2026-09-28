@@ -72,8 +72,12 @@ export interface AgyManagementOptions {
    * the hidden set applied — see the `model.list` handler.
    */
   listAllModels: () => Promise<readonly { id: string; name: string }[]>
-  /** Harness web-server base URL, used to build the loopback OAuth redirect. */
-  baseUrl: string
+  /**
+   * Harness web-server base URL, used to build the loopback OAuth redirect.
+   * A function because the port in it is the one the server bound, known only
+   * once it is listening — see `webBaseUrl` in `plugin.ts`.
+   */
+  baseUrl: () => string
   /**
    * Tell DSH the model catalog changed.
    *
@@ -468,7 +472,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
     },
 
     'auth.url': async () => {
-      const authorization = await authorizeAntigravity(`${baseUrl}/agy/oauth-callback`)
+      const authorization = await authorizeAntigravity(`${baseUrl()}/agy/oauth-callback`)
       prunePendingAuth()
       pendingAuth.set(authorization.state, {
         verifier: authorization.verifier,
@@ -577,7 +581,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       }
       // One-time use: consume the issued state regardless of the exchange result.
       pendingAuth.delete(state)
-      const redirectUri = `${baseUrl}/agy/oauth-callback`
+      const redirectUri = `${baseUrl()}/agy/oauth-callback`
       const result = await exchangeAntigravity(code, state, redirectUri, expected.verifier)
       if (result.type === 'failed') return { ok: false, error: result.error }
       await upsertImportedAccount(store, {

@@ -49,6 +49,26 @@ interface WebServerLike {
     handler: (req: IncomingMessage, res: ServerResponse) => void
   }): () => void
   host?: string
+  /** The port actually listened on: the OS-assigned one when `--port 0`. */
+  readonly port?: number
+}
+
+/**
+ * The loopback base URL the OAuth redirect and the callback page point at.
+ *
+ * The port is the one the server BOUND, not the one it was asked for.
+ * `webStartup.port` is the `--port` flag verbatim, and `--port 0` — which asks
+ * the OS for any free port — would send Google's redirect to
+ * `http://127.0.0.1:0/agy/oauth-callback`, which nothing answers.
+ * The requested port and DSH's own 3080 default only stand in while the
+ * server has not reported one.
+ * @param host - loopback host the URL names.
+ * @param webServer - the host web server (source of the bound port).
+ * @param requestedPort - `webStartup.port`, the `--port` flag if one was given.
+ * @returns `http://<host>:<port>`, no trailing slash.
+ */
+export function webBaseUrl(host: string, webServer: Pick<WebServerLike, 'port'>, requestedPort?: number): string {
+  return `http://${host}:${webServer.port || requestedPort || 3080}`
 }
 
 export function apply(ctx: Context): void {
@@ -73,11 +93,11 @@ export function apply(ctx: Context): void {
  * @returns disposer for every registration this function made.
  */
 async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<() => void> {
-  // Host/port come from the webStartup provider (CLI args); the fallbacks are
-  // DSH's own web-app defaults (loopback + 3080), never a user override.
+  // Host comes from the webStartup provider (CLI args), falling back to DSH's
+  // own web-app default (loopback), never a user override. The port does not:
+  // see `webBaseUrl`.
   const webStartup = ctx.get('webStartup') as { host?: string; port?: number } | undefined
   const host = webStartup?.host ?? '127.0.0.1'
-  const port = webStartup?.port ?? 3080
 
   // The OAuth callback manages credentials with no authentication of its own,
   // so it must never be reachable from the network. When the web server binds
@@ -93,7 +113,9 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
   }
 
   const { store, sessions, adapter, stats, modelVisibility, thinkingBudget } = await createAgyRuntime(ctx)
-  const baseUrl = `http://${host}:${port}`
+  // Read per use rather than once here: the bound port is only known after the
+  // server's listen callback has run.
+  const baseUrl = (): string => webBaseUrl(host, webServer, webStartup?.port)
   const management = createAgyManagement({
     store,
     sessions,
@@ -127,15 +149,16 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     kind: 'exact',
     path: '/agy/oauth-callback',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
-      const url = new URL(req.url ?? '/', baseUrl)
+      const base = baseUrl()
+      const url = new URL(req.url ?? '/', base)
       const result = await management.handleCallback(url.searchParams).catch((error: unknown) => ({
         ok: false as const,
         error: error instanceof Error ? error.message : String(error),
       }))
       res.writeHead(result.ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' })
       res.end(result.ok
-        ? renderCallbackHtml({ ok: true, email: result.email ?? null, baseUrl })
-        : renderCallbackHtml({ ok: false, error: result.error ?? 'Unknown error', baseUrl }))
+        ? renderCallbackHtml({ ok: true, email: result.email ?? null, baseUrl: base })
+        : renderCallbackHtml({ ok: false, error: result.error ?? 'Unknown error', baseUrl: base }))
     },
   }))
 

@@ -110,3 +110,21 @@ describe('dsh-agy web entry injection contract', () => {
     expect(source).not.toContain('renderDashboardHtml')
   })
 })
+
+describe('OAuth redirect base URL', () => {
+  it('names the port the server bound, not the `--port 0` it was asked for', async () => {
+    // Regression: under `dsh web --port 0` the OS picks a free port, but the
+    // redirect was built from `webStartup.port`, so Google sent the browser to
+    // `http://127.0.0.1:0/agy/oauth-callback` and login could never complete,
+    // while a bare `dsh web` (no flag, 3080 fallback) worked.
+    const { webBaseUrl } = await import('../src/web/plugin.ts')
+    expect(webBaseUrl('127.0.0.1', { port: 54775 }, 0)).toBe('http://127.0.0.1:54775')
+    expect(webBaseUrl('127.0.0.1', { port: 54775 }, undefined)).toBe('http://127.0.0.1:54775')
+  })
+
+  it('falls back to the requested port, then 3080, until the server reports one', async () => {
+    const { webBaseUrl } = await import('../src/web/plugin.ts')
+    expect(webBaseUrl('127.0.0.1', {}, 4000)).toBe('http://127.0.0.1:4000')
+    expect(webBaseUrl('127.0.0.1', {}, undefined)).toBe('http://127.0.0.1:3080')
+  })
+})
