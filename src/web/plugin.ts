@@ -133,6 +133,10 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     // The adapter's *unfiltered* catalog, so a hidden model still appears in
     // the settings list alongside the switch that un-hides it.
     listAllModels: () => adapter.listAllModels(),
+    // Activating an account can switch the account model discovery rides; the
+    // cache carries no account key, so the RPC drops it (see
+    // `AgyAdapter.invalidateModelCache`).
+    invalidateModelCache: () => adapter.invalidateModelCache(),
     baseUrl,
     // DSH refreshes the model picker on `llm/adapters-updated`; the hidden
     // list lives in agy's own file, so nothing else would announce the change

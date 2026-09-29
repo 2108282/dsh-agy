@@ -94,8 +94,19 @@ function makeHarness(options: {
       calls.push({ method: 'refreshLimits', args: [refreshOptions] })
       return options.limitsResult ?? { measured: [], failed: [], skipped: 0 }
     },
+    // The real activateAccount writes through the store and clears affinity;
+    // the stub mirrors its store contract so the RPC's bounds behavior is
+    // exercised against the same persistence.
+    activateAccount: async (index: number) => {
+      calls.push({ method: 'activateAccount', args: [index] })
+      await store.mutate((storage) => {
+        if (index >= storage.accounts.length) throw new Error('account not found')
+        storage.activeIndex = index
+      })
+    },
   } as unknown as AgySessionManager
   let notifications = 0
+  let cacheInvalidations = 0
   // A real store on a scratch file, so the RPC exercises the same persistence the
   // host uses rather than a stub that could accept anything.
   const thinkingFile = join(mkdtempSync(join(tmpdir(), 'agy-thinking-rpc-')), 'agy-thinking.json')
@@ -114,6 +125,7 @@ function makeHarness(options: {
       setTiered: (value) => thinkingBudget.setTieredBudget(value).tieredBudget,
     },
     notifyModelsChanged: () => { notifications += 1 },
+    invalidateModelCache: () => { cacheInvalidations += 1 },
     listAllModels: async () => options.models ?? [
       { id: 'model-a', name: 'Model A' },
       { id: 'model-b', name: 'Model B' },
@@ -129,6 +141,7 @@ function makeHarness(options: {
     sessions,
     calls,
     get notifications() { return notifications },
+    get cacheInvalidations() { return cacheInvalidations },
   }
 }
 
@@ -240,6 +253,9 @@ describe('agy management RPC', () => {
     const harness = makeHarness({ accounts: [account({ email: 'a@x.com' }), account({ email: 'b@y.com' })] })
     await harness.management.call('account.activate', { index: 1 })
     expect((await harness.store.load()).activeIndex).toBe(1)
+    // The activated account may see a different catalog, so activation must
+    // drop the model-list cache rather than let the picker ride the TTL.
+    expect(harness.cacheInvalidations).toBe(1)
     await harness.management.call('account.delete', { index: 0 })
     const after = await harness.store.load()
     expect(after.accounts.map((entry) => entry.email)).toEqual(['b@y.com'])

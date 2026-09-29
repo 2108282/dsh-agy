@@ -564,9 +564,19 @@ function parseFutureResetMs(resetTime: string | undefined, now: number): number 
 }
 
 /**
- * Whether the requested family on this account is fully quota-exhausted
- * (remainingFraction <= 0 or weeklyFraction <= 0 with future reset,
- * or cooling down for quota-exhausted).
+ * Whether the requested family on this account is effectively quota-exhausted
+ * for account STEERING (affinity pins, the active-account preference): an
+ * explicit quota-exhausted cooldown in force, a spent 5-hour window
+ * (`remainingFraction <= 0` with a future reset), or a weekly window at or
+ * below `WEEKLY_QUOTA_THRESHOLD` — a spent week refills in days, so its rule
+ * mirrors `isFamilyDrained`'s weekly branch rather than the block wall.
+ *
+ * Deliberately a DIFFERENT predicate from the one in `pickAccount`'s `!picked`
+ * branch, which applies a strict zero to BOTH windows to mirror
+ * `rankPoolCandidates`' block wall when classifying `AgyPoolBlockedError`; and
+ * deliberately NARROWER than `isFamilyDrained`'s 5-hour rule
+ * (`SOFT_QUOTA_THRESHOLD`): account prioritization holds a chosen account
+ * until it is actually spent, not until ranking would prefer another one.
  */
 export function isFamilyQuotaExhausted(account: ManagedAccount, family?: ModelFamily, now = Date.now()): boolean {
   if (account.cooldownReason === 'quota-exhausted' && (account.coolingDownUntil ?? 0) > now) {

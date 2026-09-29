@@ -77,7 +77,11 @@ function typecheckAgainst(scratch: string, version: string): void {
     exclude: [join(ROOT, 'src/client')],
   }, null, 2))
 
-  execFileSync(join(ROOT, 'node_modules/.bin/tsc'), ['-p', tsconfigPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+  // Via `process.execPath` + the package's bin script: `node_modules/.bin/tsc`
+  // is a POSIX shell shim that `execFileSync` cannot spawn on Windows.
+  execFileSync(process.execPath, [join(ROOT, 'node_modules/typescript/bin/tsc'), '-p', tsconfigPath], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
   void version
 }
 
