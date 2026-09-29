@@ -1940,6 +1940,31 @@ describe('AgyAdapter', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
+  it('drops the cached model list on invalidateModelCache, re-probing on the next call', async () => {
+    // The cache is keyed to no account, so the events that switch the account
+    // discovery rides (activation, rotation) must drop it explicitly — this is
+    // the invalidation the session manager and the activate RPC call.
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
+      models: { 'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash' } },
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session({
+        auth: { access: 'token-123', refresh: 'r', expires: Date.now() + 3600000 },
+      }),
+      reportFailure: async () => {},
+    })
+
+    await adapter.listAllModels()
+    await adapter.listAllModels()
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+
+    adapter.invalidateModelCache()
+    await adapter.listAllModels()
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('records one usage sample per generation, with its token buckets', async () => {
     const recorded: Array<Record<string, unknown>> = []
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([

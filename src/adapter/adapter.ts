@@ -274,6 +274,20 @@ export class AgyAdapter extends LlmAdapter {
     return task
   }
 
+  /**
+   * Drop the cached model list.
+   *
+   * Model discovery is account-scoped (what `fetchAvailableModels` reports and
+   * which proxy it rides depend on the account), but the cache is deliberately
+   * keyed to NO account: a keyed read would have to call `getSession()` on
+   * every hit, and that call can probe quota or refresh a token — the network
+   * cost this cache exists to remove. Every event that can switch the account
+   * discovery rides (activation, rotation) therefore drops the cache instead.
+   */
+  invalidateModelCache(): void {
+    this.cachedModels = null
+  }
+
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return resolveAgyModel(provider, model)
   }

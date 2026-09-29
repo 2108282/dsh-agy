@@ -73,6 +73,14 @@ export interface AgyManagementOptions {
    */
   listAllModels: () => Promise<readonly { id: string; name: string }[]>
   /**
+   * Drop the adapter's cached model list.
+   *
+   * The cache is keyed to no account (see `AgyAdapter.invalidateModelCache`), so
+   * the events that switch the account discovery rides must drop it explicitly —
+   * `account.activate` is the one such event reachable from this surface.
+   */
+  invalidateModelCache: () => void
+  /**
    * Harness web-server base URL, used to build the loopback OAuth redirect.
    * A function because the port in it is the one the server bound, known only
    * once it is listening — see `webBaseUrl` in `plugin.ts`.
@@ -127,7 +135,7 @@ function toAccountUsageView(
 }
 
 export function createAgyManagement(options: AgyManagementOptions): AgyManagement {
-  const { store, sessions, stats, modelVisibility, listAllModels, baseUrl, notifyModelsChanged } = options
+  const { store, sessions, stats, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
   const thinkingBudget = options.thinkingBudget
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
@@ -275,14 +283,11 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
 
     'account.activate': async (payload) => {
       const index = asIndex(payload)
-      if (typeof sessions.activateAccount === 'function') {
-        await sessions.activateAccount(index)
-      } else {
-        await store.mutate((storage) => {
-          if (index >= storage.accounts.length) fail('account not found')
-          storage.activeIndex = index
-        })
-      }
+      await sessions.activateAccount(index)
+      // The activated account may see a different catalog, and the model-list
+      // cache is keyed to no account — drop it or the picker serves the
+      // previous account's list until the TTL expires.
+      invalidateModelCache()
       return { ok: true, index }
     },
 

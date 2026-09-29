@@ -113,9 +113,15 @@ export async function createAgyRuntime(ctx: Context): Promise<{
   })
   const modelVisibility = new ModelVisibility()
   const thinkingBudget = new ThinkingBudgetStore()
+  // The adapter's model-list cache is keyed to no account (see
+  // `AgyAdapter.invalidateModelCache`), so every event that can switch the
+  // account discovery rides must drop it. The adapter does not exist yet when
+  // the session manager is constructed, hence the late-bound reference.
+  let invalidateModelCache: () => void = () => {}
   const sessions = new AgySessionManager({
     store,
     recordUsage: (record) => { stats.record(record) },
+    onRotate: () => { invalidateModelCache() },
   })
   // Optional background health probe (DSH_AGY_HEALTH_INTERVAL_MS), off by default.
   const healthIntervalMs = Number(process.env.DSH_AGY_HEALTH_INTERVAL_MS ?? 0)
@@ -135,6 +141,7 @@ export async function createAgyRuntime(ctx: Context): Promise<{
     tieredBudgetFor: () => thinkingBudget.tieredBudget(),
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })
+  invalidateModelCache = () => { adapter.invalidateModelCache() }
   // Warm up the model list in the background so the first model/effort selection
   // in DSH has zero latency and shows no loading spinner.
   void adapter.listAllModels().catch(() => {})
