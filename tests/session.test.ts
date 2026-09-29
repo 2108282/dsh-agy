@@ -131,6 +131,42 @@ describe('AgySessionManager', () => {
     expect(next!.index).toBe(1)
   })
 
+  it('clears session affinity when an account is activated', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // Start conversation on account 0
+    const first = await sessions.getSession('gemini-3-flash', undefined, 'chat-1')
+    expect(first!.index).toBe(0)
+
+    // Activate account 1 explicitly
+    await sessions.activateAccount(1)
+    expect((await store.load()).activeIndex).toBe(1)
+
+    // Next turn in the same conversation immediately uses account 1
+    const second = await sessions.getSession('gemini-3-flash', undefined, 'chat-1')
+    expect(second!.index).toBe(1)
+  })
+
+  it('rotates active index on 429 quota_exhausted', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const rotations: string[] = []
+    const sessions = new AgySessionManager({ store, onRotate: (from, to) => rotations.push(`${from}->${to}`) })
+
+    const session = await sessions.getSession()
+    expect(session!.index).toBe(0)
+
+    // Report quota exhaustion (action: 'cool')
+    await sessions.reportFailure('rate-limit', session!, {
+      rateLimitCategory: 'quota_exhausted',
+    })
+    const after = await store.load()
+    expect(after.activeIndex).toBe(1)
+    expect(rotations).toEqual(['0->1'])
+  })
+
   it('regenerates the fingerprint on repeated rate-limits (bounded history)', async () => {
     stubTokenEndpoint()
     const store = new InMemoryAccountStore(storage([account()]))
@@ -297,7 +333,7 @@ describe('usage-driven selection', () => {
     }
   }
 
-  it('ranks the requested family and picks the account with expiring headroom', async () => {
+  it('prioritizes the activated account while it has quota, and rotates when exhausted', async () => {
     stubTokenEndpoint()
     const store = new InMemoryAccountStore(storage([
       quotaAccount('a@x', { google: { remainingFraction: 0.9 } }),
@@ -305,14 +341,23 @@ describe('usage-driven selection', () => {
     ], 1))
     const sessions = new AgySessionManager({ store })
 
-    // a holds the headroom that would expire unused → ranked first for gemini,
-    // re-balancing away from the active account (b).
+    // b is active and has quota (0.2) -> prioritized, activeIndex stays 1.
     const session = await sessions.getSession('gemini-3.5-flash')
-    expect(session!.index).toBe(0)
+    expect(session!.index).toBe(1)
+    expect((await store.load()).activeIndex).toBe(1)
+
+    // When b's quota is exhausted (0 remaining with future reset), rotate to a.
+    const resetTime = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+    await store.mutate((s) => {
+      s.accounts[1]!.cachedQuota!.google!.remainingFraction = 0
+      s.accounts[1]!.cachedQuota!.google!.resetTime = resetTime
+    })
+    const nextSession = await sessions.getSession('gemini-3.5-flash')
+    expect(nextSession!.index).toBe(0)
     expect((await store.load()).activeIndex).toBe(0)
   })
 
-  it('breaks the affinity pin when the pinned account family is drained', async () => {
+  it('breaks the affinity pin when the pinned account family is exhausted', async () => {
     stubTokenEndpoint()
     const store = new InMemoryAccountStore(storage([
       quotaAccount('a@x', { google: { remainingFraction: 0.5 } }),
@@ -320,12 +365,19 @@ describe('usage-driven selection', () => {
     ], 0))
     const sessions = new AgySessionManager({ store })
 
+    // Active account a is picked and pinned.
     const first = await sessions.getSession('gemini-3.5-flash')
-    expect(first!.index).toBe(1) // b holds more headroom → picked and pinned
-    // b's google family drops below the soft threshold.
-    await store.mutate((s) => { s.accounts[1]!.cachedQuota!.google!.remainingFraction = 0.05 })
+    expect(first!.index).toBe(0)
+
+    // a's google family becomes exhausted (0 remaining with future reset).
+    const resetTime = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+    await store.mutate((s) => {
+      s.accounts[0]!.cachedQuota!.google!.remainingFraction = 0
+      s.accounts[0]!.cachedQuota!.google!.resetTime = resetTime
+    })
     const second = await sessions.getSession('gemini-3.5-flash')
-    expect(second!.index).toBe(0)
+    expect(second!.index).toBe(1)
+    expect((await store.load()).activeIndex).toBe(1)
   })
 
   it('uses a below-threshold account when it is the only candidate', async () => {

@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
-import { apply, orderModels, tokenText } from '../src/client/index.ts'
+import { apply, orderModels, resolveSelectedAccountIndex, tokenText } from '../src/client/index.ts'
 import { en, zh } from '../src/client/locales.ts'
-import type { ModelView } from '../src/rpc-contract.ts'
+import type { AccountView, ModelView } from '../src/rpc-contract.ts'
 
 /** Minimal client context: locale, connection (RPC transport), and the slot registry. */
 function makeContext(options: { withConnection?: boolean } = {}) {
@@ -261,5 +261,60 @@ describe('token count formatting', () => {
     expect(tokenText(100_000)).toBe('100K')
     expect(tokenText(9_999_999)).toBe('10.0M')
     expect(tokenText(10_000_000)).toBe('10.0M')
+  })
+})
+
+describe('resolveSelectedAccountIndex', () => {
+  function view(index: number, active = false): AccountView {
+    return {
+      index,
+      email: `acc${index}@example.com`,
+      projectId: 'proj',
+      active,
+      state: active ? 'active' : 'cooling',
+      cooldownUntil: null,
+      cooldownReason: null,
+      cooldownSetAt: null,
+      verificationUrl: null,
+      verificationRequired: false,
+      rateLimits: null,
+      fingerprint: null,
+      fingerprintHistory: 0,
+      proxy: null,
+      usage: null,
+      limits: null,
+      limitsUpdatedAt: null,
+    }
+  }
+
+  it('selects the active account (badge "current") by default when selected is null', () => {
+    const accounts = [view(0, false), view(1, true), view(2, false)]
+    expect(resolveSelectedAccountIndex(accounts, null)).toBe(1)
+  })
+
+  it('falls back to index 0 when no account is active and selected is null', () => {
+    const accounts = [view(0, false), view(1, false)]
+    expect(resolveSelectedAccountIndex(accounts, null)).toBe(0)
+  })
+
+  it('returns 0 for an empty accounts array', () => {
+    expect(resolveSelectedAccountIndex([], null)).toBe(0)
+    expect(resolveSelectedAccountIndex([], 2)).toBe(0)
+  })
+
+  it('preserves valid user-selected index', () => {
+    const accounts = [view(0, false), view(1, true), view(2, false)]
+    expect(resolveSelectedAccountIndex(accounts, 0)).toBe(0)
+    expect(resolveSelectedAccountIndex(accounts, 2)).toBe(2)
+  })
+
+  it('safely recovers to active account or clamps when selected index is out of bounds', () => {
+    const accountsWithActive = [view(0, false), view(1, true)]
+    expect(resolveSelectedAccountIndex(accountsWithActive, 5)).toBe(1)
+    expect(resolveSelectedAccountIndex(accountsWithActive, -1)).toBe(1)
+
+    const accountsNoActive = [view(0, false), view(1, false)]
+    expect(resolveSelectedAccountIndex(accountsNoActive, 5)).toBe(1)
+    expect(resolveSelectedAccountIndex(accountsNoActive, -1)).toBe(0)
   })
 })

@@ -630,6 +630,24 @@ function AccountDetail(props: {
   return h('div', { className: 'agy-detail' }, identity, actions, limitsBlock, usageBlock, proxyBlock)
 }
 
+/**
+ * Pick the selected account index: defaults to the active account (badge "current")
+ * when present, otherwise falls back to index 0. Clamps to valid bounds.
+ */
+export function resolveSelectedAccountIndex(
+  accounts: readonly AccountView[],
+  selected: number | null,
+): number {
+  if (accounts.length === 0) return 0
+  if (selected !== null) {
+    if (selected >= 0 && selected < accounts.length) return selected
+    const activePos = accounts.findIndex((a) => a.active)
+    return activePos >= 0 ? activePos : Math.min(Math.max(selected, 0), accounts.length - 1)
+  }
+  const activePos = accounts.findIndex((a) => a.active)
+  return activePos >= 0 ? activePos : 0
+}
+
 function AccountsTab(props: {
   accounts: AccountView[]
   busy: boolean
@@ -637,15 +655,24 @@ function AccountsTab(props: {
   t: T
 }): ReactNode {
   const { accounts, busy, handlers, t } = props
-  const [selected, setSelected] = useState(0)
+  const [selected, setSelected] = useState<number | null>(null)
+  const selectedRef = useRef<HTMLDivElement | null>(null)
+
+  // Clamp by index, not by re-deriving a "selected id": deletion renumbers every
+  // row, so an id-based selection would have to be remapped anyway.
+  const index = resolveSelectedAccountIndex(accounts, selected)
+  const current = accounts[index]
+
+  // Hooks MUST run unconditionally: an early `return` above any hook changes
+  // this component's hook count between renders, desyncing React and throwing
+  // React error #310 (white-screen).
+  useEffect(() => {
+    selectedRef.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [index])
 
   if (accounts.length === 0) {
     return card(t('colAccount'), h('div', { className: 'agy-empty' }, t('emptyAccounts')))
   }
-  // Clamp by index, not by re-deriving a "selected id": deletion renumbers every
-  // row, so an id-based selection would have to be remapped anyway.
-  const index = Math.min(selected, accounts.length - 1)
-  const current = accounts[index]
 
   // A selectable row: a div with a real button role, so it is reachable and
   // operable from the keyboard. Wrapping the row in a <button> would nest the
@@ -653,6 +680,7 @@ function AccountsTab(props: {
   // handling are declared here instead.
   const rows = accounts.map((account, at) => h('div', {
     key: String(account.index),
+    ref: at === index ? selectedRef : undefined,
     className: 'agy-rowitem',
     'data-clickable': 'true',
     'data-selected': at === index,
@@ -680,11 +708,15 @@ function AccountsTab(props: {
     stateBadge(account.state, account.state === 'cooling'
       ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil)}`
       : stateLabel(account.state, t)),
-    account.active ? null : button(t('actionActivate'), () => { handlers.onActivate(account.index) },
-      { size: 'sm', disabled: busy }),
+    account.active ? null : button(t('actionActivate'), () => {
+      setSelected(at)
+      handlers.onActivate(account.index)
+    }, { size: 'sm', disabled: busy }),
     button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }),
-    button(t('actionDelete'), () => { handlers.onDelete(account.index) },
-      { size: 'sm', variant: 'danger', disabled: busy }))))
+    button(t('actionDelete'), () => {
+      setSelected(null)
+      handlers.onDelete(account.index)
+    }, { size: 'sm', variant: 'danger', disabled: busy }))))
 
   return h('div', { className: 'agy-root' },
     // The container-query wrapper the `.agy-split` breakpoint measures; see

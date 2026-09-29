@@ -564,6 +564,26 @@ function parseFutureResetMs(resetTime: string | undefined, now: number): number 
 }
 
 /**
+ * Whether the requested family on this account is fully quota-exhausted
+ * (remainingFraction <= 0 or weeklyFraction <= 0 with future reset,
+ * or cooling down for quota-exhausted).
+ */
+export function isFamilyQuotaExhausted(account: ManagedAccount, family?: ModelFamily, now = Date.now()): boolean {
+  if (account.cooldownReason === 'quota-exhausted' && (account.coolingDownUntil ?? 0) > now) {
+    return true
+  }
+  const quota = familyQuotaFor(account, family)
+  if (!quota) return false
+  const spent = (fraction: number | undefined, resetTime: string | undefined, threshold = 0): boolean => {
+    if (typeof fraction !== 'number' || fraction > threshold || !resetTime) return false
+    const resetMs = parseFutureResetMs(resetTime, now)
+    return resetMs !== undefined && resetMs > now
+  }
+  return spent(quota.remainingFraction, quota.resetTime, 0)
+    || spent(quota.weeklyFraction, quota.weeklyResetTime, WEEKLY_QUOTA_THRESHOLD)
+}
+
+/**
  * Rank pool candidates for one request, mirroring AuthStorage's antigravity
  * ordering: unblocked first (earliest unblock time among blocked), hot windows
  * last, measured usage before unmeasured, required-drain descending, then

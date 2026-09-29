@@ -61,11 +61,12 @@
     "verify:metadata-acceptance": "tsx scripts/verify-metadata-acceptance.mts",
     "verify:claude-parts": "tsx scripts/verify-claude-parts.mts",
     "verify:thinking-config": "tsx scripts/verify-thinking-config.mts",
-    "verify:thinking-levels": "tsx scripts/verify-thinking-levels.mts"
+    "verify:thinking-levels": "tsx scripts/verify-thinking-levels.mts",
+    "verify:dsh-llm-compat": "tsx scripts/verify-dsh-llm-compat.mts"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-llm": "^0.1.5-rc.1"
+    "@deepseek-ai/dsh-llm": "^0.1.5-rc.1 || ^0.2.0-rc.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
