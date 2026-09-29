@@ -680,6 +680,28 @@ describe('quota family mapping', () => {
     // The label is consulted only when no bucket id is recognizable.
     expect(familiesForGroup(group('Claude and GPT models', 'renamed-5h'))).toEqual(['anthropic', 'openai'])
   })
+
+  it('resolves a family only for a bucket whose window the cache can hold', () => {
+    // #56: the family came from the id PREFIX alone while the window came from
+    // the token — two independent decisions nothing checked for agreement. An
+    // unrecognized token still claimed the family, so the reading it carried was
+    // filed by whichever field the token named.
+    expect(familiesForBucketId('gemini-weekly', 'fortnightly')).toEqual([])
+    // The id advertises the WEEKLY window while the token claims the 5-hour one.
+    // Resolving `google` here is exactly the shape that files a multi-day
+    // fraction as `remainingFraction`, where `isFamilyDrained` /
+    // `parseFutureResetMs` then block the account for days on a misread window.
+    expect(familiesForBucketId('gemini-weekly', '5h')).toEqual([])
+    // The agreed pairs still resolve.
+    expect(familiesForBucketId('gemini-weekly', 'weekly')).toEqual(['google'])
+    expect(familiesForBucketId('gemini-5h', '5h')).toEqual(['google'])
+    // `daily` parses and display-sorts, but `CachedQuota` has no field for it,
+    // so it must not resolve a family either.
+    expect(familiesForBucketId('gemini-daily', 'daily')).toEqual([])
+    // The one-argument form is window-aware too: it reads the id's own token.
+    expect(familiesForBucketId('gemini-5h')).toEqual(['google'])
+    expect(familiesForBucketId('gemini-daily')).toEqual([])
+  })
 })
 
 describe('family quota ingestion', () => {
@@ -903,6 +925,27 @@ describe('family quota ingestion', () => {
       else if (spec.kind === 'weekly') expect(ingested['google']?.weeklyFraction).toBe(0.5)
       else expect(ingested).toEqual({})
     }
+  })
+
+  it('cannot file a weekly reading under the 5-hour field when the bucket id disagrees', () => {
+    // The end-to-end hazard from #56: the id says WEEKLY, the token says 5h. The
+    // family resolved from the id prefix while the field was chosen from the
+    // token, so the multi-day fraction landed in `remainingFraction` — where
+    // `isFamilyDrained` blocks the account for days on a window it misread.
+    const mismatched = {
+      name: 'unrelated',
+      windows: [{ bucketId: 'gemini-weekly', window: '5h' as const, remainingFraction: 0.004, resetTime: null }],
+    }
+    expect(ingestQuotaGroups([mismatched])).toEqual({})
+    expect(familiesForGroup(mismatched)).toEqual([])
+
+    // Stronger: even when the LABEL resolves a family, the mismatched window
+    // must still write NO field. The empty-record guard then drops it instead of
+    // letting it replace a live measurement.
+    expect(ingestQuotaGroups([{
+      name: 'Gemini Models',
+      windows: [{ bucketId: 'gemini-weekly', window: '5h' as const, remainingFraction: 0.004, resetTime: null }],
+    }])).toEqual({})
   })
 })
 

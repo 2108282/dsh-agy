@@ -77,14 +77,30 @@ function earliestResetTime(a?: string, b?: string): string | undefined {
  * counts Claude and GPT under one third-party counter, so the weekly budget
  * belongs to both. No model-id prefix rule can recover that split, which is why
  * the mapping lives here rather than in `modelFamilyOf`.
+ *
+ * Window-aware as of #56: a bucket id resolves a family only when the window it
+ * describes is one `CachedQuota` can hold AND the id agrees with the token (see
+ * `agreedWindowKind`). The prefix and the window were two independent decisions
+ * once, and an unrecognized window still claimed a family.
  */
-export function familiesForBucketId(bucketId: string): ModelFamily[] {
+export function familiesForBucketId(bucketId: string, window?: string): ModelFamily[] {
   const id = bucketId.toLowerCase()
-  if (id.startsWith('gemini-')) return ['google']
-  if (id.startsWith('3p-') || id.startsWith('third_party-')) return ['anthropic', 'openai']
-  if (id.startsWith('claude-')) return ['anthropic']
-  if (id.startsWith('gpt-') || id.startsWith('openai-')) return ['openai']
-  return []
+  const families: ModelFamily[] = []
+  if (id.startsWith('gemini-')) families.push('google')
+  else if (id.startsWith('3p-') || id.startsWith('third_party-')) families.push('anthropic', 'openai')
+  else if (id.startsWith('claude-')) families.push('anthropic')
+  else if (id.startsWith('gpt-') || id.startsWith('openai-')) families.push('openai')
+  if (families.length === 0) return []
+  // Window-aware (see `agreedWindowKind`): a bucket whose window the cache cannot
+  // hold — or whose id disagrees with the token — resolves NO family. The prefix
+  // alone is not enough, because the field the reading lands in is chosen from
+  // the token, and an unagreed pair files a weekly fraction as a 5-hour one.
+  //
+  // `window` is the parsed `QuotaWindow.window` when the caller has it; the
+  // bucket id's own token is the fallback, so the one-argument form is safe too.
+  const declared = window === undefined ? advertisedWindowOf(id) : window.toLowerCase()
+  if (declared === undefined || agreedWindowKind(id, declared) === undefined) return []
+  return families
 }
 
 /**
@@ -136,6 +152,39 @@ function windowKind(window: string): 'rolling' | 'weekly' | undefined {
   return QUOTA_WINDOWS[window.toLowerCase()]?.kind
 }
 
+/** The window token a bucket id advertises, when it ends with one upstream names. */
+function advertisedWindowOf(bucketId: string): string | undefined {
+  const id = bucketId.toLowerCase()
+  const token = id.slice(id.lastIndexOf('-') + 1)
+  return QUOTA_WINDOWS[token] ? token : undefined
+}
+
+/**
+ * The field a window belongs in, decided from an AGREED (id, token) pair — or
+ * `undefined` when the pair cannot be agreed.
+ *
+ * The family used to come from the bucket id's prefix while the field came from
+ * the window token, as two independent decisions nothing checked against each
+ * other. A bucket whose window the cache cannot hold still claimed the family,
+ * and its reading was then filed by whichever field the TOKEN named. `gemini-weekly`
+ * declaring `5h` is the shape that puts a multi-day weekly fraction into
+ * `remainingFraction` (the 5-hour field), where `isFamilyDrained` and
+ * `parseFutureResetMs` block the account for days on a window they misread.
+ *
+ * Refusing an unagreed pair is deliberately the strict option: the permissive
+ * mapping is exactly the coupling that let two window vocabularies drift into
+ * destroying a measurement. A bucket id that advertises no recognizable token is
+ * held to the declared one alone, so a rename does not silently disable the cache.
+ */
+function agreedWindowKind(bucketId: string, window: string): 'rolling' | 'weekly' | undefined {
+  const declared = window.toLowerCase()
+  const kind = windowKind(declared)
+  if (kind === undefined) return undefined
+  const advertised = advertisedWindowOf(bucketId)
+  if (advertised !== undefined && advertised !== declared) return undefined
+  return kind
+}
+
 /** The families one group belongs to: its bucket ids first, its label second. */
 export function familiesForGroup(group: QuotaGroup): ModelFamily[] {
   const families: ModelFamily[] = []
@@ -143,7 +192,7 @@ export function familiesForGroup(group: QuotaGroup): ModelFamily[] {
     if (!families.includes(family)) families.push(family)
   }
   for (const window of group.windows) {
-    for (const family of familiesForBucketId(window.bucketId)) add(family)
+    for (const family of familiesForBucketId(window.bucketId, window.window)) add(family)
   }
   if (families.length === 0) {
     for (const family of familiesForGroupName(group.name)) add(family)
@@ -171,7 +220,9 @@ export function ingestQuotaGroups(groups: QuotaGroup[]): Record<string, CachedQu
     let rolling: QuotaWindow | undefined
     let weekly: QuotaWindow | undefined
     for (const window of group.windows) {
-      const kind = windowKind(window.window)
+      // The AGREED pair, not the token alone: a mismatched bucket must write no
+      // field even when the group's label resolved a family (see agreedWindowKind).
+      const kind = agreedWindowKind(window.bucketId, window.window)
       if (kind === 'rolling') rolling ??= window
       else if (kind === 'weekly') weekly ??= window
     }
