@@ -679,7 +679,7 @@ export class AgySessionManager {
     if (!picked) {
       const quotaExhausted = (account: ManagedAccount): boolean => {
         if (account.cooldownReason === 'quota-exhausted' && (account.coolingDownUntil ?? 0) > now) return true
-        const quota = familyQuotaFor(account, family)
+        const quota = familyQuotaFor(account, family, now)
         if (!quota) return false
         // BOTH windows, matching `rankPoolCandidates`, which blocks on a spent week
         // as well as on a spent 5-hour bucket. Reading only `remainingFraction`
