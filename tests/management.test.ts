@@ -53,6 +53,7 @@ function makeHarness(options: {
   exportBlob?: unknown
   checkAccounts?: unknown
   limitsResult?: { measured: string[], failed: string[], skipped: number }
+  baseUrl?: () => string
 } = {}): Harness {
   const accounts = options.accounts ?? [account()]
   const store = makeStore(accounts, options.activeIndex ?? 0)
@@ -117,7 +118,7 @@ function makeHarness(options: {
       { id: 'model-a', name: 'Model A' },
       { id: 'model-b', name: 'Model B' },
     ],
-    baseUrl: 'http://127.0.0.1:3080',
+    baseUrl: options.baseUrl ?? (() => 'http://127.0.0.1:3080'),
   })
   // A getter, not a copied primitive: the counter changes after this return.
   return {
@@ -691,6 +692,17 @@ describe('agy management RPC', () => {
       // The verifier travels in the state payload, never as a bare parameter.
       expect(parsed.searchParams.get('state')).toBeTruthy()
       void vi
+    })
+
+    it('reads the base URL when the authorization is issued, not when management is built', async () => {
+      // The web entry builds management before the server's listen callback
+      // has necessarily reported the bound port; a URL copied at construction
+      // would pin whatever stood in for it then.
+      let port = 0
+      const { management } = makeHarness({ baseUrl: () => `http://127.0.0.1:${port}` })
+      port = 54775
+      const { url } = await management.call('auth.url', {}) as { url: string }
+      expect(new URL(url).searchParams.get('redirect_uri')).toBe('http://127.0.0.1:54775/agy/oauth-callback')
     })
   })
 })
