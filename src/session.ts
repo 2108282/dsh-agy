@@ -163,6 +163,22 @@ export class AgySessionManager {
   private readonly refreshInFlight = new Map<string, Promise<OAuthAuthDetails | undefined>>()
   /** In-flight quota fetches keyed by account: concurrent selections share one fetchAvailableModels call. */
   private readonly quotaRefreshInFlight = new Map<string, Promise<QuotaRefreshResult | null>>()
+  /**
+   * In-flight `retrieveUserQuotaSummary` probes keyed by account.
+   *
+   * ONE promise per account per cycle, shared by BOTH consumers:
+   * `refreshLimits` (display, writes `cachedLimits`) and `refreshQuotaCache`
+   * (scheduling, writes `cachedQuota`). Since #48 both read the same endpoint for
+   * the same account, so a stale account paid two round trips where one would
+   * do; `quotaRefreshInFlight` de-duplicated only WITHIN the scheduling path.
+   * Sharing makes the two caches agree on what upstream actually said.
+   *
+   * It carries the FETCH and nothing else: the invariant that `refreshLimits`
+   * must never write `cachedQuota` (which `rankPoolCandidates` turns into a
+   * `blockedUntil`) is about WHERE a result lands, and each path still decides
+   * that for itself.
+   */
+  private readonly quotaSummaryInFlight = new Map<string, Promise<QuotaGroup[]>>()
   private readonly failureCounts = new Map<string, number>()
   /** Accounts whose request-time project discovery already failed (no retry per request). */
   private readonly projectRetryFailed = new Set<string>()
@@ -390,6 +406,50 @@ export class AgySessionManager {
   }
 
   /**
+   * Probe `retrieveUserQuotaSummary` for one account, sharing ONE in-flight
+   * promise with every other caller in this cycle.
+   *
+   * Returns `[]` on any failure — the fetch itself already answers a dead
+   * endpoint with an empty list — so both consumers read "no groups" the same
+   * way. The promise is dropped as soon as it settles, so the NEXT cycle
+   * re-probes.
+   *
+   * The account's proxy is honoured here or the call would egress direct and
+   * leak the account's real IP, and one timeout bounds the whole endpoint
+   * fallback chain.
+   */
+  private probeQuotaSummary(account: ManagedAccount): Promise<QuotaGroup[]> {
+    const key = this.accountKey(account)
+    const existing = this.quotaSummaryInFlight.get(key)
+    if (existing) return existing
+    const probe = (async (): Promise<QuotaGroup[]> => {
+      try {
+        const auth = await this.accessTokenFor(account)
+        if (!auth) return []
+        const { fetchQuotaSummary } = await import('./adapter/quota-summary.ts')
+        const routed = accountFetch({ proxyUrl: account.proxy })
+        const bounded = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+          const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
+          const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+          return routed(input, { ...init, signal })
+        }
+        return await fetchQuotaSummary(auth.access, account.projectId, bounded)
+      } catch {
+        // Best-effort: an empty result is the caller's "unknown", never a throw.
+        return []
+      }
+    })()
+    this.quotaSummaryInFlight.set(key, probe)
+    const release = (): void => {
+      // Only drop the promise we created, so a slow settle cannot remove a later
+      // cycle's probe.
+      if (this.quotaSummaryInFlight.get(key) === probe) this.quotaSummaryInFlight.delete(key)
+    }
+    void probe.then(release, release)
+    return probe
+  }
+
+  /**
    * Refresh the display-only 5h/weekly windows for every enabled account.
    *
    * SEPARATE from `refreshQuotaCache`, and deliberately so. That method writes
@@ -446,16 +506,11 @@ export class AgySessionManager {
     const probes = await Promise.all(targets.map(async (account) => {
       const key = this.accountKey(account)
       try {
-        const auth = await this.accessTokenFor(account)
-        if (!auth) return { key, ok: false as const }
-        const { fetchQuotaSummary } = await import('./adapter/quota-summary.ts')
-        const routed = accountFetch({ proxyUrl: account.proxy })
-        const bounded = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-          const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
-          const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
-          return routed(input, { ...init, signal })
-        }
-        const groups = await fetchQuotaSummary(auth.access, account.projectId, bounded)
+        // The SHARED probe: the scheduling path joins the same in-flight promise
+        // for this account, so one cycle pays one round trip and both caches read
+        // the same groups. It only carries the FETCH — this path still writes
+        // `cachedLimits` and nothing else.
+        const groups = await this.probeQuotaSummary(account)
         if (groups.length === 0) return { key, ok: false as const }
         return { key, ok: true as const, groups, updatedAt: Date.now() }
       } catch {
@@ -515,7 +570,6 @@ export class AgySessionManager {
           const auth = await this.accessTokenFor(account)
           if (!auth) return null
           const { fetchAvailableModels } = await import('./adapter/models.ts')
-          const { fetchQuotaSummary } = await import('./adapter/quota-summary.ts')
           const routed = accountFetch({ proxyUrl: account.proxy })
           // ONE timeout per probe, both bounded by the same budget the model
           // probe already used; the account's proxy is honoured on both, or the
@@ -525,13 +579,14 @@ export class AgySessionManager {
             const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
             return routed(input, { ...init, signal })
           }
-          // The weekly window comes ONLY from the summary endpoint, so it is read
-          // HERE (the scheduling path) and never in `refreshLimits`: that one is
-          // display-only, and a display refresh must not reach `cachedQuota`,
-          // which decides blocking.
+          // The weekly window comes ONLY from the summary endpoint. It is read
+          // through the SHARED probe, so the display path and this one pay one
+          // round trip per account instead of two and cannot disagree about what
+          // upstream said. This path still decides WHERE the result lands —
+          // `cachedQuota`, the scheduling cache `refreshLimits` must never touch.
           const [discovered, groups] = await Promise.all([
             fetchAvailableModels(auth.access, account.projectId, bounded),
-            fetchQuotaSummary(auth.access, account.projectId, bounded),
+            this.probeQuotaSummary(account),
           ])
           const quotas = ingestFamilyQuotas(discovered, groups, account.cachedQuota)
           return { key, quotas, updatedAt: Date.now() }
