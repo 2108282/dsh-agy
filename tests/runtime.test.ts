@@ -41,6 +41,7 @@ import {
   familiesForGroup,
   familiesForGroupName,
   familyKeyOf,
+  familyQuotaFor,
   ingestFamilyQuotas,
   ingestQuotaGroups,
   isFamilyDrained,
@@ -1090,6 +1091,44 @@ describe('family quota helpers', () => {
       Date.now() - 2 * 60 * 1000,
     )
     expect(isQuotaStale(weekly)).toBe(true)
+  })
+
+  it('selects the most-pressured family across BOTH windows, not the 5-hour one alone', () => {
+    // #55: selection compared only `entry.remainingFraction`. The google family
+    // is the pressured one here — its WEEK is spent while its 5-hour bucket is
+    // healthy — but 0.2 < 0.9, so the anthropic record won `mostPressured` and
+    // `isQuotaStale` sized the TTL from a family nobody was asking about.
+    const acc = withQuota({
+      google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' },
+      anthropic: { remainingFraction: 0.2 },
+    })
+    expect(familyQuotaFor(acc)).toBe(acc.cachedQuota!.google)
+  })
+
+  it('sizes the refresh interval from the spent week of the most-pressured family', () => {
+    // Two minutes old: the spent week puts the chosen record on the 60s TTL,
+    // while a 5-hour-only record at 0.2 would hold it for five minutes.
+    const acc = withQuota(
+      {
+        google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' },
+        anthropic: { remainingFraction: 0.2 },
+      },
+      Date.now() - 2 * 60 * 1000,
+    )
+    expect(isQuotaStale(acc)).toBe(true)
+  })
+
+  it('lets a weekly-only record drive the refresh interval', () => {
+    // #48 deliberately produces records carrying ONLY a weekly reading (the
+    // anthropic/openai entries of a Gemini-only pool). The old guard
+    // `typeof entry.remainingFraction !== 'number' -> continue` skipped them
+    // outright, so those records were invisible to TTL sizing.
+    const weeklyOnly = withQuota(
+      { anthropic: { weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' } },
+      Date.now() - 2 * 60 * 1000,
+    )
+    expect(familyQuotaFor(weeklyOnly)).toBe(weeklyOnly.cachedQuota!.anthropic)
+    expect(isQuotaStale(weeklyOnly)).toBe(true)
   })
 
   it('flags stale caches by health-based TTL', () => {
