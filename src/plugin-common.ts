@@ -135,6 +135,9 @@ export async function createAgyRuntime(ctx: Context): Promise<{
     tieredBudgetFor: () => thinkingBudget.tieredBudget(),
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })
+  // Warm up the model list in the background so the first model/effort selection
+  // in DSH has zero latency and shows no loading spinner.
+  void adapter.listAllModels().catch(() => {})
   // Persist the ledger on normal termination. `exit` covers both a graceful
   // shutdown and the CLI's explicit `process.exit` calls.
   //

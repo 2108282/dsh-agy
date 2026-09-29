@@ -27,6 +27,7 @@ import {
   familyQuotaFor,
   ingestFamilyQuotas,
   isFamilyDrained,
+  isFamilyQuotaExhausted,
   isLimitsStale,
   isQuotaStale,
   modelFamilyOf,
@@ -293,6 +294,32 @@ export class AgySessionManager {
     for (const [conversation, pin] of this.affinity) {
       if (pin.key === accountKey) this.affinity.delete(conversation)
     }
+  }
+
+  /**
+   * Clear all session affinity pins.
+   *
+   * Called when an account is explicitly activated by the user, so all
+   * ongoing and upcoming conversations immediately steer to the newly
+   * activated account rather than staying pinned to the previous one.
+   */
+  clearAllAffinity(): void {
+    this.affinity.clear()
+  }
+
+  /**
+   * Explicitly activate an account by index: sets `storage.activeIndex = index`,
+   * clears session affinity pins so conversations immediately switch to the
+   * activated account, and resets transient failure counts.
+   */
+  async activateAccount(index: number): Promise<void> {
+    await this.store.mutate((storage) => {
+      if (index < 0 || index >= storage.accounts.length) {
+        throw new Error('account not found')
+      }
+      storage.activeIndex = index
+    })
+    this.clearAllAffinity()
   }
 
   constructor(options: SessionManagerOptions) {
@@ -656,7 +683,7 @@ export class AgySessionManager {
           last.enabled !== false &&
           !isCoolingDown(last, now) &&
           !isFamilyRateLimited(last, familyKey, now) &&
-          !isFamilyDrained(last, family, now)
+          !isFamilyQuotaExhausted(last, family, now)
         ) {
           return { account: last, index: lastIndex }
         }
@@ -666,6 +693,20 @@ export class AgySessionManager {
       .map((account, index) => ({ account, index }))
       .filter(({ account }) => account.enabled !== false)
     if (eligible.length === 0) return undefined
+
+    // Prioritize the active account as long as it is enabled, not cooling down,
+    // not family rate-limited, and not quota-exhausted.
+    const active = storage.accounts[storage.activeIndex]
+    const isActiveUsable = (acc: ManagedAccount | undefined): acc is ManagedAccount =>
+      acc !== undefined
+      && acc.enabled !== false
+      && !isCoolingDown(acc, now)
+      && !isFamilyRateLimited(acc, familyKey, now)
+      && !isFamilyQuotaExhausted(acc, family, now)
+
+    if (isActiveUsable(active) && this.inFlightCount(this.accountKey(active), now) < MAX_IN_FLIGHT_PER_ACCOUNT) {
+      return { account: active, index: storage.activeIndex }
+    }
 
     const ranked = rankPoolCandidates(eligible, model, now, storage.activeIndex)
     // Prefer an account with in-flight headroom so concurrent conversations
@@ -955,6 +996,13 @@ export class AgySessionManager {
       if (decision.action === 'revoke') {
         this.tokenCache.delete(key)
         this.failureCounts.delete(key)
+        const currentIndex = storage.accounts.findIndex((a) => this.accountKey(a) === key)
+        const nextIndex = pickNextAccountIndex(storage.accounts, currentIndex >= 0 ? currentIndex : storage.activeIndex, Date.now())
+        if (nextIndex !== storage.activeIndex) {
+          storage.activeIndex = nextIndex
+          nextIndexToRotate = nextIndex
+        }
+        this.clearAffinityForAccount(key)
         return
       }
 
@@ -992,7 +1040,7 @@ export class AgySessionManager {
         }
       }
 
-      if (decision.action === 'rotate') {
+      if (decision.action === 'rotate' || decision.action === 'cool') {
         const currentIndex = storage.accounts.findIndex((a) => this.accountKey(a) === key)
         const familyKey = familyKeyOf(info?.model)
         const nextIndex = pickNextAccountIndex(storage.accounts, currentIndex >= 0 ? currentIndex : storage.activeIndex, Date.now(), familyKey)

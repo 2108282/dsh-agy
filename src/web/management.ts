@@ -275,10 +275,14 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
 
     'account.activate': async (payload) => {
       const index = asIndex(payload)
-      await store.mutate((storage) => {
-        if (index >= storage.accounts.length) fail('account not found')
-        storage.activeIndex = index
-      })
+      if (typeof sessions.activateAccount === 'function') {
+        await sessions.activateAccount(index)
+      } else {
+        await store.mutate((storage) => {
+          if (index >= storage.accounts.length) fail('account not found')
+          storage.activeIndex = index
+        })
+      }
       return { ok: true, index }
     },
 

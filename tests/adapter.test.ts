@@ -160,6 +160,100 @@ describe('translate', () => {
     ])
   })
 
+  /**
+   * 0.2.0 promotes a tool result to a `tool`-ROLE message and drops
+   * `tool-result` from the content-block union, so the same turn arrives with
+   * the correlation on the message. The wire shape must not depend on which
+   * dsh-llm line produced it, which is what routing both through
+   * `toolResultPart` buys.
+   */
+  it('maps a 0.2.0 tool-role message to the same functionResponse part', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', source: { kind: 'model', provider: 'agy', model: 'm' }, content: [
+        { type: 'tool-call', id: 'call-1', name: 'web_search', arguments: '{"q":"x"}' },
+      ]},
+      {
+        id: 'b',
+        role: 'tool',
+        source: { kind: 'tool', callId: 'call-1' },
+        toolCallId: 'call-1',
+        content: [{ type: 'text', text: 'result!' }],
+      },
+      { id: 'c', role: 'user', content: [{ type: 'text', text: 'thanks' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-1', name: 'web_search', response: { result: 'result!', is_error: false } } },
+    ])
+  })
+
+  it('carries a 0.2.0 tool-role message isError onto the wire', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call-9', name: 'read', arguments: '{}' },
+      ]},
+      { id: 'b', role: 'tool', toolCallId: 'call-9', isError: true, content: [{ type: 'text', text: 'boom' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-9', name: 'read', response: { result: 'boom', is_error: true } } },
+    ])
+  })
+
+  /**
+   * On BOTH supported lines a loop-built request carries the system prompt as a
+   * leading `system`-role message and leaves `options.system` undefined. Sending
+   * it through the conversation path put the prompt on the wire as an ordinary
+   * USER turn; it belongs in `systemInstruction`.
+   */
+  it('lifts a system-role message into systemInstruction, not a user turn', () => {
+    const messages = [
+      { id: 's', role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: 'be terse' }] },
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.systemInstruction).toEqual({ parts: [{ text: 'be terse' }] })
+    expect(body.request.contents).toHaveLength(1)
+    expect(body.request.contents[0]).toEqual({ role: 'user', parts: [{ text: 'hello' }] })
+  })
+
+  it('keeps options.system ahead of the system-role message when both are present', () => {
+    const messages = [
+      { id: 's', role: 'system', content: [{ type: 'text', text: 'from history' }] },
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({
+        system: 'from options',
+        messages: messages as unknown as GenerateOptions['messages'],
+      }),
+      {},
+    )
+    expect(body.request.systemInstruction).toEqual({ parts: [{ text: 'from options\n\nfrom history' }] })
+  })
+
+  it('skips a developer message: tool bookkeeping is not a conversation turn', () => {
+    const messages = [
+      { id: 'd', role: 'developer', content: [{ type: 'tool-addition', toolName: 'read' }] },
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents).toEqual([{ role: 'user', parts: [{ text: 'hello' }] }])
+  })
+
   // Empty text parts 400 the Claude path ("messages.N.content.M.text.text:
   // Field required"); upstream's own normalization drops them on the Gemini
   // path, so they are dropped here too. The trailing user turn keeps
@@ -1811,6 +1905,39 @@ describe('AgyAdapter', () => {
     const visible = await adapter.listModels('agy')
     const all = await adapter.listAllModels()
     expect(visible.map((model) => model.id)).toEqual(all.map((model) => model.id))
+  })
+
+  it('caches listAllModels across multiple calls within the TTL, avoiding duplicate network requests', async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
+      models: {
+        'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash' },
+      },
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session({
+        auth: { access: 'token-123', refresh: 'r', expires: Date.now() + 3600000 },
+      }),
+      reportFailure: async () => {},
+    })
+
+    // First call fetches from upstream
+    const first = await adapter.listModels('agy')
+    expect(first.some((m) => m.id === 'gemini-3.8-flash-tiered')).toBe(true)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+
+    // Repeated calls (e.g. DSH 0.2.0-rc.1 selectModel -> requireModel -> listModels on each model/effort change)
+    const second = await adapter.listModels('agy')
+    const third = await adapter.listAllModels()
+    expect(second).toBe(first)
+    expect(third).toBe(first)
+    // No new network requests were fired
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+
+    // Forced refresh bypasses cache
+    await adapter.listAllModels(true)
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
   it('records one usage sample per generation, with its token buckets', async () => {

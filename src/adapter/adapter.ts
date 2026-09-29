@@ -200,8 +200,13 @@ export function buildRequestHeaders(session: AgyAccountSession): Record<string, 
   }
 }
 
+/** How long discovered models stay cached before re-probing upstream (10 minutes). */
+export const MODEL_LIST_CACHE_TTL_MS = 10 * 60 * 1000
+
 export class AgyAdapter extends LlmAdapter {
   private readonly options: AgyAdapterOptions
+  private cachedModels: { models: readonly LlmModelInfo[]; at: number } | null = null
+  private inFlightModels: Promise<readonly LlmModelInfo[]> | null = null
 
   constructor(options: AgyAdapterOptions) {
     super()
@@ -227,24 +232,46 @@ export class AgyAdapter extends LlmAdapter {
   /**
    * The complete catalog, ignoring the user's hidden set.
    *
+   * Cached in memory for `MODEL_LIST_CACHE_TTL_MS` with in-flight deduplication.
+   * DSH 0.2.0-rc.1 calls `listModels` on every model and effort selection via
+   * `requireModel`; without caching, each click paid a multi-second round-trip to
+   * Google's `fetchAvailableModels` through the proxy, showing a loading spinner
+   * on every interaction.
+   *
    * The settings page lists models through this rather than `listModels`: if it
    * read the filtered list, a hidden model would vanish from the page along
    * with the switch that hides it, leaving no way to turn it back on without
    * hand-editing the file.
    */
-  async listAllModels(): Promise<readonly LlmModelInfo[]> {
-    try {
-      const session = await this.options.getSession()
-      // Model discovery is account-scoped: route it through the account's proxy
-      // (control-plane class, so the standard timeouts apply).
-      const routing = { proxyUrl: session?.account.proxy }
-      return await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
-    } catch (error) {
-      if (error instanceof AgyPoolBlockedError || error instanceof AgyAuthError) {
-        return catalogModelList()
-      }
-      throw error
+  async listAllModels(force = false): Promise<readonly LlmModelInfo[]> {
+    const now = Date.now()
+    if (!force && this.cachedModels && now - this.cachedModels.at < MODEL_LIST_CACHE_TTL_MS) {
+      return this.cachedModels.models
     }
+    if (this.inFlightModels) return this.inFlightModels
+
+    const task = (async () => {
+      try {
+        const session = await this.options.getSession()
+        // Model discovery is account-scoped: route it through the account's proxy
+        // (control-plane class, so the standard timeouts apply).
+        const routing = { proxyUrl: session?.account.proxy }
+        const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
+        this.cachedModels = { models, at: Date.now() }
+        return models
+      } catch (error) {
+        if (error instanceof AgyPoolBlockedError || error instanceof AgyAuthError) {
+          return catalogModelList()
+        }
+        if (this.cachedModels) return this.cachedModels.models
+        throw error
+      } finally {
+        this.inFlightModels = null
+      }
+    })()
+
+    this.inFlightModels = task
+    return task
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {

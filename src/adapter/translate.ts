@@ -18,11 +18,18 @@
  */
 
 import { createHash } from 'node:crypto'
-import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
 import { catalogModel, isLevelThinkingModel } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
+import {
+  conversationMessages,
+  normalizeMessages,
+  systemTextFromMessages,
+  type AgyBlockView,
+  type AgyMessageView,
+} from './dsh-view.ts'
 
 export { isClaudeModel, supportsMultimodalFiles }
 export type { AgyResolvedMultimodalFile }
@@ -150,8 +157,8 @@ function sanitizeToolSchema(schema: unknown): unknown {
   return result
 }
 
-/** Collect tool-call names by id so tool-result blocks can name their function. */
-function buildToolNameIndex(messages: readonly Message[]): Map<string, string> {
+/** Collect tool-call names by id so tool results can name their function. */
+function buildToolNameIndex(messages: readonly AgyMessageView[]): Map<string, string> {
   const index = new Map<string, string>()
   for (const message of messages) {
     for (const block of message.content) {
@@ -163,8 +170,39 @@ function buildToolNameIndex(messages: readonly Message[]): Map<string, string> {
   return index
 }
 
+/**
+ * The single producer of a `functionResponse` part.
+ *
+ * Both supported dsh-llm vocabularies funnel through here: a 0.1.5
+ * `tool-result` CONTENT BLOCK and a 0.2.0 `tool`-ROLE message describe the same
+ * result, and this channel's wire shape must not depend on which one arrived.
+ */
+function toolResultPart(
+  toolCallId: string,
+  isError: boolean,
+  content: readonly AgyBlockView[],
+  toolNames: Map<string, string>,
+): AgyPart {
+  const name = toolNames.get(toolCallId) ?? toolCallId
+  const text = content
+    .filter((block): block is Extract<AgyBlockView, { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+  return {
+    functionResponse: {
+      // The Anthropic-backed Claude path requires tool_result.tool_use_id
+      // and 400s without it ("messages.N.content.M.tool_result.tool_use_id:
+      // Field required"); the Gemini path accepts the id too, so it is
+      // always carried rather than branched per family (live-verified).
+      id: toolCallId,
+      name,
+      response: { result: text, is_error: isError },
+    },
+  }
+}
+
 function blockToParts(
-  block: ContentBlock,
+  block: AgyBlockView,
   toolNames: Map<string, string>,
   images: Map<string, AgyResolvedImage>,
   /** Claude path: replayed thought blocks are rejected outright (see below). */
@@ -229,24 +267,13 @@ function blockToParts(
         functionCall: { id: block.id, name: block.name, args },
       }]
     }
-    case 'tool-result': {
-      const name = toolNames.get(block.toolCallId) ?? block.toolCallId
-      const text = block.content
-        .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n')
-      return [{
-        functionResponse: {
-          // The Anthropic-backed Claude path requires tool_result.tool_use_id
-          // and 400s without it ("messages.N.content.M.tool_result.tool_use_id:
-          // Field required"); the Gemini path accepts the id too, so it is
-          // always carried rather than branched per family (live-verified).
-          id: block.toolCallId,
-          name,
-          response: { result: text, is_error: block.isError === true },
-        },
-      }]
-    }
+    case 'tool-result':
+      return [toolResultPart(
+        block.toolCallId,
+        block.isError === true,
+        block.content,
+        toolNames,
+      )]
     case 'image': {
       // Bytes are pre-resolved by the adapter before translation; a missing
       // entry breaks that invariant and must fail loudly, never silently drop.
@@ -262,13 +289,29 @@ function blockToParts(
 }
 
 function messageToContent(
-  message: Message,
+  message: AgyMessageView,
   toolNames: Map<string, string>,
   images: Map<string, AgyResolvedImage>,
   multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>,
   messageIndex?: number,
   dropThoughts = false,
 ): AgyContent | null {
+  // 0.2.0 promotes a tool result to a `tool`-ROLE message, with the correlation
+  // (`toolCallId`/`isError`) on the message instead of on a `tool-result` block.
+  // It projects to the same wire part, and a `functionResponse` always belongs
+  // to a user-side turn on this channel.
+  if (message.role === 'tool') {
+    if (message.toolCallId === undefined) {
+      // Uncorrelated: the Claude path 400s without an id, and inventing one
+      // would mis-address a real call. Dropped like any other unreadable shape.
+      return null
+    }
+    return {
+      role: 'user',
+      parts: [toolResultPart(message.toolCallId, message.isError === true, message.content, toolNames)],
+    }
+  }
+
   const parts = message.content.flatMap((block) =>
     // Non-user images are out of scope by policy (docs ANTIGRAVITY-API §3.2):
     // skip them like any other untranslatable block instead of tripping the
@@ -411,16 +454,26 @@ export function toAgyRequestBody(
     tieredBudgetFor?: () => number | undefined
   },
 ): AgyRequestBody {
-  const toolNames = buildToolNameIndex(options.messages)
+  const messages = normalizeMessages(options.messages)
+  const toolNames = buildToolNameIndex(messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
   const multimodalFiles = supportsMultimodalFiles(options.model) ? context.multimodalFiles : undefined
   const claude = isClaudeModel(options.model)
-  let contents = options.messages
+  let contents = conversationMessages(messages)
     .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude))
     .filter((c): c is AgyContent => c !== null)
   if (claude) {
     contents = stripTrailingModelTurn(contents)
   }
+
+  // `options.system` is the one-shot channel and is undefined for a loop-built
+  // request, whose derived history carries the prompt as a `system`-role message
+  // (documented identically on both supported dsh-llm lines). Both sources feed
+  // the system slot; routing the message through `contents` instead would put
+  // the system prompt on the wire as a USER turn.
+  const systemText = [options.system, systemTextFromMessages(messages)]
+    .filter((text): text is string => typeof text === 'string' && text !== '')
+    .join('\n\n')
 
   const tools = toolsToDeclarations(options.tools)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}
@@ -489,7 +542,7 @@ export function toAgyRequestBody(
     requestType: 'agent',
     request: {
       contents,
-      ...(options.system ? { systemInstruction: { parts: [{ text: options.system }] } } : {}),
+      ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
       ...(tools ? { tools } : {}),
       ...(tools ? { toolConfig: { functionCallingConfig: { mode: 'VALIDATED' } } } : {}),
       ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),

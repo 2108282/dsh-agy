@@ -14,8 +14,9 @@
  */
 
 import { readFile } from 'node:fs/promises'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { catalogModel } from './catalog.ts'
+import { normalizeMessages } from './dsh-view.ts'
 
 /**
  * MIME type mapping for Gemini supported multimodal formats.
@@ -145,20 +146,20 @@ export interface ResolveMultimodalOptions {
  * text handle block remains intact in the prompt.
  */
 export async function resolveMultimodalFiles(
-  optionsOrMessages: GenerateOptions | readonly Message[],
+  optionsOrMessages: GenerateOptions | readonly unknown[],
   modelOrOptions?: string | ResolveMultimodalOptions,
   extraOptions?: ResolveMultimodalOptions,
 ): Promise<Map<string, AgyResolvedMultimodalFile[]>> {
-  let messages: readonly Message[]
+  let raw: readonly unknown[]
   let model: string
   let customOptions: ResolveMultimodalOptions | undefined
 
   if ('messages' in optionsOrMessages) {
-    messages = optionsOrMessages.messages ?? []
+    raw = optionsOrMessages.messages ?? []
     model = optionsOrMessages.model ?? ''
     customOptions = typeof modelOrOptions === 'object' ? modelOrOptions : extraOptions
   } else {
-    messages = optionsOrMessages
+    raw = optionsOrMessages
     if (typeof modelOrOptions === 'string') {
       model = modelOrOptions
       customOptions = extraOptions
@@ -167,6 +168,10 @@ export async function resolveMultimodalFiles(
       customOptions = modelOrOptions
     }
   }
+
+  // Normalized through the same boundary the translator uses, so this path sees
+  // one vocabulary whichever dsh-llm line fed the request (see dsh-view.ts).
+  const messages = normalizeMessages(raw)
 
   const result = new Map<string, AgyResolvedMultimodalFile[]>()
   if (!supportsMultimodalFiles(model)) {
