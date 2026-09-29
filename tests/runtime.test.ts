@@ -41,6 +41,7 @@ import {
   familiesForGroup,
   familiesForGroupName,
   familyKeyOf,
+  familyQuotaFor,
   ingestFamilyQuotas,
   ingestQuotaGroups,
   isFamilyDrained,
@@ -679,6 +680,28 @@ describe('quota family mapping', () => {
     // The label is consulted only when no bucket id is recognizable.
     expect(familiesForGroup(group('Claude and GPT models', 'renamed-5h'))).toEqual(['anthropic', 'openai'])
   })
+
+  it('resolves a family only for a bucket whose window the cache can hold', () => {
+    // #56: the family came from the id PREFIX alone while the window came from
+    // the token — two independent decisions nothing checked for agreement. An
+    // unrecognized token still claimed the family, so the reading it carried was
+    // filed by whichever field the token named.
+    expect(familiesForBucketId('gemini-weekly', 'fortnightly')).toEqual([])
+    // The id advertises the WEEKLY window while the token claims the 5-hour one.
+    // Resolving `google` here is exactly the shape that files a multi-day
+    // fraction as `remainingFraction`, where `isFamilyDrained` /
+    // `parseFutureResetMs` then block the account for days on a misread window.
+    expect(familiesForBucketId('gemini-weekly', '5h')).toEqual([])
+    // The agreed pairs still resolve.
+    expect(familiesForBucketId('gemini-weekly', 'weekly')).toEqual(['google'])
+    expect(familiesForBucketId('gemini-5h', '5h')).toEqual(['google'])
+    // `daily` parses and display-sorts, but `CachedQuota` has no field for it,
+    // so it must not resolve a family either.
+    expect(familiesForBucketId('gemini-daily', 'daily')).toEqual([])
+    // The one-argument form is window-aware too: it reads the id's own token.
+    expect(familiesForBucketId('gemini-5h')).toEqual(['google'])
+    expect(familiesForBucketId('gemini-daily')).toEqual([])
+  })
 })
 
 describe('family quota ingestion', () => {
@@ -903,6 +926,27 @@ describe('family quota ingestion', () => {
       else expect(ingested).toEqual({})
     }
   })
+
+  it('cannot file a weekly reading under the 5-hour field when the bucket id disagrees', () => {
+    // The end-to-end hazard from #56: the id says WEEKLY, the token says 5h. The
+    // family resolved from the id prefix while the field was chosen from the
+    // token, so the multi-day fraction landed in `remainingFraction` — where
+    // `isFamilyDrained` blocks the account for days on a window it misread.
+    const mismatched = {
+      name: 'unrelated',
+      windows: [{ bucketId: 'gemini-weekly', window: '5h' as const, remainingFraction: 0.004, resetTime: null }],
+    }
+    expect(ingestQuotaGroups([mismatched])).toEqual({})
+    expect(familiesForGroup(mismatched)).toEqual([])
+
+    // Stronger: even when the LABEL resolves a family, the mismatched window
+    // must still write NO field. The empty-record guard then drops it instead of
+    // letting it replace a live measurement.
+    expect(ingestQuotaGroups([{
+      name: 'Gemini Models',
+      windows: [{ bucketId: 'gemini-weekly', window: '5h' as const, remainingFraction: 0.004, resetTime: null }],
+    }])).toEqual({})
+  })
 })
 
 describe('quota summary (5h / weekly windows)', () => {
@@ -1049,6 +1093,44 @@ describe('family quota helpers', () => {
     expect(isQuotaStale(weekly)).toBe(true)
   })
 
+  it('selects the most-pressured family across BOTH windows, not the 5-hour one alone', () => {
+    // #55: selection compared only `entry.remainingFraction`. The google family
+    // is the pressured one here — its WEEK is spent while its 5-hour bucket is
+    // healthy — but 0.2 < 0.9, so the anthropic record won `mostPressured` and
+    // `isQuotaStale` sized the TTL from a family nobody was asking about.
+    const acc = withQuota({
+      google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' },
+      anthropic: { remainingFraction: 0.2 },
+    })
+    expect(familyQuotaFor(acc)).toBe(acc.cachedQuota!.google)
+  })
+
+  it('sizes the refresh interval from the spent week of the most-pressured family', () => {
+    // Two minutes old: the spent week puts the chosen record on the 60s TTL,
+    // while a 5-hour-only record at 0.2 would hold it for five minutes.
+    const acc = withQuota(
+      {
+        google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' },
+        anthropic: { remainingFraction: 0.2 },
+      },
+      Date.now() - 2 * 60 * 1000,
+    )
+    expect(isQuotaStale(acc)).toBe(true)
+  })
+
+  it('lets a weekly-only record drive the refresh interval', () => {
+    // #48 deliberately produces records carrying ONLY a weekly reading (the
+    // anthropic/openai entries of a Gemini-only pool). The old guard
+    // `typeof entry.remainingFraction !== 'number' -> continue` skipped them
+    // outright, so those records were invisible to TTL sizing.
+    const weeklyOnly = withQuota(
+      { anthropic: { weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' } },
+      Date.now() - 2 * 60 * 1000,
+    )
+    expect(familyQuotaFor(weeklyOnly)).toBe(weeklyOnly.cachedQuota!.anthropic)
+    expect(isQuotaStale(weeklyOnly)).toBe(true)
+  })
+
   it('flags stale caches by health-based TTL', () => {
     expect(isQuotaStale(account())).toBe(true)
     expect(isQuotaStale(withQuota({ google: { remainingFraction: 0.9 } }))).toBe(false)
@@ -1172,5 +1254,28 @@ describe('pool candidate ranking', () => {
     expect(measured.usedFraction).toBeUndefined()
     // Measured before unmeasured, so the weekly-only account leads.
     expect(ranked.map((c) => c.index)).toEqual([0, 1])
+  })
+})
+
+describe('quota family mapping (#58 label branches)', () => {
+  it('does not guess a third-party family from a label that names no member', () => {
+    expect(familiesForGroupName('third-party models')).toEqual([])
+    expect(familiesForGroupName('3p models')).toEqual([])
+    expect(familiesForGroupName('Claude and GPT models')).toEqual(['anthropic', 'openai'])
+    expect(familiesForGroupName('Gemini Models')).toEqual(['google'])
+    expect(familiesForBucketId('3p-weekly')).toEqual(['anthropic', 'openai'])
+  })
+
+  it('keeps the FIRST bucket of a window within one group, and the most pressured across groups', () => {
+    const first = { bucketId: 'gemini-5h', window: '5h' as const, remainingFraction: 0.8, resetTime: null }
+    const second = { bucketId: 'gemini-5h', window: '5h' as const, remainingFraction: 0.2, resetTime: null }
+    expect(ingestQuotaGroups([{ name: 'x', windows: [first, second] }]).google?.remainingFraction).toBe(0.8)
+
+    const low = { bucketId: 'gemini-5h', window: '5h' as const, remainingFraction: 0.1, resetTime: null }
+    const twoGroups = ingestQuotaGroups([
+      { name: 'x', windows: [first] },
+      { name: 'y', windows: [low] },
+    ])
+    expect(twoGroups.google?.remainingFraction).toBe(0.1)
   })
 })
