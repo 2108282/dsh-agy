@@ -16,6 +16,7 @@ import {
   RATE_LIMIT_COOLDOWN_MS,
   clearExpiredState,
   decideRotation,
+  hasHealthyCachedQuota,
   isCoolingDown,
   isFamilyRateLimited,
   parseFutureResetMs,
@@ -482,13 +483,27 @@ export class AgySessionManager {
       const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
       // Only `cachedLimits` — never `cachedQuota`, which is what keeps this
       // incapable of blocking an account.
-      if (target) target.cachedLimits = { groups: update.groups, updatedAt: update.updatedAt }
+      if (target) {
+        target.cachedLimits = { groups: update.groups, updatedAt: update.updatedAt }
+        if (target.cooldownReason === 'quota-exhausted' && hasHealthyCachedQuota(target, now)) {
+          target.coolingDownUntil = undefined
+          target.cooldownReason = undefined
+          target.cooldownSetAt = undefined
+        }
+      }
     }
     try {
       await this.store.mutate((s) => {
         for (const update of updates) {
           const target = s.accounts.find((candidate) => this.accountKey(candidate) === update.key)
-          if (target) target.cachedLimits = { groups: update.groups, updatedAt: update.updatedAt }
+          if (target) {
+            target.cachedLimits = { groups: update.groups, updatedAt: update.updatedAt }
+            if (target.cooldownReason === 'quota-exhausted' && hasHealthyCachedQuota(target, now)) {
+              target.coolingDownUntil = undefined
+              target.cooldownReason = undefined
+              target.cooldownSetAt = undefined
+            }
+          }
         }
       })
     } catch {
@@ -554,6 +569,11 @@ export class AgySessionManager {
         if (target) {
           target.cachedQuota = update.quotas
           target.cachedQuotaUpdatedAt = update.updatedAt
+          if (target.cooldownReason === 'quota-exhausted' && hasHealthyCachedQuota(target, now)) {
+            target.coolingDownUntil = undefined
+            target.cooldownReason = undefined
+            target.cooldownSetAt = undefined
+          }
         }
       }
       try {
@@ -563,6 +583,11 @@ export class AgySessionManager {
             if (target) {
               target.cachedQuota = update.quotas
               target.cachedQuotaUpdatedAt = update.updatedAt
+              if (target.cooldownReason === 'quota-exhausted' && hasHealthyCachedQuota(target, now)) {
+                target.coolingDownUntil = undefined
+                target.cooldownReason = undefined
+                target.cooldownSetAt = undefined
+              }
             }
           }
         })
@@ -1132,6 +1157,10 @@ export class AgySessionManager {
           target.verificationRequiredAt = undefined
           target.verificationRequiredReason = undefined
           target.verificationUrl = undefined
+          target.coolingDownUntil = undefined
+          target.cooldownReason = undefined
+          target.cooldownSetAt = undefined
+          target.rateLimitResetTimes = undefined
         }
       })
       // No model tokens are billed by a userinfo probe, but the call is a real

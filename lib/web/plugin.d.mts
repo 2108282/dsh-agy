@@ -1,9 +1,8 @@
 import { Context } from "@deepseek-ai/cordis";
 //#region src/web/plugin.d.ts
-declare const name = "dsh-agy-web";
+export declare const name = "dsh-agy-web";
 /** The one service every composition provides; the rest are resolved lazily. */
-declare const inject: string[];
-declare function apply(ctx: Context): void;
+export declare const inject: string[];
+export declare function apply(ctx: Context): void;
 //#endregion
-export { apply, inject, name };
 //# sourceMappingURL=plugin.d.mts.map
