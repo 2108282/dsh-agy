@@ -1131,6 +1131,46 @@ describe('family quota helpers', () => {
     expect(isQuotaStale(weeklyOnly)).toBe(true)
   })
 
+  it('ignores an expired weekly window when SELECTING the most-pressured family (#69)', () => {
+    // The google weekly reset is long past — the window it describes no longer
+    // exists, so its 0.004 must not win the selection. Under #63 as merged it
+    // did: the google record was chosen over the live anthropic 0.2, and
+    // `isQuotaStale` sized the TTL from the healthy 0.9 (15 min) instead of the
+    // real pressure (5 min) — the exact "exhaustion discovered late" shape #55
+    // described, re-entering through the expired-reset hole.
+    const acc = withQuota(
+      {
+        google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2020-01-01T00:00:00Z' },
+        anthropic: { remainingFraction: 0.2 },
+      },
+      Date.now() - 6 * 60 * 1000,
+    )
+    expect(familyQuotaFor(acc)).toBe(acc.cachedQuota!.anthropic)
+    expect(isQuotaStale(acc)).toBe(true)
+  })
+
+  it('treats a record whose only reading is an expired window as having no live reading', () => {
+    // The with-family consumers guard expired windows individually, so the
+    // selection must not hand them a record that represents the account by a
+    // window that no longer exists — the weekly-only record is skipped outright.
+    const deadWeeklyOnly = withQuota({ anthropic: { weeklyFraction: 0.004, weeklyResetTime: '2020-01-01T00:00:00Z' } })
+    expect(familyQuotaFor(deadWeeklyOnly)).toBeUndefined()
+    // A LIVE weekly-only record still participates (the #55 case above).
+    const liveWeeklyOnly = withQuota({ anthropic: { weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' } })
+    expect(familyQuotaFor(liveWeeklyOnly)).toBe(liveWeeklyOnly.cachedQuota!.anthropic)
+  })
+
+  it('does not make an unknown-family candidate hot from a dead weekly window', () => {
+    // `rankPoolCandidates` for an unrecognized model id passes `family`
+    // `undefined` and takes the same no-family selection. A spent-but-expired
+    // weekly made the account `hot` (weeklyUsed 0.996 >= 0.85) for a request
+    // whose window had already reset; only a LIVE spent window may.
+    const past = withQuota({ google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2020-01-01T00:00:00Z' } })
+    expect(rankPoolCandidates([{ account: past, index: 0 }], 'some-unknown-model').map((c) => c.hot)).toEqual([false])
+    const future = withQuota({ google: { remainingFraction: 0.9, weeklyFraction: 0.004, weeklyResetTime: '2099-01-01T00:00:00Z' } })
+    expect(rankPoolCandidates([{ account: future, index: 0 }], 'some-unknown-model').map((c) => c.hot)).toEqual([true])
+  })
+
   it('flags stale caches by health-based TTL', () => {
     expect(isQuotaStale(account())).toBe(true)
     expect(isQuotaStale(withQuota({ google: { remainingFraction: 0.9 } }))).toBe(false)

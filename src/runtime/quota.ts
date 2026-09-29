@@ -359,16 +359,30 @@ export function ingestFamilyQuotas(
 }
 
 /**
- * The lowest fraction a record reports across BOTH tracked windows — its overall
+ * The lowest fraction a record reports across its LIVE windows — its overall
  * pressure.
  *
- * `undefined` means the record carries no usable reading at all (neither window
- * measured), which is deliberately different from a measured zero: only a real
- * number can size a refresh interval.
+ * A window whose reset has already passed describes a window that no longer
+ * exists, so it does not count — the same rule `isQuotaStale` applies when it
+ * sizes the TTL from the selected record. Scoring a dead window would let one
+ * family's expired weekly reading win the selection and represent the account,
+ * masking another family's live pressure (issue #69: a dead weekly at 0.004
+ * beat a live 0.2 and stretched the refresh TTL from 5 to 15 minutes).
+ *
+ * `undefined` means the record carries no usable LIVE reading at all, which is
+ * deliberately different from a measured zero: only a real number can size a
+ * refresh interval.
  */
-function pressureScore(entry: CachedQuota): number | undefined {
-  const fractions = [entry.remainingFraction, entry.weeklyFraction]
-    .filter((fraction): fraction is number => typeof fraction === 'number' && Number.isFinite(fraction))
+function pressureScore(entry: CachedQuota, now: number): number | undefined {
+  const fractions: number[] = []
+  if (typeof entry.remainingFraction === 'number' && Number.isFinite(entry.remainingFraction)
+    && !resetInPast(entry.resetTime, now)) {
+    fractions.push(entry.remainingFraction)
+  }
+  if (typeof entry.weeklyFraction === 'number' && Number.isFinite(entry.weeklyFraction)
+    && !resetInPast(entry.weeklyResetTime, now)) {
+    fractions.push(entry.weeklyFraction)
+  }
   return fractions.length === 0 ? undefined : Math.min(...fractions)
 }
 
@@ -387,14 +401,22 @@ function pressureScore(entry: CachedQuota): number | undefined {
  * produces that shape legitimately (the anthropic/openai entries of a
  * Gemini-only pool), and the old `typeof entry.remainingFraction !== 'number'`
  * guard skipped it outright, leaving the week invisible to TTL sizing.
+ *
+ * Selection considers LIVE windows only (`pressureScore` drops a window whose
+ * reset has passed) — but the with-family path returns the record as-is either
+ * way, because its consumers guard each window individually.
+ *
+ * @param account - the account whose cache to read.
+ * @param family - the exact family's record; omit to select the most pressured.
+ * @param now - current time (Unix ms), which decides whether a window is live.
  */
-export function familyQuotaFor(account: ManagedAccount, family?: ModelFamily): CachedQuota | undefined {
+export function familyQuotaFor(account: ManagedAccount, family?: ModelFamily, now = Date.now()): CachedQuota | undefined {
   const cache = account.cachedQuota ?? {}
   if (family) return cache[family]
   let worst: CachedQuota | undefined
   let worstScore: number | undefined
   for (const entry of Object.values(cache)) {
-    const score = pressureScore(entry)
+    const score = pressureScore(entry, now)
     if (score === undefined) continue
     if (worstScore === undefined || score < worstScore) {
       worst = entry
@@ -407,7 +429,7 @@ export function familyQuotaFor(account: ManagedAccount, family?: ModelFamily): C
 /** Whether the account's quota cache needs a refresh (missing, or past its health-based TTL). */
 export function isQuotaStale(account: ManagedAccount, now = Date.now()): boolean {
   if (!account.cachedQuota || !account.cachedQuotaUpdatedAt) return true
-  const mostPressured = familyQuotaFor(account)
+  const mostPressured = familyQuotaFor(account, undefined, now)
   // A window whose reset has already passed describes a window that no longer
   // exists, so it must not drive the refresh INTERVAL either. A carried weekly
   // value kept returning the 60s TTL long after its reset, which re-probed both
@@ -467,7 +489,7 @@ function resetInPast(resetTime: string | undefined, now: number): boolean {
  * selectable until the next measurement replaces the stale value.
  */
 export function isFamilyDrained(account: ManagedAccount, family?: ModelFamily, now = Date.now()): boolean {
-  const quota = familyQuotaFor(account, family)
+  const quota = familyQuotaFor(account, family, now)
   if (!quota) return false
   if (
     typeof quota.remainingFraction === 'number'
@@ -559,10 +581,17 @@ export function rankPoolCandidates(
   const clampedStart = activePos >= 0 ? activePos : 0
   const ordered = entries.length === 0 ? [] : [...entries.slice(clampedStart), ...entries.slice(0, clampedStart)]
   const candidates: PoolCandidateWithOrder[] = ordered.map(({ account, index }, orderPos) => {
-    const quota = familyQuotaFor(account, family)
-    const remaining = quota?.remainingFraction
+    const quota = familyQuotaFor(account, family, now)
+    // A window whose reset has already passed describes a window that no longer
+    // exists — the same rule the block decision below applies through
+    // `parseFutureResetMs`. Without this guard a carried-forward weekly reading
+    // (kept until the next successful probe) made the candidate `hot` for
+    // `PRIMARY_WINDOW_HOT_FRACTION` on a window that had already refilled.
+    const live5h = quota !== undefined && !resetInPast(quota.resetTime, now)
+    const liveWeekly = quota !== undefined && !resetInPast(quota.weeklyResetTime, now)
+    const remaining = live5h ? quota.remainingFraction : undefined
     const used = typeof remaining === 'number' ? Math.min(Math.max(1 - remaining, 0), 1) : undefined
-    const weeklyRemaining = quota?.weeklyFraction
+    const weeklyRemaining = liveWeekly ? quota.weeklyFraction : undefined
     const weeklyUsed = typeof weeklyRemaining === 'number'
       ? Math.min(Math.max(1 - weeklyRemaining, 0), 1)
       : undefined
