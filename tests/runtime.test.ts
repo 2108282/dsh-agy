@@ -1256,3 +1256,26 @@ describe('pool candidate ranking', () => {
     expect(ranked.map((c) => c.index)).toEqual([0, 1])
   })
 })
+
+describe('quota family mapping (#58 label branches)', () => {
+  it('does not guess a third-party family from a label that names no member', () => {
+    expect(familiesForGroupName('third-party models')).toEqual([])
+    expect(familiesForGroupName('3p models')).toEqual([])
+    expect(familiesForGroupName('Claude and GPT models')).toEqual(['anthropic', 'openai'])
+    expect(familiesForGroupName('Gemini Models')).toEqual(['google'])
+    expect(familiesForBucketId('3p-weekly')).toEqual(['anthropic', 'openai'])
+  })
+
+  it('keeps the FIRST bucket of a window within one group, and the most pressured across groups', () => {
+    const first = { bucketId: 'gemini-5h', window: '5h' as const, remainingFraction: 0.8, resetTime: null }
+    const second = { bucketId: 'gemini-5h', window: '5h' as const, remainingFraction: 0.2, resetTime: null }
+    expect(ingestQuotaGroups([{ name: 'x', windows: [first, second] }]).google?.remainingFraction).toBe(0.8)
+
+    const low = { bucketId: 'gemini-5h', window: '5h' as const, remainingFraction: 0.1, resetTime: null }
+    const twoGroups = ingestQuotaGroups([
+      { name: 'x', windows: [first] },
+      { name: 'y', windows: [low] },
+    ])
+    expect(twoGroups.google?.remainingFraction).toBe(0.1)
+  })
+})
