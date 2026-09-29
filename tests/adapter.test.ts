@@ -300,6 +300,10 @@ describe('translate', () => {
               delete: { type: 'boolean', description: 'x', enum: [true] },
               // numeric enum items are rejected too -> only strings survive
               level: { type: 'integer', enum: [1, 2, 3] },
+              // empty-string enum items are rejected (cannot be empty) -> filtered out
+              permission: { type: 'string', enum: ['read-only', 'workspace-write', 'danger-full-access', ''] },
+              // all-empty enum items -> omitted entirely
+              cleared: { type: 'string', enum: ['', ''] },
               // string enum survives untouched
               state: { type: 'string', enum: ['open', 'closed'] },
               // union type arrays are rejected (Unknown name "type") -> first non-null type
@@ -315,6 +319,11 @@ describe('translate', () => {
     const p = body.request.tools![0].functionDeclarations[0].parameters as Record<string, any>
     expect(p.properties.delete).toEqual({ type: 'boolean', description: 'x' })
     expect(p.properties.level).toEqual({ type: 'integer' })
+    expect(p.properties.permission).toEqual({
+      type: 'string',
+      enum: ['read-only', 'workspace-write', 'danger-full-access'],
+    })
+    expect(p.properties.cleared).toEqual({ type: 'string' })
     expect(p.properties.state).toEqual({ type: 'string', enum: ['open', 'closed'] })
     expect(p.properties.value).toEqual({ type: 'string', description: 'Value to set.' })
     expect(p.properties.nullableValue).toEqual({ type: 'number', description: 'Nullable number.' })
@@ -340,7 +349,10 @@ describe('translate', () => {
       const items = node.enum as unknown[]
       expect(Array.isArray(items), `${path}.enum: expected array`).toBe(true)
       expect(items.length, `${path}.enum: empty enum is rejected upstream`).toBeGreaterThan(0)
-      for (const item of items) expect(typeof item, `${path}.enum item`).toBe('string')
+      for (const item of items) {
+        expect(typeof item, `${path}.enum item`).toBe('string')
+        expect((item as string).length, `${path}.enum item: empty string is rejected upstream`).toBeGreaterThan(0)
+      }
     }
     if ('required' in node) {
       for (const item of node.required as unknown[]) expect(typeof item, `${path}.required item`).toBe('string')
