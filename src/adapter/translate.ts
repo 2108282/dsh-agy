@@ -100,8 +100,8 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
  * Keyword VALUES are also constrained by the protobuf shape (verified
  * empirically): `type` must be a single enum string (union arrays like
  * `["string","number"]` are rejected) and every `enum` item must be a
- * string (booleans/numbers are rejected). Values are normalized to the
- * nearest valid form instead of being dropped wholesale.
+ * non-empty string (booleans/numbers/empty strings are rejected). Values are
+ * normalized to the nearest valid form instead of being dropped wholesale.
  */
 // Exported for the contract invariant test (tests/adapter.test.ts); not part of
 // the package public API (translate.ts is an internal module).
@@ -142,10 +142,10 @@ function sanitizeToolSchema(schema: unknown): unknown {
       continue
     }
     if (AGY_SCHEMA_LIST_KEYS.has(key)) {
-      // Upstream `enum` items must be strings; filter the rest and omit an
-      // empty enum entirely (an empty array would be rejected too).
+      // Upstream `enum` items must be non-empty strings; filter the rest
+      // and omit an empty enum entirely (an empty array would be rejected too).
       if (key === 'enum' && Array.isArray(value)) {
-        const filtered = value.filter((v): v is string => typeof v === 'string')
+        const filtered = value.filter((v): v is string => typeof v === 'string' && v.length > 0)
         if (filtered.length > 0) result[key] = filtered
       } else {
         result[key] = value
