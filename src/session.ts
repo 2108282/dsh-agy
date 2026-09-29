@@ -657,7 +657,8 @@ export class AgySessionManager {
 
   /**
    * Pick the account for one request: the affinity pin wins while it is fresh,
-   * healthy, and not drained for the requested model; otherwise the pool is
+   * healthy, and not quota-exhausted for the requested model; the explicitly
+   * activated account wins next while it is usable; otherwise the pool is
    * ranked by family-scoped usage (OMP-aligned) and the best candidate wins.
    */
   private async pickAccount(
@@ -672,8 +673,11 @@ export class AgySessionManager {
     const familyKey = familyKeyOf(model)
     // Conversation affinity: reuse the account this conversation is already
     // pinned to while it is fresh and healthy, so one conversation stays on one
-    // account. A drained family or a cooldown breaks the pin and re-ranks,
-    // mirroring OMP's pinned-until-unusable.
+    // account. A quota-exhausted family or a cooldown breaks the pin and
+    // re-ranks, mirroring OMP's pinned-until-unusable: the pin holds until the
+    // account is actually spent (a measured zero, not the soft-drain threshold
+    // `isFamilyDrained` applies when ranking), so the pin and the active-account
+    // preference below agree on when to let go.
     const pinnedKey = this.affinityFor(conversationKey, now)
     if (pinnedKey !== null) {
       const lastIndex = storage.accounts.findIndex((a) => this.accountKey(a) === pinnedKey)

@@ -47,7 +47,7 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 后端把工具 `parameters` 按严格的 protobuf `Schema` 解析：未知关键字（`$schema`、`propertyNames`、`pattern`、`minLength`、……）与非法值形状（`enum: [true]` → TYPE_STRING 400；`type: ["string","number"]` → Unknown name "type" 400）都会使整个请求失败。清洗器（`src/adapter/translate.ts` 的 `sanitizeToolSchema`）执行的是完整契约，而非逐关键字打补丁：
 
 - **关键字** — 只保留 `type, format, title, description, nullable, items, enum, default, properties, required, additionalProperties`。
-- **值** — `type` 必须是单个枚举字符串（union 数组归一化为首个非 `null` 类型，`"null"` 对应 `nullable`）；`enum` 项必须是字符串（非字符串项被过滤，空 enum 整体省略）；`properties` 是 name→schema 映射；`items` 是嵌套 schema；`additionalProperties` 接受嵌套 schema 或布尔（`false` = 禁止额外键；Antigravity 上游活体验证接受——OmniRoute 剥离仅因公共 Gemini API 拒绝）；`required` 是字符串数组。
+- **值** — `type` 必须是单个枚举字符串（union 数组归一化为首个非 `null` 类型，`"null"` 对应 `nullable`）；`enum` 项必须是非空字符串（非字符串与空字符串项都会被过滤——空项会 400 `cannot be empty`，已实测；全空的 enum 整体省略）；`properties` 是 name→schema 映射；`items` 是嵌套 schema；`additionalProperties` 接受嵌套 schema 或布尔（`false` = 禁止额外键；Antigravity 上游活体验证接受——OmniRoute 剥离仅因公共 Gemini API 拒绝）；`required` 是字符串数组。
 - **工具名** — `functionDeclarations[].name` 只接受 `[a-zA-Z0-9_]` 且 ≤64 字符（MCP 工具名任意；清洗，超长/重名追加 sha256 尾）。内置 Gemini 工具名（`google_search`、`web_search`、`search_web`、`googleSearch`）整体剔除（上游将其视为原生工具）。
 - **测试** — `tests/adapter.test.ts` 的 `assertUpstreamContract` 递归断言清洗后输出的每个关键字与值形状均合规，任何新未知关键字或非法值形状都会在 CI 失败（不必等用户撞 400）；每个已知的 400 形状都以 fixture 钉住。真实 MCP schema（GitHub MCP `issue_write` 正是 #4 触发源：boolean enum + union type）应进入语料，以暴露手写测试看不到的形状。
 
