@@ -294,6 +294,8 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
 
     'pool.status': async () => ({ busy: await sessions.inFlightAccounts() }),
 
+    'pool.recent': async () => ({ recent: stats.recentRequests() }),
+
     'account.activate': async (payload) => {
       const index = asIndex(payload)
       await sessions.activateAccount(index)

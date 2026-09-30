@@ -43,6 +43,15 @@ export const zh = {
 
   colAccount: '账号',
   colRequests: '请求',
+  // The recent-activity list's columns. Success/failure/limit/rotation reuse
+  // the existing result words; only the bespoke headers are new here.
+  colTime: '时间',
+  colResult: '结果',
+  colDuration: '耗时',
+  recentTitle: '最近请求',
+  recentHelp: '本进程内存中的最近 200 条（含轮换事件），不落盘、不跨进程合并。',
+  recentEmpty: '暂无最近记录',
+  recentOk: '成功',
   // The row's count is ALL-TIME, while the Usage tab defaults to "today" — the
   // bare 请求 label let the two figures read as the same quantity.
   rowRequestsTotal: '累计请求 {n}',
@@ -94,6 +103,7 @@ export const zh = {
   quotaResetIn: '重置 {value}',
   relNow: '即将',
   relJustNow: '刚刚',
+  relSeconds: '{n} 秒',
   relAgo: '{value}前',
   relMinutes: '{n} 分钟',
   relHours: '{n} 小时',
@@ -240,6 +250,13 @@ export const en: Record<AgyLocaleKey, string> = {
 
   colAccount: 'Account',
   colRequests: 'Requests',
+  colTime: 'Time',
+  colResult: 'Result',
+  colDuration: 'Duration',
+  recentTitle: 'Recent requests',
+  recentHelp: 'Last 200 records in this process\'s memory (rotation events included); never persisted, never merged across processes.',
+  recentEmpty: 'No recent activity',
+  recentOk: 'ok',
   // All-time, while the Usage tab defaults to "today" — see the zh note.
   rowRequestsTotal: '{n} requests in total',
   lastActive: 'active {ago}',
@@ -287,6 +304,7 @@ export const en: Record<AgyLocaleKey, string> = {
   quotaResetIn: 'resets {value}',
   relNow: 'shortly',
   relJustNow: 'just now',
+  relSeconds: '{n}s',
   relAgo: '{value} ago',
   relMinutes: '{n} min',
   relHours: '{n} h',

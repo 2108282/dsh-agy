@@ -123,6 +123,22 @@ export interface ModelView {
   disabled: boolean
 }
 
+/** One entry of the `pool.recent` list — a request or a rotation event. */
+export interface RecentRequestView {
+  /** Epoch ms the record was captured. */
+  at: number
+  /** Account key (email preferred), as the ledger stores it. */
+  account: string | null
+  model: string | null
+  /** 'rotation' marks a pool event; the rest are request sources. */
+  kind: 'chat' | 'cli' | 'verify' | 'test' | 'rotation'
+  ok: boolean
+  rateLimited: boolean
+  latencyMs: number | null
+  ttftMs: number | null
+  output: number | null
+}
+
 /** Aggregate view the Usage tab renders, folded host-side to keep the client thin. */
 export interface StatsView {
   /** When the ledger began collecting (Unix ms), or null when empty. */
@@ -185,6 +201,17 @@ export interface AgyRpcMethods {
     result: {
       busy: Array<{ index: number; email: string | null; count: number }>
     }
+  }
+  /**
+   * The most recent records this process has seen, newest first.
+   *
+   * The gap-filler between the live line ("now") and the ledger ("forever"):
+   * what just failed, what just triggered a rotation. In-memory only — a fresh
+   * process starts empty, and records another process wrote never appear here.
+   */
+  'pool.recent': {
+    payload: Record<string, never>
+    result: { recent: RecentRequestView[] }
   }
   'account.activate': { payload: { index: number }; result: { ok: true; index: number } }
   'account.delete': { payload: { index: number }; result: { ok: true } }

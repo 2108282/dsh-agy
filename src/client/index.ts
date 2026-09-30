@@ -49,6 +49,9 @@ const NS = 'agy'
 /** This section's translator. */
 type T = TranslateNS<typeof NS>
 
+/** One row of the recent-activity list (`pool.recent`). */
+type RecentEntry = AgyRpcResult<'pool.recent'>['recent'][number]
+
 /** RPC channel and endpoint the host registers as `/api/agy`. */
 const RPC_CHANNEL = '/api'
 const RPC_ENDPOINT = 'agy'
@@ -385,6 +388,18 @@ function agoText(iso: string | null, t: T, now: number): string {
           ? t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
           : t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
   return t('relAgo', { value })
+}
+
+/**
+ * Ago label with seconds resolution, for the recent list. `agoText` collapses
+ * the whole first minute into "just now", which is too coarse when the reader
+ * is watching live activity — here the seconds carry the information.
+ */
+function recentAgo(at: number, now: number, t: T): string {
+  const diff = now - at
+  if (diff < 10_000) return t('relJustNow')
+  if (diff < MINUTE_MS) return t('relSeconds', { n: Math.floor(diff / 1_000) })
+  return agoText(new Date(at).toISOString(), t, now)
 }
 
 // ─── building blocks ─────────────────────────────────────────────────────────
@@ -737,6 +752,8 @@ function AccountsTab(props: {
   busy: boolean
   /** Accounts with upstream requests in flight, from the latest pool.status. */
   busyNow: AgyRpcResult<'pool.status'>['busy']
+  /** RPC carrier, for the recent-activity card's own polling. */
+  rpc: AgyRpcClient
   handlers: AccountHandlers
   /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
   lang?: string
@@ -869,7 +886,10 @@ function AccountsTab(props: {
             },
             lang: props.lang,
             t,
-          }))))
+          })),
+    // The "what just happened" list, under the split: it is pool-level
+    // activity, not one account's, and the split owns the full height.
+    h(RecentCard, { rpc: props.rpc, t })))
 }
 
 /**
@@ -1311,6 +1331,102 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
       : null)
 
   return card(t('thinkingTitle'), block)
+}
+
+// ─── Recent activity ─────────────────────────────────────────────────────────
+
+/** Result vocabulary for one recent row; rotation events are their own kind. */
+function recentResultKind(entry: RecentEntry): 'ok' | 'fail' | 'limited' | 'rotation' {
+  if (entry.kind === 'rotation') return 'rotation'
+  if (entry.rateLimited) return 'limited'
+  if (!entry.ok) return 'fail'
+  return 'ok'
+}
+
+/**
+ * The "what just happened" list: the most recent records this process saw,
+ * newest first, collapsed by default and polled while open.
+ *
+ * A component (never called directly) — it owns hooks; see ThinkingSamples for
+ * the hook-order rule this file has been bitten by twice. The poll is the same
+ * 3s cadence as the live line and reads the host's memory ring, so an open
+ * list costs nothing upstream.
+ */
+function RecentCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+  const { rpc, t } = props
+  const [open, setOpen] = useState(false)
+  const [recent, setRecent] = useState<RecentEntry[] | null>(null)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+
+  const load = useCallback((): void => {
+    void rpc.call('pool.recent', {}).then((result) => {
+      if (alive.current) {
+        setRecent(result.recent)
+        setError(undefined)
+      }
+    }).catch((caught: unknown) => {
+      if (alive.current) setError(caught instanceof Error ? caught.message : String(caught))
+    })
+  }, [rpc])
+
+  // Loaded on first open (nobody needs it before that), then refreshed on the
+  // poll cadence while open. A closed list never fires.
+  useEffect(() => { if (open && recent === null) load() }, [open, recent, load])
+  useEffect(() => {
+    if (!open) return
+    const timer = setInterval(() => { if (!document.hidden) load() }, POOL_POLL_INTERVAL_MS)
+    return () => { clearInterval(timer) }
+  }, [open, load])
+
+  const now = Date.now()
+  const kindOf = (entry: RecentEntry): string => recentResultKind(entry)
+  const textOf = (entry: RecentEntry): string => {
+    switch (recentResultKind(entry)) {
+      case 'rotation': return t('colRotations')
+      case 'limited': return t('colRateLimited')
+      case 'fail': return t('colFailed')
+      default: return t('recentOk')
+    }
+  }
+
+  return h('div', { className: 'agy-disclosure agy-recent', 'data-open': open },
+    h('button', {
+      type: 'button',
+      className: 'agy-disclosure-toggle',
+      'aria-expanded': open,
+      onClick: () => { setOpen(!open) },
+    },
+    h('span', { className: 'agy-caret' }),
+    h('span', null, t('recentTitle')),
+    recent === null ? null : h('span', { className: 'agy-disclosure-meta' }, String(recent.length))),
+    open === false ? null : h('div', { className: 'agy-disclosure-body' },
+      error === undefined ? null : h('div', { className: 'agy-error' }, error),
+      hint(t('recentHelp')),
+      recent === null
+        ? h('div', { className: 'agy-empty' }, t('loading'))
+        : recent.length === 0
+          ? h('div', { className: 'agy-empty' }, t('recentEmpty'))
+          : h('div', { className: 'agy-table-wrap' },
+            table(
+              h('tr', null,
+                h('th', { style: { width: '72px' } }, t('colTime')),
+                h('th', null, t('colAccount')),
+                h('th', null, t('colModel')),
+                h('th', { style: { width: '64px' } }, t('colResult')),
+                h('th', { style: { width: '56px' } }, t('colDuration')),
+                h('th', { style: { width: '48px' } }, t('colOutput'))),
+              recent.map((entry, index) => h('tr', { key: `${entry.at}-${index}` },
+                h('td', null, recentAgo(entry.at, now, t)),
+                h('td', null, entry.account ?? '—'),
+                h('td', null, entry.model ?? '—'),
+                h('td', null, h('span', { className: 'agy-recent-state', 'data-kind': kindOf(entry) }, textOf(entry))),
+                h('td', null, entry.latencyMs === null ? '—' : formatDuration(entry.latencyMs)),
+                h('td', { className: 'agy-num' }, entry.output === null ? '—' : tokenText(entry.output))))))))
 }
 
 // ─── Usage tab ───────────────────────────────────────────────────────────────
@@ -1951,7 +2067,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): 
     }, label, count === undefined ? null : h('span', { className: 'agy-count' }, String(count)))
 
   const body = tab === 'accounts'
-    ? h(AccountsTab, { accounts, busy, busyNow: poolBusy, handlers, lang: props.lang, t })
+    ? h(AccountsTab, { accounts, busy, busyNow: poolBusy, handlers, lang: props.lang, rpc, t })
     : tab === 'models'
       ? modelError === undefined
         ? h(ModelsTab, {

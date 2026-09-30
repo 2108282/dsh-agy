@@ -364,6 +364,19 @@ const CSS = `
 /* Danger has no primitive variant; keep the ghost skin and tint the label. */
 .agy-btn-danger { color: var(--dsw-alias-state-error-primary, #ec1313) !important; }
 
+/* ── Recent activity ring ──────────────────────────────────────────────────
+   The "what just happened" list. Only the result cell carries color — ok
+   inherits the table's neutral, and a wall of tinted rows would read as an
+   alarm rather than a log. */
+.agy-recent-state { font: var(--dsw-font-xxs-12); }
+.agy-recent-state[data-kind="fail"] { color: var(--dsw-alias-state-error-primary, #ec1313); }
+.agy-recent-state[data-kind="limited"] { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+.agy-recent-state[data-kind="rotation"] { color: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6); }
+/* The recent list is a standalone disclosure on the tab root, not one block
+   inside a card body — the separator border-top the disclosure idiom uses
+   between sibling blocks would draw a stray line across nothing here. */
+.agy-recent.agy-disclosure { border-top: 0; }
+
 .agy-toolbar { display: flex; align-items: center; gap: 8px; }
 .agy-textarea { width: 100%; min-height: 88px; resize: vertical; outline: none;
   padding: 9px 10px; font: var(--dsw-font-xxs-12); font-family: var(--ds-font-family-code);

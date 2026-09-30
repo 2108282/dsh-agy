@@ -122,6 +122,30 @@ export interface UsageRecord {
   poolEvent?: boolean
 }
 
+/** Cap of the in-memory recent-activity ring (see `UsageStats.recentRequests`). */
+export const RECENT_MAX = 200
+
+/**
+ * One recent record, as the UI's "what just happened" list shows it.
+ *
+ * Flattened from `UsageRecord` at capture time so the ring never aliases the
+ * caller's object, and shaped for DISPLAY: pool events become `kind:
+ * 'rotation'`, absent numbers become null. The ring answers "just now" — the
+ * gap between the live in-flight line and the persisted ledger, whose records
+ * collapse into counters the moment they are flushed.
+ */
+export interface RecentActivity {
+  at: number
+  account: string | null
+  model: string | null
+  kind: 'chat' | 'cli' | 'verify' | 'test' | 'rotation'
+  ok: boolean
+  rateLimited: boolean
+  latencyMs: number | null
+  ttftMs: number | null
+  output: number | null
+}
+
 function zeroAccount(now: number): AccountUsage {
   return {
     totals: zeroCounters(),
@@ -543,6 +567,7 @@ export class UsageStats {
 
   /** Record one request. Hot path: no I/O. */
   record(record: UsageRecord): void {
+    this.noteRecent(record)
     this.pending.push(record)
     // Cap the backlog: unbounded growth is the one failure mode a diagnostic
     // ledger must not have (see `maxPending`).
@@ -563,6 +588,46 @@ export class UsageStats {
       return
     }
     this.armTimer()
+  }
+
+  /**
+   * The in-memory recent-activity ring — NEVER persisted.
+   *
+   * Deliberately not part of the flushed document: persistence would grow the
+   * file, drag in a versioned migration, and widen the stored surface, for the
+   * diagnostics value of "failures from before the last restart" — which the
+   * counters already answer in aggregate. Per process by construction: another
+   * writer (Desktop / web server / CLI) merges into the LEDGER file but this
+   * ring only ever sees this process's records, which is what the panel's
+   * "recent" list describes.
+   */
+  private readonly recent: RecentActivity[] = []
+
+  private noteRecent(record: UsageRecord): void {
+    this.recent.push({
+      at: this.now(),
+      account: record.account ?? null,
+      model: record.model ?? null,
+      kind: record.poolEvent === true ? 'rotation' : record.source,
+      ok: record.ok === true,
+      rateLimited: record.rateLimited === true,
+      latencyMs: record.latencyMs ?? null,
+      ttftMs: record.ttftMs ?? null,
+      output: record.usage?.output ?? null,
+    })
+    if (this.recent.length > RECENT_MAX) {
+      this.recent.splice(0, this.recent.length - RECENT_MAX)
+    }
+  }
+
+  /**
+   * Newest-first copy of the ring, for the `pool.recent` RPC.
+   *
+   * A copy, not the live array: the RPC layer may hold it across awaits while
+   * `record()` keeps pushing.
+   */
+  recentRequests(): RecentActivity[] {
+    return [...this.recent].reverse()
   }
 
   private armTimer(): void {

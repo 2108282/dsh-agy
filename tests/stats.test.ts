@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   DAY_WINDOW,
+  RECENT_MAX,
   UsageStats,
   applyRecord,
   foldWindow,
@@ -23,6 +24,47 @@ function scratch(): { dir: string, file: string } {
 function storeAt(file: string, clock: () => number): UsageStats {
   return new UsageStats({ file, lock: noopStatsLock, now: clock, flushEvery: 0, flushIntervalMs: 0 })
 }
+
+describe('recent activity ring', () => {
+  it('keeps the newest records, newest first, and never touches disk', () => {
+    const { file } = scratch()
+    let tick = 0
+    const store = storeAt(file, () => 1_700_000_000_000 + tick++ * 1_000)
+    store.record({ account: 'a@x', model: 'm1', source: 'chat', ok: true, usage: { input: 1, output: 5, cacheRead: 0, cacheWrite: 0 }, latencyMs: 900, ttftMs: 300 })
+    store.record({ account: 'b@y', model: 'm2', source: 'test', ok: false, rateLimited: true })
+    store.record({ account: 'b@y', source: 'chat', ok: true, poolEvent: true, rotated: true })
+    const recent = store.recentRequests()
+    // Newest first, and a pool event shows as its own kind rather than a request.
+    expect(recent.map((entry) => entry.kind)).toEqual(['rotation', 'test', 'chat'])
+    expect(recent[0]).toMatchObject({ kind: 'rotation', account: 'b@y', ok: true } as never)
+    expect(recent[1]).toMatchObject({ kind: 'test', ok: false, rateLimited: true, output: null, latencyMs: null } as never)
+    expect(recent[2]).toMatchObject({ kind: 'chat', ok: true, latencyMs: 900, ttftMs: 300, output: 5 } as never)
+    // The ring is in-memory only: recording must not create the file.
+    expect(existsSync(file)).toBe(false)
+  })
+
+  it('caps the ring at RECENT_MAX, keeping the newest', () => {
+    const { file } = scratch()
+    let tick = 0
+    const store = storeAt(file, () => 1_700_000_000_000 + tick++ * 1_000)
+    for (let i = 0; i < RECENT_MAX + 5; i++) {
+      store.record({ account: `a${i}@x`, source: 'chat', ok: true })
+    }
+    const recent = store.recentRequests()
+    expect(recent).toHaveLength(RECENT_MAX)
+    // Newest first: the five oldest entries were evicted.
+    expect(recent[0]?.account).toBe(`a${RECENT_MAX + 4}@x`)
+    expect(recent[recent.length - 1]?.account).toBe('a5@x')
+  })
+
+  it('returns a copy, so the caller cannot mutate the ring', () => {
+    const { file } = scratch()
+    const store = storeAt(file, () => 1_700_000_000_000)
+    store.record({ account: 'a@x', source: 'chat', ok: true })
+    store.recentRequests().pop()
+    expect(store.recentRequests()).toHaveLength(1)
+  })
+})
 
 describe('usage ledger', () => {
   it('records on the hot path without touching disk, then flushes', () => {
