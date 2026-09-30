@@ -96,6 +96,17 @@ const CSS = `
    rounded rect inset 2px from the card edge and transparent at rest. A
    full-bleed rectangle reads as a slab and fights the card's own radius. */
 .agy-rows { display: flex; flex-direction: column; gap: 2px; }
+/* The live line: one status strip above the rows, present ONLY while upstream
+   requests are in flight — an idle pool renders no strip, so quiet stays quiet.
+   The pulsing dot is the host StateDot primitive ('ongoing'), so the animation
+   is the platform's; this rule is layout and tone only. Sits OUTSIDE .agy-rows,
+   so the master list's scroll cap does not scroll the status away. */
+.agy-live {
+  display: flex; align-items: center; gap: 7px;
+  margin: 2px 2px 6px; padding: 7px 8px; border-radius: 10px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary, #61666b);
+  background: var(--dsw-alias-bg-layer-2, #f4f5f7);
+}
 /* Master/detail: the account list beside the selected account's detail, so a
  * row and the panel it opens stay in view together.
  *
@@ -307,6 +318,12 @@ const CSS = `
   color: var(--dsw-alias-label-primary, #1f2329); }
 .agy-limit-reset { text-align: right; font: var(--dsw-font-xxxs-11);
   color: var(--dsw-alias-label-tertiary, #8f959e); }
+/* The burn projection: indented to align with the bar (58px label + 10px gap),
+   warn-tinted because "this window runs dry before it resets" is the one
+   projection that asks the reader to act. */
+.agy-limit-burn { padding: 0 0 4px 68px;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-state-warn-primary, #f59e0b); }
 
 /* ── Dense breakdown tables (Usage tab only) ─────────────────────────────── */
 .agy-table-wrap { padding: 6px 0 2px; }
@@ -352,6 +369,19 @@ const CSS = `
 
 /* Danger has no primitive variant; keep the ghost skin and tint the label. */
 .agy-btn-danger { color: var(--dsw-alias-state-error-primary, #ec1313) !important; }
+
+/* ── Recent activity ring ──────────────────────────────────────────────────
+   The "what just happened" list. Only the result cell carries color — ok
+   inherits the table's neutral, and a wall of tinted rows would read as an
+   alarm rather than a log. */
+.agy-recent-state { font: var(--dsw-font-xxs-12); }
+.agy-recent-state[data-kind="fail"] { color: var(--dsw-alias-state-error-primary, #ec1313); }
+.agy-recent-state[data-kind="limited"] { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+.agy-recent-state[data-kind="rotation"] { color: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6); }
+/* The recent list is a standalone disclosure on the tab root, not one block
+   inside a card body — the separator border-top the disclosure idiom uses
+   between sibling blocks would draw a stray line across nothing here. */
+.agy-recent.agy-disclosure { border-top: 0; }
 
 .agy-toolbar { display: flex; align-items: center; gap: 8px; }
 .agy-textarea { width: 100%; min-height: 88px; resize: vertical; outline: none;

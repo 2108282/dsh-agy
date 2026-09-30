@@ -13,14 +13,17 @@ src/adapter/    DSH adapter: request translation (translate), SSE parsing (parse
 src/oauth/      OAuth: authorize/PKCE, code exchange, refresh, paste-blob codec, endpoint constants
 src/runtime/    State machine: 429 classification (classify), rotation decisions (rotation), fingerprints (fingerprint),
                 session/request id (identity), thoughtSignature caching, version freshness (version)
-src/store/      Account storage: encrypted JSON file (accounts, proper-lockfile), master key / keyring doc (keyring)
+src/store/      Account storage: encrypted JSON file (accounts, proper-lockfile), master key / keyring doc (keyring),
+                data-dir layout + one-shot legacy migration (paths)
 src/session.ts  Shared runtime glue: token caching, rotation execution, fingerprint lifecycle, verify/test/export
 src/web/        Web plugin entry: management RPC (`/api/agy`) + OAuth callback route (loopback only)
 src/client/     Inline Settings section (browser half): 4 tabs over the management RPC,
                 UI primitives + bilingual dictionaries (locales.ts, styles.ts)
-src/stats.ts    Cumulative usage ledger ($DSH_HOME/agy-stats.json)
-src/model-visibility.ts  Hidden-model blacklist ($DSH_HOME/agy-models.json)
-src/thinking-budget.ts   Global Low/Medium/High -> thinkingBudget map ($DSH_HOME/agy-thinking.json);
+src/stats.ts    Cumulative usage ledger ($DSH_HOME/agy/agy-stats.json)
+src/recent-store.ts  Persisted recent-activity ring ($DSH_HOME/agy/agy-recent.json; 200-entry cap,
+                flush at 25 records / 30s / exit)
+src/model-visibility.ts  Hidden-model blacklist ($DSH_HOME/agy/agy-models.json)
+src/thinking-budget.ts   Global Low/Medium/High -> thinkingBudget map ($DSH_HOME/agy/agy-thinking.json);
                          types split into thinking-types.ts so the client bundle stays node:*-free
 src/cli/        Standalone CLI (login/status/import/verify/logout) + loopback callback server
 tests/          Vitest test suite: fixture-driven, zero network
@@ -58,6 +61,16 @@ redirects a browser to it with a GET.
   - Each `days` bucket carries its own `models`/`accounts` partition, so the Usage tab's breakdown tables follow the range selector; a version-1 document's flat day counters migrate to that bucket's `totals` with no partition (history is kept, the per-day split is simply absent for pre-upgrade days).
   - The ledger MUST NOT store raw tokens, proxies, or project ids (account emails only).
   - A ledger that cannot be written MUST fail soft AND stay bounded: the pending backlog is capped (`maxPending`), count-based flushing is suspended while writes fail (otherwise every `record()` becomes a synchronous flush, breaking the I/O-free rule above), and the first error of each failure run is reported once through `onFlushError`. A silent, unbounded ledger is the regression.
+- **Data Directory (`store/paths.ts`)**:
+  - Every agy data file lives under `$DSH_HOME/agy/` (accounts, stats, models, thinking, fingerprint override, recent ring); a new store's default path MUST go through `migrateToAgyDir`, which performs the ONE-SHOT ATOMIC RENAME from the legacy home-directory file — no read-merge, no lazy fallback (read-merge needs two locks per store and still loses updates; lazy fallback leaves the old file in the home forever).
+  - Migration failure falls back to the LEGACY path for that process, never to an empty new file — for accounts, the old layout with the real pool beats a new empty pool.
+  - A legacy file that reappears NEXT TO the migrated one means an old-version process is still writing (version-skew window): the both-files `skew` flag is the detector, surfaced as one warn per process — do not auto-merge across layouts.
+  - `~/.dsh/.credentials.yaml` is the DSH host's own file and NEVER moves; `$DSH_HOME` relocates the whole tree including `agy/`.
+- **Recent Ring Persistence (`recent-store.ts`)**:
+  - The ring persists to its OWN file (`agy-recent.json`), not a field in `agy-stats.json` — the ledger document is versioned and migrated; an evicting flat list needs neither a version nor a migration, and an unparseable record is simply dropped.
+  - Bounded by construction: `RECENT_MAX` (200) entries, oldest evicted, so the file caps at ~40–60KB forever; flush at 25 records / 30s pending / process exit, whichever first — no size trigger (entries are fixed-shape; count IS the size cap).
+  - The flush merge re-reads under the lock and dedupes on the capture key `at|account|model|kind|output`, because two processes can flush the same capture window and a duplicated rotation row is exactly the confusion the panel exists to end.
+  - `UsageStats` stays the capture point (`persistRecent` seam): `record()` remains I/O-free, the ring is seeded from the file at construction so `pool.recent` shows cross-process history immediately, and the stored surface is the ledger's privacy surface (emails + model ids only).
 - **Client Presentation (`src/client/`)**:
   - Follows DSH's own styling contract (deepseek-harness `docs/web-styling.md`): `--dsw-alias-*` semantic tokens only, typography through the theme's role variables (`--dsw-font-*`, which carry size+line-height+weight together), and neutral solid borders at `0.5px`. Hand-picked px/weight pairs drift from the host's scale and are a regression.
   - Controls come from the `@deepseek-ai/dsh-client-ui-primitives` catalog, which the shell shares into the frozen module table (`packages/client/web/src/platform.ts`). The package must stay in `dsh.client.external` and in the tsdown `external` list, or the bundle inlines a second copy that cannot see the host theme.
@@ -102,7 +115,7 @@ redirects a browser to it with a GET.
   - The Claude path runs an Anthropic-backed validator that is stricter than Gemini's about `contents[]` parts (errors name the exact part as `messages.N.content.M`, so read them before bisecting): empty text parts and replayed thought blocks are dropped in `translate.ts` (a thought can only be re-signed by its own model), and every `functionResponse` carries the tool-call id. `pnpm run verify:claude-parts` re-measures all three; the raw-shape baselines in it are red-capable, so a passing run is not vacuous.
 - **Version Freshness**:
   - The fingerprint User-Agent version is resolved dynamically via `version.ts` (750ms timeout ceiling + 6-hour cache + warm-up on boot).
-  - `fingerprint-data.json` is compiled into the bundle; user hot-updates use the `$DSH_HOME/agy-fingerprint-data.json` override file.
+  - `fingerprint-data.json` is compiled into the bundle; user hot-updates use the `$DSH_HOME/agy/agy-fingerprint-data.json` override file.
   - `AGY_VERSION_FALLBACK` and `versionPool` are only for the unreachable-feed case, and they rot silently: `pnpm run verify:version-freshness` (`freshness.yml`, weekly) fails when either trails the live feed by more than one minor. No User-Agent builder may carry a version literal of its own, and a newly created fingerprint never takes `generateFingerprint`'s random pool default — it is frozen for the account's life.
   - **One product line, one namespace.** This client claims the **CLI** (`docs/official-identity.json`), so the resolver reads the CLI feed ONLY. Taking the numeric max across the IDE and CLI feeds is a category error — the lines are disjoint (IDE `2.x`, hub `2.15.x`, CLI `1.2.x`) — and it advertised whichever line counted higher. `resolveObservedAgyVersion` therefore reads the CLI feed; the IDE resolver stays exported for the freshness gate's cross-check and never for the wire.
   - The platform is PINNED, and the rationale is now measured rather than inherited: `ClientMetadata.Platform`'s official enumeration is `PLATFORM_UNSPECIFIED | DARWIN_AMD64 | DARWIN_ARM64 | LINUX_AMD64 | LINUX_ARM64 | WINDOWS_AMD64`, so Go-style tokens ARE the official vocabulary for that field. The removed `windows/amd64` / `darwin/amd64` entries were removed for the UA's *token* pool, which is a separate and still-uncaptured vocabulary — do not re-derive one from the other.

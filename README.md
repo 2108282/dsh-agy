@@ -137,11 +137,11 @@ dsh plugin --profile web remove dsh-agy
 # 2. Uninstall the CLI
 npm uninstall -g dsh-agy
 
-# 3. Optional: delete local account data (accounts + master key + fingerprint override)
+# 3. Optional: delete local account data (the whole agy data folder)
 dsh-agy logout              # remove accounts first (or skip)
-rm -f ~/.dsh/agy-accounts.json ~/.dsh/agy-stats.json ~/.dsh/agy-models.json
+rm -rf ~/.dsh/agy           # accounts, usage stats, model visibility, thinking budgets, recent ring
 # remove only the AGY_MASTER_KEY line from ~/.dsh/.credentials.yaml — keep other keys!
-rm -f ~/.dsh/agy-fingerprint-data.json   # only if you created an override
+# (an upgrade from ≤0.4 may leave legacy files in ~/.dsh itself: rm -f ~/.dsh/agy-*.json)
 
 # 4. Optional: revoke the Google-side authorization
 #    Google account security → Third-party access → revoke "Antigravity"
@@ -268,17 +268,28 @@ the context grows, bounded by the model's context window.
 
 ### Storage & secrets
 
-- Accounts: `~/.dsh/agy-accounts.json` — AES-256-GCM encrypted; the master key lives
-  in `~/.dsh/.credentials.yaml` (`AGY_MASTER_KEY`, 0600). `$DSH_HOME` relocates both.
+All agy data files live in one folder, `~/.dsh/agy/` (relocated wholesale by
+`$DSH_HOME`). Upgrading from ≤0.4 moves the legacy files in `~/.dsh/` there on
+first start — a one-shot atomic rename; if a legacy file reappears next to the
+folder afterwards, an old-version process is still running, and a warning says so.
+
+- Accounts: `~/.dsh/agy/agy-accounts.json` —
+  AES-256-GCM encrypted; the master key lives in `~/.dsh/.credentials.yaml`
+  (`AGY_MASTER_KEY`, 0600). `$DSH_HOME` relocates the whole tree.
 - Fingerprint pools (version strings, SDK clients) are user-overridable via
-  `~/.dsh/agy-fingerprint-data.json` — no code release needed to keep them current.
-- Model visibility: `~/.dsh/agy-models.json` (0600) — the hidden-model blacklist.
+  `~/.dsh/agy/agy-fingerprint-data.json` — no code release needed to keep them current.
+- Model visibility: `~/.dsh/agy/agy-models.json` (0600) — the hidden-model blacklist.
   Holds only the models you switched off, so re-enabling one removes its entry.
-- Usage statistics: `~/.dsh/agy-stats.json` (0600) — cumulative counters plus a
+- Usage statistics: `~/.dsh/agy/agy-stats.json` (0600) — cumulative counters plus a
   rolling 30-day window. Counts are merged under a file lock, so several
   processes (Desktop, a web-profile server, the CLI) record concurrently without
-  losing each other's data. It stores account emails but never tokens, proxies,
-  or project ids.
+  losing each other's data.
+- Recent activity: `~/.dsh/agy/agy-recent.json` (0600) — the last 200 requests and
+  rotations, persisted so the panel survives a restart and shows the other
+  processes' history too (external processes' new records arrive within 30s).
+- None of these files store tokens, proxies, or project ids — account emails
+  only; the tokens live encrypted in the accounts file and the master key in
+  the credentials document.
 
 ## ⚠️ Disclaimer
 

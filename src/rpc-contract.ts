@@ -32,6 +32,18 @@ export interface AccountView {
   /** True when this is the pool's active account and it is not disabled. */
   active: boolean
   state: AccountState
+  /**
+   * When the account was disabled, as an ISO timestamp (null when it is not
+   * disabled, or when the disable predates this field).
+   *
+   * `enabled = false` has exactly one cause in this codebase — an upstream
+   * `invalid_grant` on the refresh token — and both write sites persist
+   * `verificationRequiredAt` in the SAME store mutation, so that timestamp IS
+   * the disable time. Derived on the wire rather than passed through: the
+   * verification-parking path also writes `verificationRequiredAt` (without
+   * disabling), and exposing the raw field would give it a second meaning.
+   */
+  disabledAt: string | null
   /** ISO timestamp while cooling, else null. */
   cooldownUntil: string | null
   /**
@@ -79,6 +91,13 @@ export interface AccountView {
   limits: QuotaGroup[] | null
   /** When `limits` was measured (Unix ms), or null when never. */
   limitsUpdatedAt: number | null
+  /**
+   * Burn rate per window bucket (bucketId -> fraction/hour), or null until a
+   * second probe has been sampled. Arrives via `account.limits`, not here —
+   * `account.list` is deliberately probe-free and the rate only exists after
+   * the sampling path has run twice.
+   */
+  limitBurn: Record<string, number> | null
   /** This account's ledger entry, when it has recorded traffic. */
   usage: AccountUsageView | null
 }
@@ -86,14 +105,21 @@ export interface AccountView {
 /**
  * One account's ledger, flattened for transport.
  *
- * Only the two fields the account detail actually renders. `models` and
- * `lastUsedAt` were carried here with no reader — the per-model table that used
- * the former was removed, and the ordering rule that used the latter went with
- * it — so they are gone rather than left as a wire surface nobody consumes.
+ * `models` was carried here with no reader — the per-model table that used it
+ * was removed — and is gone rather than left as a wire surface nobody consumes.
  */
 export interface AccountUsageView {
   totals: UsageCounters
   sources: Record<UsageSource, number>
+  /**
+   * Epoch ms of the account's most recent ledger record of any source, or null.
+   *
+   * The ledger already maintained this per account; the account row's "active N
+   * ago" fragment is its reader. (An earlier revision carried `lastUsedAt` with
+   * no reader and dropped it; per that rule the field returns WITH its reader
+   * in the same commit.)
+   */
+  lastUsedAt: number | null
 }
 
 /** A model row in the Model tab. */
@@ -102,6 +128,28 @@ export interface ModelView {
   name: string
   /** True when hidden from the DSH model selector. */
   disabled: boolean
+}
+
+/** One entry of the `pool.recent` list — a request or a rotation event. */
+export interface RecentRequestView {
+  /** Epoch ms the record was captured. */
+  at: number
+  /** Account key (email preferred), as the ledger stores it. */
+  account: string | null
+  model: string | null
+  /** 'rotation' marks a pool event; the rest are request sources. */
+  kind: 'chat' | 'cli' | 'verify' | 'test' | 'rotation'
+  ok: boolean
+  rateLimited: boolean
+  /**
+   * Failure classification ('rate-limit', 'network-error', 'auth-failure',
+   * 'verification-required', ...), or null on success — what a rotation row
+   * exists to say.
+   */
+  reason: string | null
+  latencyMs: number | null
+  ttftMs: number | null
+  output: number | null
 }
 
 /** Aggregate view the Usage tab renders, folded host-side to keep the client thin. */
@@ -116,6 +164,19 @@ export interface StatsView {
   week: RangeBreakdown
   /** Last 30 days (the full retained window). */
   month: RangeBreakdown
+  /**
+   * Per-day request / failure / rate-limit / rotation counts, last 7 LOCAL
+   * calendar days oldest first, zeros filled — the trend table's job is to show
+   * shape over time, and a missing day reads as data loss rather than idle.
+   */
+  days: Array<{
+    /** Local day key (`YYYY-MM-DD`), matching the ledger's own bucketing. */
+    day: string
+    requests: number
+    failed: number
+    rateLimited: number
+    rotations: number
+  }>
 }
 
 /**
@@ -154,6 +215,30 @@ export interface ImportResult {
 /** Methods and their payload/result shapes. */
 export interface AgyRpcMethods {
   'account.list': { payload: Record<string, never>; result: { accounts: AccountView[] } }
+  /**
+   * Which accounts have upstream requests in flight right now.
+   *
+   * A pure in-memory read on the host — no token refresh, no quota probe — so
+   * the client can poll it cheaply. An empty `busy` is an idle pool, not an
+   * error; a failed call is display-only and leaves the previous frame.
+   */
+  'pool.status': {
+    payload: Record<string, never>
+    result: {
+      busy: Array<{ index: number; email: string | null; count: number }>
+    }
+  }
+  /**
+   * The most recent records this process has seen, newest first.
+   *
+   * The gap-filler between the live line ("now") and the ledger ("forever"):
+   * what just failed, what just triggered a rotation. In-memory only — a fresh
+   * process starts empty, and records another process wrote never appear here.
+   */
+  'pool.recent': {
+    payload: Record<string, never>
+    result: { recent: RecentRequestView[] }
+  }
   'account.activate': { payload: { index: number }; result: { ok: true; index: number } }
   'account.delete': { payload: { index: number }; result: { ok: true } }
   'account.verify': { payload: { index: number }; result: { ok: boolean; email?: string; error?: string } }
@@ -180,6 +265,15 @@ export interface AgyRpcMethods {
         index: number
         groups: QuotaGroup[] | null
         updatedAt: number | null
+        /**
+         * Burn rate per window bucket (bucketId -> fraction/hour), or null.
+         *
+         * Derived in memory from the last two quota probes far enough apart;
+         * null until a second sample exists. The UI only speaks when the rate
+         * would exhaust a window BEFORE its reset — otherwise the reset time
+         * the row already shows is the answer.
+         */
+        burn: Record<string, number> | null
       }>
       /** Accounts measured by THIS call. */
       measured: number

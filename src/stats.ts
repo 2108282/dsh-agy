@@ -1,5 +1,5 @@
 /**
- * Cumulative agy usage statistics, persisted to `$DSH_HOME/agy-stats.json`.
+ * Cumulative agy usage statistics, persisted to `$DSH_HOME/agy/agy-stats.json`.
  *
  * Why agy keeps its own ledger instead of reading DSH's session projections:
  *
@@ -38,9 +38,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 import lockfile from 'proper-lockfile'
-import { resolveDshHome } from './store/keyring.ts'
+import { migrateToAgyDir } from './store/paths.ts'
 import { zeroCounters } from './usage-types.ts'
 import type { TokenBuckets, UsageCounters, UsageSource } from './usage-types.ts'
 
@@ -120,6 +120,39 @@ export interface UsageRecord {
    * counters and leaves the request counters alone.
    */
   poolEvent?: boolean
+  /**
+   * The failure classification this record carries ('rate-limit',
+   * 'network-error', 'auth-failure', 'verification-required', 'project-error',
+   * 'quota-exhausted'), when it failed. The counters ignore it: it exists for
+   * the recent-activity ring, where "why did it rotate" is the whole question.
+   */
+  reason?: string
+}
+
+/** Cap of the in-memory recent-activity ring (see `UsageStats.recentRequests`). */
+export const RECENT_MAX = 200
+
+/**
+ * One recent record, as the UI's "what just happened" list shows it.
+ *
+ * Flattened from `UsageRecord` at capture time so the ring never aliases the
+ * caller's object, and shaped for DISPLAY: pool events become `kind:
+ * 'rotation'`, absent numbers become null. The ring answers "just now" — the
+ * gap between the live in-flight line and the persisted ledger, whose records
+ * collapse into counters the moment they are flushed.
+ */
+export interface RecentActivity {
+  at: number
+  account: string | null
+  model: string | null
+  kind: 'chat' | 'cli' | 'verify' | 'test' | 'rotation'
+  ok: boolean
+  rateLimited: boolean
+  latencyMs: number | null
+  ttftMs: number | null
+  output: number | null
+  /** Failure classification token, or null when the record succeeded. */
+  reason: string | null
 }
 
 function zeroAccount(now: number): AccountUsage {
@@ -136,7 +169,7 @@ function emptyDocument(now: number): StatsDocument {
 }
 
 /** Local-time day key. Local (not UTC) so "today" matches the user's clock. */
-function dayKey(time: number): string {
+export function dayKey(time: number): string {
   const d = new Date(time)
   const month = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
@@ -436,7 +469,10 @@ export const properStatsLock: StatsLock = {
 export const noopStatsLock: StatsLock = { withLock: (_file, fn) => fn() }
 
 export interface UsageStatsStoreOptions {
-  /** Defaults to `$DSH_HOME/agy-stats.json`. */
+  /**
+   * Defaults to `$DSH_HOME/agy/agy-stats.json`, migrating the legacy
+   * `$DSH_HOME/agy-stats.json` by one-shot rename (see `migrateToAgyDir`).
+   */
   file?: string
   lock?: StatsLock
   /** Injectable clock, for tests. */
@@ -467,6 +503,12 @@ export interface UsageStatsStoreOptions {
    * be noise.
    */
   onFlushError?: (error: unknown) => void
+  /**
+   * Persistence half of the recent-activity ring (see `recent-store.ts`).
+   * Called with each flattened record as it is captured; absent means the ring
+   * stays per-process, as before.
+   */
+  persistRecent?: (entry: RecentActivity) => void
 }
 
 /**
@@ -482,6 +524,7 @@ export class UsageStats {
   private readonly flushIntervalMs: number
   private readonly maxPending: number
   private readonly onFlushError: ((error: unknown) => void) | undefined
+  private readonly persistRecent: ((entry: RecentActivity) => void) | undefined
 
   /** This process's un-flushed records. */
   private pending: UsageRecord[] = []
@@ -494,13 +537,16 @@ export class UsageStats {
   private flushFailedSince: number | undefined
 
   constructor(options: UsageStatsStoreOptions = {}) {
-    this.file = options.file ?? join(resolveDshHome(), 'agy-stats.json')
+    // Explicit file (tests, callers with their own layout) is used as-is; the
+    // default migrates the legacy home-directory file into `agy/` once.
+    this.file = options.file ?? migrateToAgyDir('agy-stats.json').file
     this.lock = options.lock ?? properStatsLock
     this.now = options.now ?? (() => Date.now())
     this.flushEvery = options.flushEvery ?? 50
     this.flushIntervalMs = options.flushIntervalMs ?? 5_000
     this.maxPending = options.maxPending ?? 500
     this.onFlushError = options.onFlushError
+    this.persistRecent = options.persistRecent
     // Deliberately does NOT create the file: a read-only command (`status`)
     // builds a ledger and must not leave state behind. `flush()` pre-creates it
     // before locking, which is the first point a write actually needs it.
@@ -543,6 +589,7 @@ export class UsageStats {
 
   /** Record one request. Hot path: no I/O. */
   record(record: UsageRecord): void {
+    this.noteRecent(record)
     this.pending.push(record)
     // Cap the backlog: unbounded growth is the one failure mode a diagnostic
     // ledger must not have (see `maxPending`).
@@ -563,6 +610,60 @@ export class UsageStats {
       return
     }
     this.armTimer()
+  }
+
+  /**
+   * The in-memory recent-activity ring, persisted by an injected
+   * `RecentActivityStore` when one is supplied.
+   *
+   * The ring itself stays in-memory and I/O-free — `noteRecent` only flattens —
+   * while the OPTIONAL `persistRecent` seam hands each flattened record to
+   * `recent-store.ts`, which owns the file, the triggers, the lock, and the
+   * failure story. When no store is injected (tests, the CLI) the ring behaves
+   * exactly as before: per-process, never persisted.
+   *
+   * An earlier revision recorded why persistence was rejected outright (file
+   * growth, a versioned migration, a wider stored surface); `recent-store.ts`
+   * answers each — a bounded list in its own file, no version field, emails
+   * and model ids only — which is what turned this from a bad idea into a
+   * spec.
+   */
+  private readonly recent: RecentActivity[] = []
+
+  private noteRecent(record: UsageRecord): void {
+    const entry: RecentActivity = {
+      at: this.now(),
+      account: record.account ?? null,
+      model: record.model ?? null,
+      kind: record.poolEvent === true ? 'rotation' : record.source,
+      ok: record.ok === true,
+      rateLimited: record.rateLimited === true,
+      latencyMs: record.latencyMs ?? null,
+      ttftMs: record.ttftMs ?? null,
+      output: record.usage?.output ?? null,
+      reason: record.ok === true ? null : record.reason ?? null,
+    }
+    this.recent.push(entry)
+    if (this.recent.length > RECENT_MAX) {
+      this.recent.splice(0, this.recent.length - RECENT_MAX)
+    }
+    // Fire-and-forget: the store never throws synchronously (its own flush
+    // path is guarded), but a diagnostics hand-off must not break `record()`.
+    try {
+      this.persistRecent?.(entry)
+    } catch {
+      // Swallowed by design — same contract as `emitUsage` in session.ts.
+    }
+  }
+
+  /**
+   * Newest-first copy of the ring, for the `pool.recent` RPC.
+   *
+   * A copy, not the live array: the RPC layer may hold it across awaits while
+   * `record()` keeps pushing.
+   */
+  recentRequests(): RecentActivity[] {
+    return [...this.recent].reverse()
   }
 
   private armTimer(): void {

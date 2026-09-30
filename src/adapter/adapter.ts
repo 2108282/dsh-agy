@@ -144,6 +144,9 @@ export interface AgyAdapterOptions {
     model?: string
     usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
     ok: boolean
+    rateLimited?: boolean
+    /** Failure classification, when the record failed. */
+    reason?: string
     latencyMs?: number
     ttftMs?: number
   }): void
@@ -485,7 +488,7 @@ export class AgyAdapter extends LlmAdapter {
           await this.options.reportFailure(classified.kind, session)
           // A transport failure consumed no tokens, but it is a real attempt
           // against this account's quota — record the request, not the usage.
-          this.recordUsage(session, options.model, { ok: false }, startedAt)
+          this.recordUsage(session, options.model, { ok: false, reason: 'network-error' }, startedAt)
           throw new LlmError(classified.message ?? 'agy fetch failed', 'TRANSPORT', { cause: error })
         }
         if (response.ok) return { response }
@@ -518,6 +521,7 @@ export class AgyAdapter extends LlmAdapter {
       this.recordUsage(session, options.model, {
         ok: false,
         rateLimited: classified.kind === 'rate-limit',
+        reason: classified.kind,
       }, startedAt)
       if (classified.kind === 'rate-limit') {
         // soft/rate limits are retryable by the harness (RATE_LIMIT + delay);
@@ -624,7 +628,7 @@ export class AgyAdapter extends LlmAdapter {
       await this.options.reportFailure('network-error', session)
       // A stream that died mid-body may already have delivered billable
       // content, so the attempt is recorded even though no usage chunk arrived.
-      this.recordUsage(session, options.model, { ok: false }, startedAt)
+      this.recordUsage(session, options.model, { ok: false, reason: 'network-error' }, startedAt)
       // Deliberately UPSTREAM (terminal), not TRANSPORT: content may already
       // have been emitted, and DSH's retry policy honours TRANSPORT, so retrying
       // here would replay a partially-delivered turn. The account-level report
@@ -650,6 +654,7 @@ export class AgyAdapter extends LlmAdapter {
     result: {
       ok: boolean
       rateLimited?: boolean
+      reason?: string
       usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
       ttftMs?: number
     },
@@ -663,6 +668,7 @@ export class AgyAdapter extends LlmAdapter {
         ...(model === undefined ? {} : { model }),
         ok: result.ok,
         ...(result.rateLimited === true ? { rateLimited: true } : {}),
+        ...(result.reason === undefined ? {} : { reason: result.reason }),
         ...(result.usage === undefined ? {} : { usage: result.usage }),
         ...(result.ttftMs === undefined ? {} : { ttftMs: result.ttftMs }),
         latencyMs: Math.max(0, Date.now() - startedAt),

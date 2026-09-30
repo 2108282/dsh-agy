@@ -29,7 +29,7 @@ import {
 import type { StateDotState, TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
-import type { AccountView, AgyRpcClient, ModelView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
+import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
 
@@ -49,6 +49,9 @@ const NS = 'agy'
 /** This section's translator. */
 type T = TranslateNS<typeof NS>
 
+/** One row of the recent-activity list (`pool.recent`). */
+type RecentEntry = AgyRpcResult<'pool.recent'>['recent'][number]
+
 /** RPC channel and endpoint the host registers as `/api/agy`. */
 const RPC_CHANNEL = '/api'
 const RPC_ENDPOINT = 'agy'
@@ -64,6 +67,15 @@ type TabId = 'accounts' | 'models' | 'usage' | 'credentials'
  * it — see `actionError` in `AgySettings`.
  */
 const ACTION_MESSAGE_TTL_MS = 3_500
+
+/**
+ * How often the section re-reads the pool's in-flight snapshot.
+ *
+ * The call is a pure in-memory read on the host (no token refresh, no quota
+ * probe), so a tight-ish interval is free; 3s makes the live line feel live
+ * without a visible request cost.
+ */
+const POOL_POLL_INTERVAL_MS = 3_000
 
 /** Connection shape this plugin needs (structural, so no host-only import). */
 interface ConnectionLike {
@@ -183,6 +195,29 @@ function totalTokens(counters: UsageCounters): number {
 }
 
 /**
+ * Cumulative average OUTPUT rate for one scope, in tokens per second.
+ *
+ * Pure and exported for a direct unit test. The denominator is the STREAMING
+ * window (average latency minus average time-to-first-token), NOT the wall
+ * clock: on this channel the pre-first-token wait (upstream queue, routing,
+ * prompt processing, silent thinking) is ~90% of the request — measured 7.5s
+ * of an 8.3s average — so dividing by wall time understated the decode rate
+ * about 8× (40 tok/s shown where the account really streamed ~300).
+ *
+ * Per-request AVERAGES, not raw sums: a failed request carries wall time but
+ * never a first token (`latencyN` > `ttftN`), so subtracting raw sums would
+ * hand its wait to the decode window. Both averages must exist — a scope with
+ * no timed request or no reported first token gets null, hiding the row rather
+ * than showing a fake rate.
+ */
+export function throughputTokenPerSecond(totals: UsageCounters): number | null {
+  if (totals.latencyN === 0 || totals.ttftN === 0 || totals.output <= 0) return null
+  const decodeMs = totals.latencyMs / totals.latencyN - totals.ttftMs / totals.ttftN
+  if (decodeMs <= 0) return null
+  return Math.round(totals.output / totals.latencyN / (decodeMs / 1_000))
+}
+
+/**
  * The whole prompt side: everything the model read, cached or not.
  *
  * The LEDGER keeps `input` as the uncached portion alone, because that is DSH's
@@ -252,14 +287,32 @@ function windowLabel(window: string, t: T): string {
 }
 
 /**
+ * Humanize a burn horizon (hours until a window runs dry at the sampled rate).
+ *
+ * Reuses the shared `rel*` magnitudes so the phrasing matches every other
+ * duration on the panel; under an hour falls to minutes rather than rounding
+ * to a false zero.
+ */
+function burnHorizon(hours: number, t: T): string {
+  if (hours < 1) return t('relMinutes', { n: Math.max(1, Math.round(hours * 60)) })
+  if (hours < 48) return t('relHours', { n: Math.round(hours) })
+  return t('relDays', { n: Math.round(hours / 24) })
+}
+
+/**
  * A wall-clock moment for a state label (a cooldown end).
  *
  * Time-of-day alone is enough while the wall is today; past midnight it must
  * carry the date, or a 24h quota cooldown reads as though it ends in a few
  * minutes. (`untilText` is the relative form, used where "how long from now" is
  * the question rather than "when".)
+ *
+ * `lang` is the UI language ('zh' | 'en'), not the browser locale: the words on
+ * this panel follow the host's language setting, so the dates must too — a zh
+ * panel rendering `9/24/2026` (the browser's en-US ordering) was the symptom.
+ * `undefined` degrades to the browser default, the pre-`lang` behaviour.
  */
-function clockTime(iso: string | null): string {
+function clockTime(iso: string | null, lang?: string): string {
   if (iso === null) return '—'
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return '—'
@@ -268,8 +321,19 @@ function clockTime(iso: string | null): string {
     && date.getMonth() === now.getMonth()
     && date.getDate() === now.getDate()
   return sameDay
-    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    ? date.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' })
+    : date.toLocaleString(lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+/**
+ * A ledger day key ('YYYY-MM-DD', local by construction) as a short label.
+ * Parsed as LOCAL date parts — a UTC parse would shift the label a day for
+ * half the planet.
+ */
+function dayLabel(day: string, lang?: string): string {
+  const [y, m, d] = day.split('-').map(Number)
+  if (y === undefined || m === undefined || d === undefined || Number.isNaN(y)) return day
+  return new Date(y, m - 1, d).toLocaleDateString(lang, { month: 'short', day: 'numeric' })
 }
 
 const MINUTE_MS = 60_000
@@ -348,6 +412,36 @@ function agoText(iso: string | null, t: T, now: number): string {
           ? t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
           : t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
   return t('relAgo', { value })
+}
+
+/**
+ * Ago label with seconds resolution, for the recent list. `agoText` collapses
+ * the whole first minute into "just now", which is too coarse when the reader
+ * is watching live activity — here the seconds carry the information.
+ */
+function recentAgo(at: number, now: number, t: T): string {
+  const diff = now - at
+  if (diff < 10_000) return t('relJustNow')
+  if (diff < MINUTE_MS) return t('relSeconds', { n: Math.floor(diff / 1_000) })
+  return agoText(new Date(at).toISOString(), t, now)
+}
+
+/**
+ * Middle-truncate an identity for the recent list.
+ *
+ * Both ends carry the signal — an email's domain, a model id's tier suffix —
+ * so the cut is taken from the MIDDLE, and bounding the rendered length (not
+ * relying on CSS clipping of a `table-layout: fixed` cell) is what keeps the
+ * columns honest. The full value stays on the cell's title.
+ * @param text - the full identity.
+ * @param max - rendered character budget including the ellipsis.
+ * @returns the truncated display string.
+ */
+export function truncateIdentity(text: string, max = 22): string {
+  if (text.length <= max) return text
+  const head = Math.ceil((max - 1) / 2)
+  const tail = max - 1 - head
+  return `${text.slice(0, head)}…${text.slice(-tail)}`
 }
 
 // ─── building blocks ─────────────────────────────────────────────────────────
@@ -472,6 +566,8 @@ function AccountDetail(props: {
   account: AccountView
   busy: boolean
   handlers: AccountHandlers
+  /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
+  lang?: string
   t: T
 }): ReactNode {
   const { account, busy, handlers, t } = props
@@ -479,6 +575,7 @@ function AccountDetail(props: {
   const usage = account.usage
   // One clock reading per render, so every reset label agrees (as the quota list does).
   const now = Date.now()
+  const throughput = usage === null ? null : throughputTokenPerSecond(usage.totals)
 
   // The verification challenge, when the upstream raised one. The state badge
   // says the account is parked; THIS is the only place that says how to un-park
@@ -491,15 +588,18 @@ function AccountDetail(props: {
       ? t('fingerprintNone')
       : t('fingerprintRegenerated', {
         count: account.fingerprintHistory,
-        date: new Date(account.fingerprint.createdAt).toLocaleDateString(),
+        date: new Date(account.fingerprint.createdAt).toLocaleDateString(props.lang),
       })],
     // The age matters as much as the reason: "network error" alone reads the
     // same whether it happened seconds or days ago, which is exactly how a stale
     // value went unnoticed. The host clears expired state before rendering, so
-    // this row and the state badge cannot disagree.
-    [t('fieldCooldownReason'), account.cooldownReason === null
-      ? t('noProject')
-      : `${cooldownReasonLabel(account.cooldownReason, t)} · ${agoText(account.cooldownSetAt, t, now)}`],
+    // this row and the state badge cannot agree to disagree. The row renders
+    // ONLY while a reason is live — a permanent "—" told the reader nothing and
+    // padded every healthy account.
+    ...(account.cooldownReason === null ? [] : [[
+      t('fieldCooldownReason'),
+      `${cooldownReasonLabel(account.cooldownReason, t)} · ${agoText(account.cooldownSetAt, t, now)}`,
+    ] as [ReactNode, ReactNode]]),
     [t('fieldSources'), usage === null
       ? t('noProject')
       : t('sourcesSummary', {
@@ -512,7 +612,24 @@ function AccountDetail(props: {
       ? t('noProject')
       : `${t('latencyAverage', { value: formatDuration(average(usage.totals.latencyMs, usage.totals.latencyN)) })}`
         + ` · ${t('latencyTtft', { value: formatDuration(average(usage.totals.ttftMs, usage.totals.ttftN)) })}`],
+    // Streaming decode rate (output over the window AFTER the first token), a
+    // lifetime average — the ledger stores sums, not samples. Absent entirely
+    // when nothing was timed, rather than rendering a fake 0.
+    ...(throughput === null ? [] : [[
+      t('fieldThroughput'),
+      `${t('throughputValue', { n: throughput })} · ${t('throughputNote')}`,
+    ] as [ReactNode, ReactNode]]),
   ]
+  // Disabled is the one state whose recovery REQUIRES a human action, so the
+  // row must say what happened, when, and what to do next. The cause space has
+  // exactly one value (an upstream invalid_grant), so the reason is a fixed
+  // sentence; the time comes from `disabledAt` (null for pre-field data, where
+  // "when" is simply absent rather than faked).
+  if (account.state === 'disabled') {
+    identityRows.push([t('fieldDisabled'), account.disabledAt === null
+      ? t('disabledCredentials')
+      : `${t('disabledCredentials')} · ${t('disabledSince', { ago: agoText(account.disabledAt, t, now) })}`])
+  }
   if (account.verificationRequired) {
     identityRows.push([t('fieldVerification'), account.verificationUrl === null
       ? t('verificationNoUrl')
@@ -526,12 +643,22 @@ function AccountDetail(props: {
       }, t('verificationOpen'))])
   }
 
-  const identity = card(t('detailTitle'), defs(identityRows), account.email ?? `#${account.index}`)
+  const identity = card(t('detailTitle'),
+    h('div', null,
+      defs(identityRows),
+      account.state === 'disabled' ? hint(t('disabledHint')) : null),
+    account.email ?? `#${account.index}`)
 
+  // Deleting lives here, in the one-account surface, not on every list row: a
+  // destructive action per row sat one misclick from the row's other buttons,
+  // and the confirm() dialog was the only guard. The row keeps the frequent,
+  // safe actions; the detail — where the user's attention already is — owns the
+  // destructive one.
   const actions = card(t('colActions'), h('div', { className: 'agy-actions' },
     button(t('actionTest'), () => { handlers.onTest(account.index) }, { disabled: busy }),
     button(t('actionExport'), () => { handlers.onExport(account.index) }, { disabled: busy }),
-    button(t('actionRegenerateFingerprint'), () => { handlers.onRegenerateFingerprint(account.index) }, { disabled: busy })))
+    button(t('actionRegenerateFingerprint'), () => { handlers.onRegenerateFingerprint(account.index) }, { disabled: busy }),
+    button(t('actionDelete'), () => { handlers.onDelete(account.index) }, { variant: 'danger', disabled: busy })))
 
   /**
    * The 5-hour / weekly windows, placed ABOVE the cumulative usage card.
@@ -564,19 +691,37 @@ function AccountDetail(props: {
           h('div', { className: 'agy-limit-group-name' }, group.name),
           ...group.windows.map((window) => {
             const fraction = window.remainingFraction
-            return h('div', { className: 'agy-limit-row', key: window.bucketId },
-              h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),
-              h('span', { className: 'agy-limit-track' },
-                fraction === null
-                  ? null
-                  : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
-              // An unreported fraction is an em dash, never "0%": unknown
-              // headroom and no headroom are opposite facts. A dedicated key
-              // rather than reusing `noProject`, whose NAME would then be wrong
-              // for the value it renders.
-              h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
-              h('span', { className: 'agy-limit-reset' },
-                window.resetTime === null ? null : untilText(window.resetTime, t, now)))
+            // Burn projection: rate (fraction/hour) over remaining fraction
+            // gives hours-to-empty. Spoken ONLY when that lands BEFORE the
+            // window's reset — otherwise the reset time this row already shows
+            // is the answer, and a "won't run dry" line is noise.
+            const burn = account.limitBurn?.[window.bucketId]
+            const hoursLeft = fraction !== null && burn !== undefined && burn > 0
+              ? fraction / burn
+              : null
+            const resetHours = window.resetTime === null
+              ? null
+              : (new Date(window.resetTime).getTime() - now) / HOUR_MS
+            const exhaustsFirst = hoursLeft !== null && resetHours !== null
+              && hoursLeft < resetHours
+            return h('div', { key: window.bucketId },
+              h('div', { className: 'agy-limit-row' },
+                h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),
+                h('span', { className: 'agy-limit-track' },
+                  fraction === null
+                    ? null
+                    : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
+                // An unreported fraction is an em dash, never "0%": unknown
+                // headroom and no headroom are opposite facts. A dedicated key
+                // rather than reusing `noProject`, whose NAME would then be wrong
+                // for the value it renders.
+                h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
+                h('span', { className: 'agy-limit-reset' },
+                  window.resetTime === null ? null : untilText(window.resetTime, t, now))),
+              exhaustsFirst
+                ? h('div', { className: 'agy-limit-burn' },
+                  t('limitBurnWarn', { value: burnHorizon(hoursLeft!, t) }))
+                : null)
           })))))
 
   const usageBlock = usage === null ? null : card(
@@ -631,6 +776,20 @@ function AccountDetail(props: {
 }
 
 /**
+ * Whether the row should offer "set as current".
+ *
+ * A pure rule, exported for a direct unit test. Two cases hide the action:
+ * the account is already the pool's preference, or it is DISABLED — `activate`
+ * only writes the preference and cannot re-enable, so on a disabled row the
+ * button was a no-op the user would read as broken. The repair path for a
+ * button was a no-op the user would read as broken. The repair path for a
+ * disabled account is `actionVerify`, which stays on the row.
+ */
+export function canActivateAccount(account: AccountView): boolean {
+  return !account.active && account.state !== 'disabled'
+}
+
+/**
  * Pick the selected account index: defaults to the active account (badge "current")
  * when present, otherwise falls back to index 0. Clamps to valid bounds.
  */
@@ -651,12 +810,41 @@ export function resolveSelectedAccountIndex(
 function AccountsTab(props: {
   accounts: AccountView[]
   busy: boolean
+  /** Accounts with upstream requests in flight, from the latest pool.status. */
+  busyNow: AgyRpcResult<'pool.status'>['busy']
+  /** RPC carrier, for the recent-activity card's own polling. */
+  rpc: AgyRpcClient
   handlers: AccountHandlers
+  /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
+  lang?: string
   t: T
 }): ReactNode {
   const { accounts, busy, handlers, t } = props
   const [selected, setSelected] = useState<number | null>(null)
   const selectedRef = useRef<HTMLDivElement | null>(null)
+  // One clock reading per render: the row metas' relative "active N ago"
+  // fragments must agree with each other (as the detail card's already do).
+  const now = Date.now()
+
+  /**
+   * The live line: who is serving right now, and how much.
+   *
+   * Present ONLY while something is in flight — an idle pool renders no strip,
+   * so the quiet state stays quiet. The dot is the host `StateDot`'s ongoing
+   * state, so the animation is the platform's.
+   */
+  const liveLine = props.busyNow.length === 0 ? null : (() => {
+    const total = props.busyNow.reduce((sum, entry) => sum + entry.count, 0)
+    const [first] = props.busyNow
+    // The label's subject is computed first, not inline: keeping the params
+    // object free of nested braces is also what the placeholder test can see.
+    const subject = first === undefined ? '' : first.email ?? `#${first.index}`
+    return h('div', { className: 'agy-live' },
+      h(StateDot, { state: 'ongoing', size: 8 }),
+      h('span', null, props.busyNow.length === 1
+        ? t('liveOne', { email: subject, count: total })
+        : t('liveMany', { count: total, accounts: props.busyNow.length })))
+  })()
 
   // Clamp by index, not by re-deriving a "selected id": deletion renumbers every
   // row, so an id-based selection would have to be remapped anyway.
@@ -699,39 +887,69 @@ function AccountsTab(props: {
     h('div', { className: 'agy-rowtitle' },
       h('span', { className: 'agy-rowname' }, account.email ?? `#${account.index}`),
       account.active ? h(Tag, { tone: 'info' }, t('currentAccount')) : null),
-    h('div', { className: 'agy-rowmeta' },
-      (account.projectId ?? t('noProject')),
-      account.usage === null || account.usage.totals.requests === 0
-        ? null
-        : ` · ${t('colRequests')} ${account.usage.totals.requests}`)),
+      h('div', { className: 'agy-rowmeta' },
+        (account.projectId ?? t('noProject')),
+        account.usage === null || account.usage.totals.requests === 0
+          ? null
+          : ` · ${t('rowRequestsTotal', { n: account.usage.totals.requests })}`,
+        // The recency fragment: "is this account still alive" is a scan-level
+        // question the all-time count cannot answer. Any source counts — a
+        // verify is as much activity as a turn of chat.
+        account.usage === null || account.usage.lastUsedAt === null
+          ? null
+          : ` · ${t('lastActive', { ago: agoText(new Date(account.usage.lastUsedAt).toISOString(), t, now) })}`)),
   h('div', { className: 'agy-rowactions' },
     stateBadge(account.state, account.state === 'cooling'
-      ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil)}`
-      : stateLabel(account.state, t)),
-    account.active ? null : button(t('actionActivate'), () => {
+      ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil, props.lang)}`
+      : account.state === 'verification-required'
+        // A parked account holds a timed window (its `cooldownUntil`), and its
+        // end is the question the reader asks — the mirror of the cooling badge.
+        ? t('verificationRetry', { time: clockTime(account.cooldownUntil, props.lang) })
+        : stateLabel(account.state, t)),
+    canActivateAccount(account) ? button(t('actionActivate'), () => {
       setSelected(at)
       handlers.onActivate(account.index)
-    }, { size: 'sm', disabled: busy }),
-    button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }),
-    button(t('actionDelete'), () => {
-      setSelected(null)
-      handlers.onDelete(account.index)
-    }, { size: 'sm', variant: 'danger', disabled: busy }))))
+    }, { size: 'sm', disabled: busy }) : null,
+    button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }))))
 
   return h('div', { className: 'agy-root' },
     // The container-query wrapper the `.agy-split` breakpoint measures; see
     // styles.ts for why this is a container query rather than a viewport one.
     h('div', { className: 'agy-split-wrap' },
       h('div', { className: 'agy-split' },
-        card(t('colAccount'), h('div', { className: 'agy-rows' }, ...rows),
+        card(t('colAccount'),
+          h('div', null,
+            liveLine,
+            h('div', { className: 'agy-rows' }, ...rows)),
           `${accounts.length}`),
         // `key` remounts the detail per account so its proxy draft cannot carry
         // over: without it React reuses the instance and a draft typed for one
         // account was still in the box after selecting another, one Save away
         // from writing A's proxy to B.
+        //
+        // `onDelete` is wrapped here, not in the shared handlers object: the
+        // row-level delete used to clear the selection before acting (deletion
+        // renumbers every index), and that selection state lives in THIS
+        // component. Deleting from the detail's action card must behave the same.
         current === undefined
           ? null
-          : h(AccountDetail, { key: String(current.index), account: current, busy, handlers, t }))))
+          : h(AccountDetail, {
+            key: String(current.index),
+            account: current,
+            busy,
+            handlers: {
+              ...handlers,
+              onDelete: (index: number) => {
+                setSelected(null)
+                handlers.onDelete(index)
+              },
+            },
+            lang: props.lang,
+            t,
+          })),
+    // The "what just happened" list, under the split: it is pool-level
+    // activity, not one account's, and the split owns the full height.
+    h(RecentCard, { rpc: props.rpc, t })))
 }
 
 /**
@@ -1175,6 +1393,140 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   return card(t('thinkingTitle'), block)
 }
 
+// ─── Recent activity ─────────────────────────────────────────────────────────
+
+/** Result vocabulary for one recent row; rotation events are their own kind. */
+function recentResultKind(entry: RecentEntry): 'ok' | 'fail' | 'limited' | 'rotation' {
+  if (entry.kind === 'rotation') return 'rotation'
+  if (entry.rateLimited) return 'limited'
+  if (!entry.ok) return 'fail'
+  return 'ok'
+}
+
+/**
+ * Localized label for a failure-classification token, falling back to the raw
+ * token so a classification added upstream still reads as something.
+ */
+function failureReasonLabel(reason: string, t: T): string {
+  switch (reason) {
+    case 'rate-limit': return t('colRateLimited')
+    case 'network-error': return t('cooldownReasonNetworkError')
+    case 'auth-failure': return t('disabledCredentials')
+    case 'verification-required': return t('cooldownReasonValidationRequired')
+    case 'quota-exhausted': return t('cooldownReasonQuotaExhausted')
+    case 'project-error': return t('cooldownReasonProjectError')
+    default: return reason
+  }
+}
+
+/**
+ * The result cell's text. Rotation rows say WHY (`reason` rides the record
+ * since the ring captures the classification); a failed request with a
+ * non-rate-limit classification also names it — the rate-limit case is already
+ * the whole RateLimited label, and doubling it reads as a stutter.
+ */
+function recentResultText(entry: RecentEntry, t: T): string {
+  const kind = recentResultKind(entry)
+  if (kind === 'rotation') {
+    return entry.reason === null
+      ? t('colRotations')
+      : `${t('colRotations')} · ${failureReasonLabel(entry.reason, t)}`
+  }
+  if (kind === 'limited') return t('colRateLimited')
+  if (kind === 'fail') {
+    return entry.reason === null || entry.reason === 'rate-limit'
+      ? t('colFailed')
+      : `${t('colFailed')} · ${failureReasonLabel(entry.reason, t)}`
+  }
+  return t('recentOk')
+}
+
+/**
+ * The "what just happened" list: the most recent records this process saw,
+ * newest first, collapsed by default and polled while open.
+ *
+ * A component (never called directly) — it owns hooks; see ThinkingSamples for
+ * the hook-order rule this file has been bitten by twice. The poll is the same
+ * 3s cadence as the live line and reads the host's memory ring, so an open
+ * list costs nothing upstream.
+ */
+function RecentCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+  const { rpc, t } = props
+  const [open, setOpen] = useState(false)
+  const [recent, setRecent] = useState<RecentEntry[] | null>(null)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+
+  const load = useCallback((): void => {
+    void rpc.call('pool.recent', {}).then((result) => {
+      if (alive.current) {
+        setRecent(result.recent)
+        setError(undefined)
+      }
+    }).catch((caught: unknown) => {
+      if (alive.current) setError(caught instanceof Error ? caught.message : String(caught))
+    })
+  }, [rpc])
+
+  // Loaded on first open (nobody needs it before that), then refreshed on the
+  // poll cadence while open. A closed list never fires.
+  useEffect(() => { if (open && recent === null) load() }, [open, recent, load])
+  useEffect(() => {
+    if (!open) return
+    const timer = setInterval(() => { if (!document.hidden) load() }, POOL_POLL_INTERVAL_MS)
+    return () => { clearInterval(timer) }
+  }, [open, load])
+
+  const now = Date.now()
+
+  return h('div', { className: 'agy-disclosure agy-recent', 'data-open': open },
+    h('button', {
+      type: 'button',
+      className: 'agy-disclosure-toggle',
+      'aria-expanded': open,
+      onClick: () => { setOpen(!open) },
+    },
+    h('span', { className: 'agy-caret' }),
+    h('span', null, t('recentTitle')),
+    recent === null ? null : h('span', { className: 'agy-disclosure-meta' }, String(recent.length))),
+    open === false ? null : h('div', { className: 'agy-disclosure-body' },
+      error === undefined ? null : h('div', { className: 'agy-error' }, error),
+      hint(t('recentHelp')),
+      recent === null
+        ? h('div', { className: 'agy-empty' }, t('loading'))
+        : recent.length === 0
+          ? h('div', { className: 'agy-empty' }, t('recentEmpty'))
+          : h('div', { className: 'agy-table-wrap' },
+            table(
+              // Every column carries an explicit width: a fixed-layout table
+              // with an auto column starved it to a sliver, and the identity
+              // truncation below bounds content so the widths hold.
+              h('tr', null,
+                h('th', { style: { width: '64px' } }, t('colTime')),
+                h('th', { style: { width: '30%' } }, t('colAccount')),
+                h('th', { style: { width: '24%' } }, t('colModel')),
+                h('th', { style: { width: '96px' } }, t('colResult')),
+                h('th', { style: { width: '56px' } }, t('colDuration')),
+                h('th', { style: { width: '48px' } }, t('colOutput'))),
+              recent.map((entry, index) => h('tr', { key: `${entry.at}-${index}` },
+                h('td', null, recentAgo(entry.at, now, t)),
+                h('td', null, h('span', {
+                  className: 'agy-mail',
+                  title: entry.account ?? undefined,
+                }, entry.account === null ? '—' : truncateIdentity(entry.account))),
+                h('td', null, h('span', {
+                  className: 'agy-mail',
+                  title: entry.model ?? undefined,
+                }, entry.model === null ? '—' : truncateIdentity(entry.model))),
+                h('td', null, h('span', { className: 'agy-recent-state', 'data-kind': recentResultKind(entry) }, recentResultText(entry, t))),
+                h('td', null, entry.latencyMs === null ? '—' : formatDuration(entry.latencyMs)),
+                h('td', { className: 'agy-num' }, entry.output === null ? '—' : tokenText(entry.output))))))))
+}
+
 // ─── Usage tab ───────────────────────────────────────────────────────────────
 
 type RangeId = 'today' | 'week' | 'month' | 'all'
@@ -1250,7 +1602,7 @@ function tokenComposition(counters: UsageCounters, t: T): ReactNode {
   }))
 }
 
-function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
+function UsageTab(props: { stats: StatsView | null, lang?: string, t: T }): ReactNode {
   const { t } = props
   const [range, setRange] = useState<RangeId>('today')
   const stats = props.stats
@@ -1282,7 +1634,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     h('span', { className: 'agy-grow' }),
     stats.since === null
       ? null
-      : h('span', { className: 'agy-aside' }, t('since', { date: new Date(stats.since).toLocaleDateString() })))
+      : h('span', { className: 'agy-aside' }, t('since', { date: new Date(stats.since).toLocaleDateString(props.lang) })))
 
   /**
    * The headline: total Token FIRST, then the three buckets that add up to it.
@@ -1317,6 +1669,25 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     [t('labelLatencyAverage'), formatDuration(average(counters.latencyMs, counters.latencyN))],
     [t('labelTtft'), formatDuration(average(counters.ttftMs, counters.ttftN))],
   ]))
+
+  // The per-day trend, independent of the range picker: it answers "is this
+  // pool degrading over time", a question the range-folded tables above cannot
+  // show. Fixed 7-day window, zeros filled (see StatsView.days).
+  const trend = card(t('trendTitle'),
+    h('div', { className: 'agy-table-wrap' },
+      table(
+        h('tr', null,
+          h('th', null, t('colDay')),
+          numHeader(0, t('colRequests')),
+          numHeader(1, t('colFailed')),
+          numHeader(2, t('colRateLimited')),
+          numHeader(3, t('colRotations'))),
+        stats.days.map((row) => h('tr', { key: row.day },
+          h('td', null, dayLabel(row.day, props.lang)),
+          h('td', { className: 'agy-num' }, String(row.requests)),
+          h('td', { className: 'agy-num' }, String(row.failed)),
+          h('td', { className: 'agy-num' }, String(row.rateLimited)),
+          h('td', { className: 'agy-num' }, String(row.rotations)))))))
 
   // Column headers state the semantics directly, so no footnote is needed: the
   // prompt side is one column (all of it, cached included) and the cache line
@@ -1373,7 +1744,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
   )
 
   return h('div', { className: 'agy-root' },
-    rangePicker, summary, timing, byModel, byAccount)
+    rangePicker, summary, timing, trend, byModel, byAccount)
 }
 
 // ─── Credentials tab ─────────────────────────────────────────────────────────
@@ -1415,7 +1786,7 @@ function CredentialsTab(props: {
 // ─── root ────────────────────────────────────────────────────────────────────
 
 /** The Settings section body. */
-export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): ReactNode {
   const { rpc, t } = props
   const [tab, setTab] = useState<TabId>('accounts')
   const [accounts, setAccounts] = useState<AccountView[]>([])
@@ -1428,6 +1799,15 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   /** Model ids whose own test call is in flight (see the per-row test button). */
   const [modelTesting, setModelTesting] = useState<ReadonlySet<string>>(() => new Set())
   const [stats, setStats] = useState<StatsView | null>(null)
+  /**
+   * Accounts with upstream requests in flight, from the polled `pool.status`.
+   *
+   * A poll, not a push: the section has no push channel, and the call is a pure
+   * in-memory read on the host. A failed poll is display-only and stays silent —
+   * the previous frame (including "idle") holds until the next tick, which is
+   * the honest degradation for a status line.
+   */
+  const [poolBusy, setPoolBusy] = useState<AgyRpcResult<'pool.status'>['busy']>([])
   const [error, setError] = useState<string | undefined>(undefined)
   /** A non-fatal outcome worth reporting (e.g. a partial credential import). */
   const [notice, setNoticeState] = useState<string | undefined>(undefined)
@@ -1550,7 +1930,14 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         // Leave the row untouched when this refresh learned nothing, so a failed
         // probe cannot erase windows that were already showing.
         if (entry === undefined || entry.groups === null) return account
-        return { ...account, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
+        return {
+          ...account,
+          limits: entry.groups,
+          limitsUpdatedAt: entry.updatedAt,
+          // A null rate keeps the previous one: "these two samples saw no drop"
+          // is not evidence the burn stopped.
+          limitBurn: entry.burn ?? account.limitBurn,
+        }
       }))
       // An explicit refresh reports itself. Without this a forced probe that
       // failed changed nothing on screen — no new numbers, no new timestamp —
@@ -1571,6 +1958,20 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   }, [rpc, setActionError, setNotice, t])
 
   useEffect(() => { void refresh() }, [refresh])
+
+  // The live line's poll. Runs for the section's lifetime — the interval is
+  // cheap by design (one local read), and a hidden panel skips its ticks.
+  useEffect(() => {
+    const tick = (): void => {
+      if (document.hidden) return
+      void rpc.call('pool.status', {})
+        .then((result) => { if (alive.current) setPoolBusy(result.busy) })
+        .catch(() => { /* display-only; the next tick retries */ })
+    }
+    tick()
+    const timer = setInterval(tick, POOL_POLL_INTERVAL_MS)
+    return () => { clearInterval(timer) }
+  }, [rpc])
   useEffect(() => {
     // Only on the tab that shows them, and after the rows exist so the merge has
     // something to write into.
@@ -1790,7 +2191,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     }, label, count === undefined ? null : h('span', { className: 'agy-count' }, String(count)))
 
   const body = tab === 'accounts'
-    ? h(AccountsTab, { accounts, busy, handlers, t })
+    ? h(AccountsTab, { accounts, busy, busyNow: poolBusy, handlers, lang: props.lang, rpc, t })
     : tab === 'models'
       ? modelError === undefined
         ? h(ModelsTab, {
@@ -1878,7 +2279,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
           h('div', { className: 'agy-error' }, modelError),
           button(t('refresh'), () => { void loadModels() }, { size: 'sm' }))
       : tab === 'usage'
-        ? h(UsageTab, { stats, t })
+        ? h(UsageTab, { stats, lang: props.lang, t })
         : h(CredentialsTab, {
           busy,
           t,
@@ -1958,11 +2359,16 @@ export function apply(ctx: ClientContext): void {
   // Bound once from the host's locale service: the slot content is re-created on
   // a language switch (the locale plugin bumps the ledger), so `t` stays current.
   const t = ctx.locale.bind(NS)
+  // The UI language for date formatting, read once per mount for the same
+  // reason. Optional-call against an older host whose locale service predates
+  // `getLocale`: undefined then degrades to the browser default, which is the
+  // pre-`lang` behaviour, not a crash.
+  const lang = ctx.locale.getLocale?.().active
   ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'agy',
     order: 30,
     locale: NS,
     label: () => t('title'),
-  }, () => h(AgySettings, { rpc, t }))), 'dsh-agy: Settings section')
+  }, () => h(AgySettings, { rpc, t, lang }))), 'dsh-agy: Settings section')
 }

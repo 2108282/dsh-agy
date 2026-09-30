@@ -25,8 +25,8 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { resolveDshHome } from './store/keyring.ts'
+import { dirname } from 'node:path'
+import { migrateToAgyDir } from './store/paths.ts'
 
 export const MODELS_VERSION = 1
 
@@ -69,7 +69,10 @@ export function parseModelVisibility(text: string): ModelVisibilityDocument {
 }
 
 export interface ModelVisibilityOptions {
-  /** Defaults to `$DSH_HOME/agy-models.json`. */
+  /**
+   * Defaults to `$DSH_HOME/agy/agy-models.json`, migrating the legacy
+   * `$DSH_HOME/agy-models.json` by one-shot rename (see `migrateToAgyDir`).
+   */
   file?: string
 }
 
@@ -100,7 +103,7 @@ export class ModelVisibility {
   private readonly sets = new Map<string, ReadonlySet<string>>()
 
   constructor(options: ModelVisibilityOptions = {}) {
-    this.file = options.file ?? join(resolveDshHome(), 'agy-models.json')
+    this.file = options.file ?? migrateToAgyDir('agy-models.json').file
     const initial = this.readWithRaw()
     this.disabled = initial.disabled
     this.raw = initial.raw

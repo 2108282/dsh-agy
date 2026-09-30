@@ -1,4 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import { _resetAgyRuntimeForTest, createAgyRuntime } from '../src/plugin-common.ts'
 import { renderCallbackHtml } from '../src/web/page.ts'
 import { I18N_DICT } from '../src/web/i18n.ts'
 
@@ -7,6 +11,31 @@ import { I18N_DICT } from '../src/web/i18n.ts'
  * section in `src/client/`, rendered over the `/api/agy` RPC. Only the OAuth
  * callback is still served as a page, because Google redirects a browser to it.
  */
+describe('agy runtime sharing', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.DSH_HOME
+    _resetAgyRuntimeForTest()
+  })
+
+  it('hands both entry points the SAME instances in one process', async () => {
+    // Two runtimes in one process were the defect behind an empty "recent"
+    // list and a blind live line: the ledger FILE merges across instances so
+    // counters looked fine, while the in-memory ring and in-flight map each
+    // saw only their own entry's records. It also meant account.activate
+    // cleared pins on the wrong session manager.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'agy-runtime-'))
+    _resetAgyRuntimeForTest()
+    const main = await createAgyRuntime({ get: () => undefined, logger: { warn() {} } } as never)
+    const web = await createAgyRuntime({ get: () => undefined, logger: { warn() {} } } as never)
+    expect(web.stats).toBe(main.stats)
+    expect(web.sessions).toBe(main.sessions)
+    expect(web.adapter).toBe(main.adapter)
+    expect(web.store).toBe(main.store)
+  })
+})
+
 describe('dsh-agy web page rendering', () => {
   it('renders the callback page for success and failure states', () => {
     const successHtml = renderCallbackHtml({ ok: true, email: 'test@example.com', baseUrl: 'http://127.0.0.1:3080' })

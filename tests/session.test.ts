@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AgySessionManager, impersonationHeadersFor, SESSION_AFFINITY_WINDOW_MS } from '../src/session.ts'
+import { AgySessionManager, impersonationHeadersFor, sampleLimitBurn, SESSION_AFFINITY_WINDOW_MS } from '../src/session.ts'
 import { MAX_IN_FLIGHT_PER_ACCOUNT } from '../src/runtime/rotation.ts'
 import { _setFingerprintDataForTest } from '../src/runtime/fingerprint.ts'
 import { _clearVersionCacheForTest } from '../src/runtime/version.ts'
@@ -18,6 +18,32 @@ function stubTokenEndpoint(overrides: Partial<{ ok: boolean; body: unknown; stat
   const { ok = true, body = { access_token: 'at', expires_in: 3600 }, status = 200 } = overrides
   vi.stubGlobal('fetch', vi.fn(async () => new Response(ok ? JSON.stringify(body) : JSON.stringify(body), { status })))
 }
+
+describe('sampleLimitBurn', () => {
+  it('yields nothing on the first sample or when two samples are too close', () => {
+    const first = { at: 0, fractions: { 'g-5h': 0.8 } }
+    expect(sampleLimitBurn(undefined, first)).toBeNull()
+    // Two probes seconds apart measure probe jitter, not the burn.
+    expect(sampleLimitBurn(first, { at: 4 * 60_000, fractions: { 'g-5h': 0.7 } })).toBeNull()
+  })
+
+  it('converts a fraction drop into fraction per hour', () => {
+    // 0.1 dropped over half an hour -> 0.2/h.
+    const first = { at: 0, fractions: { 'g-5h': 0.8 } }
+    const rate = sampleLimitBurn(first, { at: 30 * 60_000, fractions: { 'g-5h': 0.7 } })
+    expect(rate?.['g-5h']).toBeCloseTo(0.2)
+  })
+
+  it('ignores rising fractions (a reset) and buckets without a baseline', () => {
+    const first = { at: 0, fractions: { 'g-5h': 0.5, 'g-weekly': 0.9 } }
+    // weekly rises (freshly reset); only the 5h drop yields a rate.
+    const mixed = sampleLimitBurn(first, { at: 3_600_000, fractions: { 'g-5h': 0.3, 'g-weekly': 1 } })
+    expect(mixed?.['g-weekly']).toBeUndefined()
+    expect(mixed?.['g-5h']).toBeCloseTo(0.2)
+    expect(sampleLimitBurn({ at: 0, fractions: { 'g-5h': 0.5 } }, { at: 3_600_000, fractions: { 'g-new': 0.5 } }))
+      .toBeNull()
+  })
+})
 
 describe('AgySessionManager', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -422,6 +448,28 @@ describe('usage-driven selection', () => {
     await store.mutate((s) => { s.activeIndex = 0 })
     const back = await sessions.getSession('gemini-3-flash', undefined, 'session-D')
     expect(back!.index).toBe(0)
+  })
+
+  it('reports in-flight work per account and empties as requests settle', async () => {
+    // The live line's source: started/settled through the public note API, and
+    // the snapshot mirrors it per account, in store order.
+    const a = account('a@x')
+    const b = account('b@x')
+    const sessions = new AgySessionManager({ store: new InMemoryAccountStore(storage([a, b], 0)) })
+    expect(await sessions.inFlightAccounts()).toEqual([])
+
+    sessions.noteRequestStarted(a)
+    sessions.noteRequestStarted(a)
+    sessions.noteRequestStarted(b)
+    expect(await sessions.inFlightAccounts()).toEqual([
+      { index: 0, email: 'a@x', count: 2 },
+      { index: 1, email: 'b@x', count: 1 },
+    ])
+
+    sessions.noteRequestSettled(a)
+    sessions.noteRequestSettled(a)
+    sessions.noteRequestSettled(b)
+    expect(await sessions.inFlightAccounts()).toEqual([])
   })
 
   it('ingests fresh family quotas from fetchAvailableModels when the cache is stale', async () => {

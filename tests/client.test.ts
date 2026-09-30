@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
-import { apply, orderModels, resolveSelectedAccountIndex, tokenText } from '../src/client/index.ts'
+import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText, truncateIdentity } from '../src/client/index.ts'
 import { en, zh } from '../src/client/locales.ts'
+import { zeroCounters } from '../src/usage-types.ts'
 import type { AccountView, ModelView } from '../src/rpc-contract.ts'
+import type { UsageCounters } from '../src/usage-types.ts'
 
 /** Minimal client context: locale, connection (RPC transport), and the slot registry. */
 function makeContext(options: { withConnection?: boolean } = {}) {
@@ -18,6 +20,7 @@ function makeContext(options: { withConnection?: boolean } = {}) {
     locale: {
       register: (ns: string) => { dictionaries.push(ns); return () => {} },
       bind: () => (key: string) => key,
+      getLocale: () => ({ active: 'zh' as const, locales: [], revision: 0 }),
     },
     logger: { warn: (message: string) => { warnings.push(message) } },
     slots: {
@@ -264,14 +267,17 @@ describe('token count formatting', () => {
   })
 })
 
-describe('resolveSelectedAccountIndex', () => {
-  function view(index: number, active = false): AccountView {
+describe('canActivateAccount', () => {
+  // A lean builder: the action's visibility depends on exactly two fields, so
+  // the other required ones are inert here.
+  function view(state: AccountView['state'], active = false): AccountView {
     return {
-      index,
-      email: `acc${index}@example.com`,
+      index: 0,
+      email: 'acc@example.com',
       projectId: 'proj',
       active,
-      state: active ? 'active' : 'cooling',
+      state,
+      disabledAt: null,
       cooldownUntil: null,
       cooldownReason: null,
       cooldownSetAt: null,
@@ -284,6 +290,99 @@ describe('resolveSelectedAccountIndex', () => {
       usage: null,
       limits: null,
       limitsUpdatedAt: null,
+      limitBurn: null,
+    }
+  }
+
+  it('offers the action to every non-current account except a disabled one', () => {
+    expect(canActivateAccount(view('active'))).toBe(true)
+    expect(canActivateAccount(view('cooling'))).toBe(true)
+    expect(canActivateAccount(view('verification-required'))).toBe(true)
+    expect(canActivateAccount(view('disabled'))).toBe(false)
+  })
+
+  it('never offers it on the account that is already the pool preference', () => {
+    expect(canActivateAccount(view('active', true))).toBe(false)
+    // A disabled account cannot be the preference (`active` requires enabled),
+    // so the two guards do not overlap — but if the store ever disagreed, the
+    // safe answer is still "no button".
+    expect(canActivateAccount(view('disabled', true))).toBe(false)
+  })
+})
+
+describe('truncateIdentity', () => {
+  it('leaves short values alone', () => {
+    expect(truncateIdentity('gemini-3.8-flash')).toBe('gemini-3.8-flash')
+  })
+
+  it('cuts from the middle so both ends survive', () => {
+    // The email keeps its domain; the model id keeps its tier suffix — the
+    // two halves a reader actually distinguishes accounts and models by.
+    expect(truncateIdentity('mahmoud01142458311@gmail.com')).toBe('mahmoud0114…@gmail.com')
+    expect(truncateIdentity('gemini-3.8-flash-tiered')).toBe('gemini-3.8-…ash-tiered')
+  })
+})
+
+describe('throughput calculation', () => {
+  // The counters the calculation reads; everything else is inert.
+  const totals = (over: Partial<UsageCounters>): UsageCounters =>
+    ({ ...zeroCounters(), ...over })
+
+  it('is null when nothing was timed, produced, or first-tokened', () => {
+    // The detail row is absent for null, so a never-used account must not
+    // render "≈ 0 token/s" — that would read as "measured, and dead". A scope
+    // with wall time but NO first-token report cannot separate decode from
+    // wait, so it is null too rather than a whole-request average.
+    expect(throughputTokenPerSecond(zeroCounters())).toBeNull()
+    expect(throughputTokenPerSecond(totals({ output: 100, latencyMs: 5_000, latencyN: 1 }))).toBeNull()
+    // A first token at/after the wall clock (skew, or a degenerate sample).
+    expect(throughputTokenPerSecond(totals({ output: 500, latencyMs: 1_000, latencyN: 1, ttftMs: 1_200, ttftN: 1 }))).toBeNull()
+  })
+
+  it('divides output by the window AFTER the first token, not the wall clock', () => {
+    // 100 tokens over 2s of wall time, 1.5s of it waiting for the first token:
+    // the streamed half-second carried 100 tokens → 200 tok/s. Dividing by the
+    // wall clock instead reported ~8× low on a channel whose first-token wait
+    // is ~90% of the request (the "40 vs ~300" report).
+    expect(throughputTokenPerSecond(totals({ output: 100, latencyMs: 2_000, latencyN: 1, ttftMs: 1_500, ttftN: 1 }))).toBe(200)
+  })
+
+  it('averages per request when the two clocks cover different request counts', () => {
+    // Failed requests carry wall time but no first token, so latencyN can
+    // exceed ttftN. Raw sums would hand the failures' wait to the decode
+    // window; the per-request averages keep the rate on streamed requests.
+    expect(throughputTokenPerSecond(totals({
+      output: 150, latencyMs: 3_000, latencyN: 2, ttftMs: 1_000, ttftN: 1,
+    }))).toBe(150)
+  })
+
+  it('rounds to whole tokens per second', () => {
+    expect(throughputTokenPerSecond(totals({ output: 10, latencyMs: 400, latencyN: 1, ttftMs: 100, ttftN: 1 }))).toBe(33)
+  })
+})
+
+describe('resolveSelectedAccountIndex', () => {
+  function view(index: number, active = false): AccountView {
+    return {
+      index,
+      email: `acc${index}@example.com`,
+      projectId: 'proj',
+      active,
+      state: active ? 'active' : 'cooling',
+      disabledAt: null,
+      cooldownUntil: null,
+      cooldownReason: null,
+      cooldownSetAt: null,
+      verificationUrl: null,
+      verificationRequired: false,
+      rateLimits: null,
+      fingerprint: null,
+      fingerprintHistory: 0,
+      proxy: null,
+      usage: null,
+      limits: null,
+      limitsUpdatedAt: null,
+      limitBurn: null,
     }
   }
 

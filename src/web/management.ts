@@ -23,7 +23,8 @@ import { clearExpiredState } from '../runtime/rotation.ts'
 import { foldWindowBreakdown } from '../stats.ts'
 import { THINKING_BUDGET_MAX, THINKING_BUDGET_MIN } from '../thinking-budget.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN } from '../thinking-types.ts'
-import type { UsageCounters, UsageSource } from '../stats.ts'
+import { dayKey } from '../stats.ts'
+import type { RecentActivity, UsageCounters, UsageSource } from '../stats.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { AgySessionManager } from '../session.ts'
 import type { ModelVisibility } from '../model-visibility.ts'
@@ -49,6 +50,13 @@ export interface AgyManagementOptions {
   store: AccountStore
   sessions: AgySessionManager
   stats: UsageStats
+  /**
+   * The persisted recent-activity ring (see `recent-store.ts`).
+   *
+   * A plain accessor rather than the store instance, matching `thinkingBudget`:
+   * this module needs exactly one operation and cannot reach the rest.
+   */
+  recentRequests: () => RecentActivity[]
   modelVisibility: ModelVisibility
   /**
    * The global reasoning-level budget map (see `thinking-budget.ts`).
@@ -118,24 +126,27 @@ function asIndex(payload: unknown): number {
 /**
  * Flatten one account's ledger entry for transport.
  *
- * `models` and `lastUsedAt` are deliberately NOT carried: the per-model table
- * that read `models` was removed (the cumulative metric strip states the same
- * figures better), and the `lastUsedAt` ordering rule went with it. Sending
- * fields no client reads is a wire surface with no consumer, which reads as
- * intentional to the next person and invites a stale assumption.
+ * `models` is deliberately NOT carried: the per-model table that read it was
+ * removed (the cumulative metric strip states the same figures better), and
+ * sending fields no client reads is a wire surface with no consumer, which
+ * reads as intentional to the next person and invites a stale assumption.
+ * `lastUsedAt` DOES travel — the account row's activity fragment reads it.
  */
 function toAccountUsageView(
-  usage: { totals: UsageCounters; sources: Record<UsageSource, number> } | undefined,
+  usage: { totals: UsageCounters; sources: Record<UsageSource, number>; lastUsedAt?: number } | undefined,
 ): AccountUsageView | null {
   if (usage === undefined) return null
   return {
     totals: usage.totals,
     sources: usage.sources,
+    lastUsedAt: typeof usage.lastUsedAt === 'number' && Number.isFinite(usage.lastUsedAt)
+      ? usage.lastUsedAt
+      : null,
   }
 }
 
 export function createAgyManagement(options: AgyManagementOptions): AgyManagement {
-  const { store, sessions, stats, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
+  const { store, sessions, stats, recentRequests, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
   const thinkingBudget = options.thinkingBudget
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
@@ -188,6 +199,14 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         projectId: account.projectId ?? null,
         active: index === storage.activeIndex && account.enabled !== false,
         state,
+        // Disabled is terminal until a human acts (verify / re-import), so the
+        // time is the actionable half: "minutes ago" makes an immediate verify
+        // worth trying, "weeks ago" says re-login. Both disable writers persist
+        // `verificationRequiredAt` in the same mutation as `enabled = false`,
+        // and the parked-but-enabled path must NOT read as a disable time.
+        disabledAt: account.enabled === false && account.verificationRequiredAt !== undefined
+          ? new Date(account.verificationRequiredAt).toISOString()
+          : null,
         cooldownUntil: account.coolingDownUntil !== undefined && account.coolingDownUntil > now
           ? new Date(account.coolingDownUntil).toISOString()
           : null,
@@ -221,6 +240,9 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         // zero, which would read as an exhausted account.
         limits: account.cachedLimits?.groups ?? null,
         limitsUpdatedAt: account.cachedLimits?.updatedAt ?? null,
+        // The burn rate arrives via `account.limits` (it exists only after the
+        // sampling path has run twice); `account.list` stays probe-free.
+        limitBurn: null,
         usage: key === undefined ? null : toAccountUsageView(ledger.accounts[key]),
       })
     }
@@ -269,17 +291,36 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       return { counters: totals, models, accounts }
     }
 
+    // Last 7 LOCAL calendar days, zeros filled: the trend table's job is to
+    // show shape over time, and a gap day reads as data loss rather than idle.
+    // Same local keying as the ledger's own buckets (dayKey).
+    const daySeries = Array.from({ length: 7 }, (_, i) => {
+      const key = dayKey(now - (6 - i) * 86_400_000)
+      const bucket = doc.days[key]
+      return {
+        day: key,
+        requests: bucket?.totals.requests ?? 0,
+        failed: bucket?.totals.failed ?? 0,
+        rateLimited: bucket?.totals.rateLimited ?? 0,
+        rotations: bucket?.totals.rotations ?? 0,
+      }
+    })
     return {
       since: doc.totals.requests > 0 ? doc.since : null,
       all: { counters: doc.totals, models: allModels, accounts: allAccounts },
       today: breakdown(1),
       week: breakdown(7),
       month: breakdown(30),
+      days: daySeries,
     }
   }
 
   const methods: Record<AgyRpcMethod, (payload: unknown) => Promise<unknown>> = {
     'account.list': async () => ({ accounts: await listAccounts() }),
+
+    'pool.status': async () => ({ busy: await sessions.inFlightAccounts() }),
+
+    'pool.recent': async () => ({ recent: recentRequests() }),
 
     'account.activate': async (payload) => {
       const index = asIndex(payload)
@@ -336,11 +377,16 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         .refreshLimits(storage, { force })
         .catch(() => ({ measured: [], failed: [], skipped: 0 }))
       const fresh = await store.load()
+      // Burn rates ride the same reply (the sampling path runs inside
+      // refreshLimits); a join failure degrades to null rates, not an error.
+      const burn = await sessions.limitBurnRates().catch(() => [])
+      const burnByIndex = new Map(burn.map((entry) => [entry.index, entry.perHour]))
       return {
         limits: fresh.accounts.map((account, index) => ({
           index,
           groups: account.cachedLimits?.groups ?? null,
           updatedAt: account.cachedLimits?.updatedAt ?? null,
+          burn: burnByIndex.get(index) ?? null,
         })),
         measured: result.measured.length,
         failed: result.failed.length,

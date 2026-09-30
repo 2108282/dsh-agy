@@ -122,11 +122,11 @@ dsh plugin --profile web remove dsh-agy
 # 2. 卸载 CLI
 npm uninstall -g dsh-agy
 
-# 3. 可选：删除本地账号数据（账号 + 主密钥 + 指纹覆盖）
+# 3. 可选：删除本地账号数据（整个 agy 数据文件夹）
 dsh-agy logout              # 先删除账号（或跳过）
-rm -f ~/.dsh/agy-accounts.json ~/.dsh/agy-stats.json ~/.dsh/agy-models.json
+rm -rf ~/.dsh/agy           # 账号、用量统计、模型可见性、思考预算、最近请求
 # 只删除 ~/.dsh/.credentials.yaml 中的 AGY_MASTER_KEY 行——保留其他键！
-rm -f ~/.dsh/agy-fingerprint-data.json   # 仅当创建过覆盖文件
+# （从 ≤0.4 升级可能在 ~/.dsh 本身留下旧版文件：rm -f ~/.dsh/agy-*.json）
 
 # 4. 可选：撤销 Google 侧授权
 #    Google 账号安全设置 → 第三方访问 → 撤销 "Antigravity"
@@ -229,13 +229,21 @@ reset 时间。
 
 ### 存储与密钥
 
-- 账号：`~/.dsh/agy-accounts.json`，AES-256-GCM 加密；主密钥在
+所有 agy 数据文件统一放在一个文件夹 `~/.dsh/agy/`（`$DSH_HOME` 可整体迁移）。
+从 ≤0.4 升级后，首次启动时会把 `~/.dsh/` 下的旧版文件一次性原子改名挪进去；此后
+如果旧路径又出现同名文件，说明还有旧版本进程在运行——会有一次警告说明这一点。
+
+- 账号：`~/.dsh/agy/agy-accounts.json`，AES-256-GCM 加密；主密钥在
   `~/.dsh/.credentials.yaml`（`AGY_MASTER_KEY`，0600）。`$DSH_HOME` 可整体迁移。
-- 模型可见性：`~/.dsh/agy-models.json`（0600）——被隐藏模型的名单，只记录你关闭掉的模型，重新打开即删除对应条目。
-- 用量统计：`~/.dsh/agy-stats.json`（0600）——累计计数器加一个滚动 30 天窗口。计数在文件锁下合并，
-  因此多个进程（桌面端、web profile 服务、CLI）可并发记录而不会互相覆盖。只存账号 email，不存 token、代理或 project id。
-- 指纹池（版本串/SDK 客户端）可通过 `~/.dsh/agy-fingerprint-data.json` 覆盖——
+- 模型可见性：`~/.dsh/agy/agy-models.json`（0600）——被隐藏模型的名单，只记录你关闭掉的模型，重新打开即删除对应条目。
+- 用量统计：`~/.dsh/agy/agy-stats.json`（0600）——累计计数器加一个滚动 30 天窗口。计数在文件锁下合并，
+  因此多个进程（桌面端、web profile 服务、CLI）可并发记录而不会互相覆盖。
+- 最近请求：`~/.dsh/agy/agy-recent.json`（0600）——最近 200 条请求与轮换记录，落盘后
+  面板在重启后仍可见，也能看到其他进程的历史（外部进程的新记录 ≤30s 到达）。
+- 指纹池（版本串/SDK 客户端）可通过 `~/.dsh/agy/agy-fingerprint-data.json` 覆盖——
   无需发版即可更新。
+- 以上文件均不存 token、代理或 project id——只存账号 email；token 加密存在账号文件里，
+  主密钥存在凭据文档里。
 
 
 ## ⚠️ 风险声明

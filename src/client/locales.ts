@@ -19,17 +19,52 @@ export const zh = {
   tabUsage: '用量',
   tabCredentials: '凭据',
 
-  stateActive: '使用中',
+  // A pool-eligibility state, not a usage report: it means "enabled, not cooling,
+  // not parked" — the account MAY be picked. "使用中" would claim the account is
+  // serving requests right now, which collides with `currentAccount` (the one the
+  // pool preference points at) and is false for every other healthy row.
+  stateActive: '可用',
   stateCooling: '冷却中',
   stateVerificationRequired: '待验证',
   stateDisabled: '已停用',
   coolingUntil: '冷却至',
+  // The verification row's badge carries its own window end, which is the
+  // question a parked account answers ("how long until the pool retries").
+  verificationRetry: '待验证 · {time} 重试',
   currentAccount: '当前账号',
+  // Disabled has exactly one cause in this codebase (an upstream invalid_grant
+  // on the refresh token), so the reason is a fixed sentence, not a taxonomy.
+  fieldDisabled: '停用',
+  disabledCredentials: '凭据失效',
+  disabledSince: '停用于 {ago}',
+  disabledHint: '凭据已被上游拒绝。运行该账号所在行的「验证」尝试恢复；若仍失败，请重新登录导入。',
   noProject: '—',
   valueUnknown: '—',
 
   colAccount: '账号',
   colRequests: '请求',
+  // The recent-activity list's columns. Success/failure/limit/rotation reuse
+  // the existing result words; only the bespoke headers are new here.
+  colTime: '时间',
+  colResult: '结果',
+  colDuration: '耗时',
+  recentTitle: '最近请求',
+  recentHelp: '本进程内存中的最近 200 条（含轮换事件），不落盘、不跨进程合并。',
+  recentEmpty: '暂无最近记录',
+  recentOk: '成功',
+  // The row's count is ALL-TIME, while the Usage tab defaults to "today" — the
+  // bare 请求 label let the two figures read as the same quantity.
+  rowRequestsTotal: '累计请求 {n}',
+  lastActive: '{ago}活跃',
+  // The live line: present only while upstream requests are in flight.
+  liveOne: '正在通过 {email} 生成 · {count} 个并发',
+  liveMany: '正在生成 · {count} 个并发 · {accounts} 个账号',
+  fieldThroughput: '吞吐',
+  throughputValue: '≈ {n} token/s',
+  // The qualifier that makes the number meaningful: the denominator EXCLUDES the
+  // first-token wait (which the 延迟 row right above shows separately), so the
+  // figure is the streaming decode rate, not a whole-request average.
+  throughputNote: '首 token 后 · 累计平均',
   colActions: '操作',
   emptyAccounts: '还没有账号。切到「凭据」标签导入，或点击上方「登录」。',
 
@@ -40,6 +75,9 @@ export const zh = {
   limitsRefreshOk: '已刷新 {measured} 个账号的限额',
   limitsRefreshFresh: '限额仍是新鲜的，无需刷新',
   limitsRefreshFailed: '{failed} 个账号的限额刷新失败',
+  // Spoken only when the sampled burn rate would empty the window BEFORE its
+  // reset — otherwise the reset time beside it is already the answer.
+  limitBurnWarn: '按此速度{value}后耗尽',
   quotaWindow5h: '5 小时',
   quotaWindowWeekly: '每周',
   fieldProject: '项目',
@@ -68,6 +106,7 @@ export const zh = {
   quotaResetIn: '重置 {value}',
   relNow: '即将',
   relJustNow: '刚刚',
+  relSeconds: '{n} 秒',
   relAgo: '{value}前',
   relMinutes: '{n} 分钟',
   relHours: '{n} 小时',
@@ -75,7 +114,9 @@ export const zh = {
   relMonths: '{n} 个月',
   relYears: '{n} 年',
 
-  actionActivate: '激活',
+  // Switches the pool PREFERENCE to this account; it does not enable a disabled
+  // one (that is what 验证 does), which is why the verb is "set as current".
+  actionActivate: '设为当前',
   actionVerify: '验证',
   actionDelete: '删除',
   actionTest: '测试调用',
@@ -117,6 +158,8 @@ export const zh = {
   fieldRateLimitRotation: '限流 / 轮换',
   byModel: '按模型',
   byAccount: '按账号',
+  trendTitle: '近 7 天',
+  colDay: '日期',
   colModel: '模型',
   colTokenShare: 'Token 占比',
   colOutput: '输出',
@@ -195,17 +238,39 @@ export const en: Record<AgyLocaleKey, string> = {
   tabUsage: 'Usage',
   tabCredentials: 'Credentials',
 
-  stateActive: 'Active',
+  // Pool-eligibility state, not a usage report — see the zh note on `stateActive`.
+  stateActive: 'Ready',
   stateCooling: 'Cooling down',
   stateVerificationRequired: 'Needs verification',
   stateDisabled: 'Disabled',
   coolingUntil: 'Cooling until',
-  currentAccount: 'current',
+  verificationRetry: 'Needs verification · retries {time}',
+  currentAccount: 'Current',
+  fieldDisabled: 'Disabled',
+  disabledCredentials: 'Credentials rejected',
+  disabledSince: 'disabled {ago}',
+  disabledHint: 'The credentials were rejected by upstream. Run Verify on this account\'s row to try restoring it; if that fails, sign in again to re-import.',
   noProject: '—',
   valueUnknown: '—',
 
   colAccount: 'Account',
   colRequests: 'Requests',
+  colTime: 'Time',
+  colResult: 'Result',
+  colDuration: 'Duration',
+  recentTitle: 'Recent requests',
+  recentHelp: 'Last 200 records in this process\'s memory (rotation events included); never persisted, never merged across processes.',
+  recentEmpty: 'No recent activity',
+  recentOk: 'ok',
+  // All-time, while the Usage tab defaults to "today" — see the zh note.
+  rowRequestsTotal: '{n} requests in total',
+  lastActive: 'active {ago}',
+  liveOne: 'Generating via {email} · {count} in flight',
+  liveMany: 'Generating · {count} in flight across {accounts} account(s)',
+  fieldThroughput: 'Throughput',
+  throughputValue: '≈ {n} token/s',
+  // Excludes the first-token wait — see the zh note.
+  throughputNote: 'after first token · cumulative',
   colActions: 'Actions',
   emptyAccounts: 'No accounts yet. Import one from the Credentials tab, or use Sign in above.',
 
@@ -216,6 +281,8 @@ export const en: Record<AgyLocaleKey, string> = {
   limitsRefreshOk: 'Refreshed limits for {measured} account(s)',
   limitsRefreshFresh: 'Limits are already fresh — nothing to refresh',
   limitsRefreshFailed: 'Limit refresh failed for {failed} account(s)',
+  // Spoken only when the rate would empty the window before its reset.
+  limitBurnWarn: 'at this rate, empty in {value}',
   quotaWindow5h: '5 hours',
   quotaWindowWeekly: 'Weekly',
   fieldProject: 'Project',
@@ -244,6 +311,7 @@ export const en: Record<AgyLocaleKey, string> = {
   quotaResetIn: 'resets {value}',
   relNow: 'shortly',
   relJustNow: 'just now',
+  relSeconds: '{n}s',
   relAgo: '{value} ago',
   relMinutes: '{n} min',
   relHours: '{n} h',
@@ -251,7 +319,8 @@ export const en: Record<AgyLocaleKey, string> = {
   relMonths: '{n} mo',
   relYears: '{n} y',
 
-  actionActivate: 'Activate',
+  // Sets the pool preference; does not enable a disabled account — see the zh note.
+  actionActivate: 'Set as current',
   actionVerify: 'Verify',
   actionDelete: 'Delete',
   actionTest: 'Test call',
@@ -293,6 +362,8 @@ export const en: Record<AgyLocaleKey, string> = {
   fieldRateLimitRotation: 'Rate limits / rotations',
   byModel: 'By model',
   byAccount: 'By account',
+  trendTitle: 'Last 7 days',
+  colDay: 'Day',
   colModel: 'Model',
   colTokenShare: 'Token share',
   colOutput: 'Output',
