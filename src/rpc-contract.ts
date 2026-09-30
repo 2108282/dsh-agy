@@ -32,6 +32,18 @@ export interface AccountView {
   /** True when this is the pool's active account and it is not disabled. */
   active: boolean
   state: AccountState
+  /**
+   * When the account was disabled, as an ISO timestamp (null when it is not
+   * disabled, or when the disable predates this field).
+   *
+   * `enabled = false` has exactly one cause in this codebase — an upstream
+   * `invalid_grant` on the refresh token — and both write sites persist
+   * `verificationRequiredAt` in the SAME store mutation, so that timestamp IS
+   * the disable time. Derived on the wire rather than passed through: the
+   * verification-parking path also writes `verificationRequiredAt` (without
+   * disabling), and exposing the raw field would give it a second meaning.
+   */
+  disabledAt: string | null
   /** ISO timestamp while cooling, else null. */
   cooldownUntil: string | null
   /**

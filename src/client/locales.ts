@@ -28,7 +28,16 @@ export const zh = {
   stateVerificationRequired: '待验证',
   stateDisabled: '已停用',
   coolingUntil: '冷却至',
+  // The verification row's badge carries its own window end, which is the
+  // question a parked account answers ("how long until the pool retries").
+  verificationRetry: '待验证 · {time} 重试',
   currentAccount: '当前账号',
+  // Disabled has exactly one cause in this codebase (an upstream invalid_grant
+  // on the refresh token), so the reason is a fixed sentence, not a taxonomy.
+  fieldDisabled: '停用',
+  disabledCredentials: '凭据失效',
+  disabledSince: '停用于 {ago}',
+  disabledHint: '凭据已被上游拒绝。运行该账号所在行的「验证」尝试恢复；若仍失败，请重新登录导入。',
   noProject: '—',
   valueUnknown: '—',
 
@@ -207,7 +216,12 @@ export const en: Record<AgyLocaleKey, string> = {
   stateVerificationRequired: 'Needs verification',
   stateDisabled: 'Disabled',
   coolingUntil: 'Cooling until',
+  verificationRetry: 'Needs verification · retries {time}',
   currentAccount: 'Current',
+  fieldDisabled: 'Disabled',
+  disabledCredentials: 'Credentials rejected',
+  disabledSince: 'disabled {ago}',
+  disabledHint: 'The credentials were rejected by upstream. Run Verify on this account\'s row to try restoring it; if that fails, sign in again to re-import.',
   noProject: '—',
   valueUnknown: '—',
 

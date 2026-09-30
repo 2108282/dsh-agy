@@ -503,10 +503,13 @@ function AccountDetail(props: {
     // The age matters as much as the reason: "network error" alone reads the
     // same whether it happened seconds or days ago, which is exactly how a stale
     // value went unnoticed. The host clears expired state before rendering, so
-    // this row and the state badge cannot disagree.
-    [t('fieldCooldownReason'), account.cooldownReason === null
-      ? t('noProject')
-      : `${cooldownReasonLabel(account.cooldownReason, t)} · ${agoText(account.cooldownSetAt, t, now)}`],
+    // this row and the state badge cannot agree to disagree. The row renders
+    // ONLY while a reason is live — a permanent "—" told the reader nothing and
+    // padded every healthy account.
+    ...(account.cooldownReason === null ? [] : [[
+      t('fieldCooldownReason'),
+      `${cooldownReasonLabel(account.cooldownReason, t)} · ${agoText(account.cooldownSetAt, t, now)}`,
+    ] as [ReactNode, ReactNode]]),
     [t('fieldSources'), usage === null
       ? t('noProject')
       : t('sourcesSummary', {
@@ -520,6 +523,16 @@ function AccountDetail(props: {
       : `${t('latencyAverage', { value: formatDuration(average(usage.totals.latencyMs, usage.totals.latencyN)) })}`
         + ` · ${t('latencyTtft', { value: formatDuration(average(usage.totals.ttftMs, usage.totals.ttftN)) })}`],
   ]
+  // Disabled is the one state whose recovery REQUIRES a human action, so the
+  // row must say what happened, when, and what to do next. The cause space has
+  // exactly one value (an upstream invalid_grant), so the reason is a fixed
+  // sentence; the time comes from `disabledAt` (null for pre-field data, where
+  // "when" is simply absent rather than faked).
+  if (account.state === 'disabled') {
+    identityRows.push([t('fieldDisabled'), account.disabledAt === null
+      ? t('disabledCredentials')
+      : `${t('disabledCredentials')} · ${t('disabledSince', { ago: agoText(account.disabledAt, t, now) })}`])
+  }
   if (account.verificationRequired) {
     identityRows.push([t('fieldVerification'), account.verificationUrl === null
       ? t('verificationNoUrl')
@@ -533,7 +546,11 @@ function AccountDetail(props: {
       }, t('verificationOpen'))])
   }
 
-  const identity = card(t('detailTitle'), defs(identityRows), account.email ?? `#${account.index}`)
+  const identity = card(t('detailTitle'),
+    h('div', null,
+      defs(identityRows),
+      account.state === 'disabled' ? hint(t('disabledHint')) : null),
+    account.email ?? `#${account.index}`)
 
   // Deleting lives here, in the one-account surface, not on every list row: a
   // destructive action per row sat one misclick from the row's other buttons,
@@ -736,7 +753,11 @@ function AccountsTab(props: {
   h('div', { className: 'agy-rowactions' },
     stateBadge(account.state, account.state === 'cooling'
       ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil, props.lang)}`
-      : stateLabel(account.state, t)),
+      : account.state === 'verification-required'
+        // A parked account holds a timed window (its `cooldownUntil`), and its
+        // end is the question the reader asks — the mirror of the cooling badge.
+        ? t('verificationRetry', { time: clockTime(account.cooldownUntil, props.lang) })
+        : stateLabel(account.state, t)),
     canActivateAccount(account) ? button(t('actionActivate'), () => {
       setSelected(at)
       handlers.onActivate(account.index)

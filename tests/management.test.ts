@@ -180,6 +180,38 @@ describe('agy management RPC', () => {
     expect(JSON.stringify(accounts)).not.toContain('refresh-a')
   })
 
+  it('publishes when an account was disabled, and only then', async () => {
+    // `enabled = false` has one cause (an upstream invalid_grant) and both
+    // writers persist `verificationRequiredAt` in the same mutation, so the
+    // wire can derive the disable time from it. The parked-but-ENABLED path
+    // writes the same field without disabling — exposing it raw would give
+    // "when it was disabled" a second, wrong meaning — and pre-field data must
+    // read as unknown (null), never as epoch zero.
+    const disabledAt = Date.now() - 60_000
+    const { management } = makeHarness({
+      accounts: [
+        account({
+          email: 'dead@x.com',
+          enabled: false,
+          verificationRequired: true,
+          verificationRequiredAt: disabledAt,
+          verificationRequiredReason: 'auth-failure',
+        }),
+        // Parked by a verification challenge, still enabled: NOT a disable time.
+        account({ email: 'parked@x.com', verificationRequired: true, verificationRequiredAt: disabledAt }),
+        // Disabled before the timestamp field existed.
+        account({ email: 'legacy@x.com', enabled: false }),
+      ],
+    })
+    const { accounts } = await management.call('account.list', {}) as {
+      accounts: Array<{ state: string, disabledAt: string | null }>
+    }
+    expect(accounts.map((entry) => entry.state)).toEqual(['disabled', 'verification-required', 'disabled'])
+    expect(accounts[0]?.disabledAt).toBe(new Date(disabledAt).toISOString())
+    expect(accounts[1]?.disabledAt).toBeNull()
+    expect(accounts[2]?.disabledAt).toBeNull()
+  })
+
   it('masks a configured proxy rather than echoing credentials', async () => {
     const { management } = await makeHarness({
       accounts: [account({ proxy: 'http://user:secret@proxy.test:8080' })],

@@ -188,6 +188,14 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         projectId: account.projectId ?? null,
         active: index === storage.activeIndex && account.enabled !== false,
         state,
+        // Disabled is terminal until a human acts (verify / re-import), so the
+        // time is the actionable half: "minutes ago" makes an immediate verify
+        // worth trying, "weeks ago" says re-login. Both disable writers persist
+        // `verificationRequiredAt` in the same mutation as `enabled = false`,
+        // and the parked-but-enabled path must NOT read as a disable time.
+        disabledAt: account.enabled === false && account.verificationRequiredAt !== undefined
+          ? new Date(account.verificationRequiredAt).toISOString()
+          : null,
         cooldownUntil: account.coolingDownUntil !== undefined && account.coolingDownUntil > now
           ? new Date(account.coolingDownUntil).toISOString()
           : null,
