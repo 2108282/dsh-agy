@@ -232,6 +232,9 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         // zero, which would read as an exhausted account.
         limits: account.cachedLimits?.groups ?? null,
         limitsUpdatedAt: account.cachedLimits?.updatedAt ?? null,
+        // The burn rate arrives via `account.limits` (it exists only after the
+        // sampling path has run twice); `account.list` stays probe-free.
+        limitBurn: null,
         usage: key === undefined ? null : toAccountUsageView(ledger.accounts[key]),
       })
     }
@@ -351,11 +354,16 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         .refreshLimits(storage, { force })
         .catch(() => ({ measured: [], failed: [], skipped: 0 }))
       const fresh = await store.load()
+      // Burn rates ride the same reply (the sampling path runs inside
+      // refreshLimits); a join failure degrades to null rates, not an error.
+      const burn = await sessions.limitBurnRates().catch(() => [])
+      const burnByIndex = new Map(burn.map((entry) => [entry.index, entry.perHour]))
       return {
         limits: fresh.accounts.map((account, index) => ({
           index,
           groups: account.cachedLimits?.groups ?? null,
           updatedAt: account.cachedLimits?.updatedAt ?? null,
+          burn: burnByIndex.get(index) ?? null,
         })),
         measured: result.measured.length,
         failed: result.failed.length,

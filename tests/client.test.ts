@@ -290,6 +290,7 @@ describe('canActivateAccount', () => {
       usage: null,
       limits: null,
       limitsUpdatedAt: null,
+      limitBurn: null,
     }
   }
 
@@ -368,6 +369,7 @@ describe('resolveSelectedAccountIndex', () => {
       usage: null,
       limits: null,
       limitsUpdatedAt: null,
+      limitBurn: null,
     }
   }
 

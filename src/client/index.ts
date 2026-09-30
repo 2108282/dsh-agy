@@ -287,6 +287,19 @@ function windowLabel(window: string, t: T): string {
 }
 
 /**
+ * Humanize a burn horizon (hours until a window runs dry at the sampled rate).
+ *
+ * Reuses the shared `rel*` magnitudes so the phrasing matches every other
+ * duration on the panel; under an hour falls to minutes rather than rounding
+ * to a false zero.
+ */
+function burnHorizon(hours: number, t: T): string {
+  if (hours < 1) return t('relMinutes', { n: Math.max(1, Math.round(hours * 60)) })
+  if (hours < 48) return t('relHours', { n: Math.round(hours) })
+  return t('relDays', { n: Math.round(hours / 24) })
+}
+
+/**
  * A wall-clock moment for a state label (a cooldown end).
  *
  * Time-of-day alone is enough while the wall is today; past midnight it must
@@ -649,19 +662,37 @@ function AccountDetail(props: {
           h('div', { className: 'agy-limit-group-name' }, group.name),
           ...group.windows.map((window) => {
             const fraction = window.remainingFraction
-            return h('div', { className: 'agy-limit-row', key: window.bucketId },
-              h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),
-              h('span', { className: 'agy-limit-track' },
-                fraction === null
-                  ? null
-                  : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
-              // An unreported fraction is an em dash, never "0%": unknown
-              // headroom and no headroom are opposite facts. A dedicated key
-              // rather than reusing `noProject`, whose NAME would then be wrong
-              // for the value it renders.
-              h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
-              h('span', { className: 'agy-limit-reset' },
-                window.resetTime === null ? null : untilText(window.resetTime, t, now)))
+            // Burn projection: rate (fraction/hour) over remaining fraction
+            // gives hours-to-empty. Spoken ONLY when that lands BEFORE the
+            // window's reset — otherwise the reset time this row already shows
+            // is the answer, and a "won't run dry" line is noise.
+            const burn = account.limitBurn?.[window.bucketId]
+            const hoursLeft = fraction !== null && burn !== undefined && burn > 0
+              ? fraction / burn
+              : null
+            const resetHours = window.resetTime === null
+              ? null
+              : (new Date(window.resetTime).getTime() - now) / HOUR_MS
+            const exhaustsFirst = hoursLeft !== null && resetHours !== null
+              && hoursLeft < resetHours
+            return h('div', { key: window.bucketId },
+              h('div', { className: 'agy-limit-row' },
+                h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),
+                h('span', { className: 'agy-limit-track' },
+                  fraction === null
+                    ? null
+                    : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
+                // An unreported fraction is an em dash, never "0%": unknown
+                // headroom and no headroom are opposite facts. A dedicated key
+                // rather than reusing `noProject`, whose NAME would then be wrong
+                // for the value it renders.
+                h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
+                h('span', { className: 'agy-limit-reset' },
+                  window.resetTime === null ? null : untilText(window.resetTime, t, now))),
+              exhaustsFirst
+                ? h('div', { className: 'agy-limit-burn' },
+                  t('limitBurnWarn', { value: burnHorizon(hoursLeft!, t) }))
+                : null)
           })))))
 
   const usageBlock = usage === null ? null : card(
@@ -1813,7 +1844,14 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): 
         // Leave the row untouched when this refresh learned nothing, so a failed
         // probe cannot erase windows that were already showing.
         if (entry === undefined || entry.groups === null) return account
-        return { ...account, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
+        return {
+          ...account,
+          limits: entry.groups,
+          limitsUpdatedAt: entry.updatedAt,
+          // A null rate keeps the previous one: "these two samples saw no drop"
+          // is not evidence the burn stopped.
+          limitBurn: entry.burn ?? account.limitBurn,
+        }
       }))
       // An explicit refresh reports itself. Without this a forced probe that
       // failed changed nothing on screen — no new numbers, no new timestamp —

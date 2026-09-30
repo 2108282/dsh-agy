@@ -119,6 +119,50 @@ export interface LimitsRefreshResult {
  */
 export const SESSION_AFFINITY_WINDOW_MS = 10 * 60 * 1000
 
+/**
+ * One quota-fraction snapshot, for the burn rate. Memory only.
+ *
+ * Upstream reports windows as a remaining FRACTION with no capacity, so the
+ * only honest way to a "how long until this runs dry" figure is the fraction's
+ * own rate of change: keep the previous snapshot, and the next one yields
+ * fraction-per-hour.
+ */
+export interface LimitSample {
+  at: number
+  /** bucketId -> remaining fraction; null fractions are omitted. */
+  fractions: Record<string, number>
+}
+
+/** Two samples closer than this are noise (a forced refresh seconds apart). */
+export const MIN_BURN_SAMPLE_MS = 5 * 60 * 1000
+
+/**
+ * Fraction-per-hour per window bucket, from two snapshots.
+ *
+ * Pure and exported for a direct unit test. Rules:
+ * - the FIRST sample yields nothing (no baseline yet), and so does a pair
+ *   closer than `MIN_BURN_SAMPLE_MS` — two probes seconds apart measure the
+ *   probe jitter, not the burn;
+ * - a RISING fraction is a reset (or refresh noise), never negative burn;
+ * - a bucket with no baseline simply has no rate yet.
+ *
+ * Returns null when no bucket produced a rate, so the caller can keep the
+ * previous rates instead of overwriting them with an empty read.
+ */
+export function sampleLimitBurn(prev: LimitSample | undefined, next: LimitSample): Record<string, number> | null {
+  if (prev === undefined) return null
+  const elapsedH = (next.at - prev.at) / 3_600_000
+  if (elapsedH < MIN_BURN_SAMPLE_MS / 3_600_000) return null
+  const perHour: Record<string, number> = {}
+  for (const [bucketId, fraction] of Object.entries(next.fractions)) {
+    const before = prev.fractions[bucketId]
+    if (before !== undefined && before > fraction) {
+      perHour[bucketId] = (before - fraction) / elapsedH
+    }
+  }
+  return Object.keys(perHour).length > 0 ? perHour : null
+}
+
 interface TokenCacheEntry {
   access: string
   expires: number
@@ -268,6 +312,42 @@ export class AgySessionManager {
       if (count > 0) busy.push({ index, email: account.email ?? null, count })
     }
     return busy
+  }
+
+  /** Last fraction snapshot per account, for `sampleLimitBurn` (memory only). */
+  private readonly limitFractions = new Map<string, LimitSample>()
+  /** Latest burn rate per account: bucketId -> fraction/hour (memory only). */
+  private readonly limitBurn = new Map<string, { perHour: Record<string, number> }>()
+
+  private noteLimitSample(key: string, groups: QuotaGroup[], at: number): void {
+    const fractions: Record<string, number> = {}
+    for (const group of groups) {
+      for (const window of group.windows) {
+        if (window.remainingFraction !== null) fractions[window.bucketId] = window.remainingFraction
+      }
+    }
+    const next: LimitSample = { at, fractions }
+    const burn = sampleLimitBurn(this.limitFractions.get(key), next)
+    // A null result keeps the previous rate: "no drop since the last sample"
+    // is not evidence the burn stopped, just that these two samples saw none.
+    if (burn !== null) this.limitBurn.set(key, { perHour: burn })
+    this.limitFractions.set(key, next)
+  }
+
+  /**
+   * Burn rates per account INDEX, for the `account.limits` reply.
+   *
+   * The index join runs here, like `inFlightAccounts`: the rate map is keyed
+   * by `accountKey`, a derivation the management surface must not replicate.
+   */
+  async limitBurnRates(): Promise<Array<{ index: number; perHour: Record<string, number> }>> {
+    const storage = await this.store.load()
+    const out: Array<{ index: number; perHour: Record<string, number> }> = []
+    for (const [index, account] of storage.accounts.entries()) {
+      const entry = this.limitBurn.get(this.accountKey(account))
+      if (entry !== undefined) out.push({ index, perHour: entry.perHour })
+    }
+    return out
   }
 
   /** The map key for a conversation; anonymous callers share one bucket. */
@@ -584,7 +664,21 @@ export class AgySessionManager {
       const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
       // Only `cachedLimits` — never `cachedQuota`, which is what keeps this
       // incapable of blocking an account.
-      if (target) target.cachedLimits = { groups: update.groups, updatedAt: update.updatedAt }
+      if (target) {
+        target.cachedLimits = { groups: update.groups, updatedAt: update.updatedAt }
+        // Burn-rate sampling rides the same successful probe: memory only, so
+        // it cannot affect the store or the scheduling path.
+        this.noteLimitSample(update.key, update.groups, update.updatedAt)
+      }
+    }
+    // Drop samples for accounts that no longer exist, so the maps stay bounded
+    // by the live pool rather than by every account ever seen.
+    const live = new Set(storage.accounts.map((account) => this.accountKey(account)))
+    for (const key of this.limitFractions.keys()) {
+      if (!live.has(key)) this.limitFractions.delete(key)
+    }
+    for (const key of this.limitBurn.keys()) {
+      if (!live.has(key)) this.limitBurn.delete(key)
     }
     try {
       await this.store.mutate((s) => {

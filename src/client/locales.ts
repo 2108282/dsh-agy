@@ -75,6 +75,9 @@ export const zh = {
   limitsRefreshOk: '已刷新 {measured} 个账号的限额',
   limitsRefreshFresh: '限额仍是新鲜的，无需刷新',
   limitsRefreshFailed: '{failed} 个账号的限额刷新失败',
+  // Spoken only when the sampled burn rate would empty the window BEFORE its
+  // reset — otherwise the reset time beside it is already the answer.
+  limitBurnWarn: '按此速度{value}后耗尽',
   quotaWindow5h: '5 小时',
   quotaWindowWeekly: '每周',
   fieldProject: '项目',
@@ -276,6 +279,8 @@ export const en: Record<AgyLocaleKey, string> = {
   limitsRefreshOk: 'Refreshed limits for {measured} account(s)',
   limitsRefreshFresh: 'Limits are already fresh — nothing to refresh',
   limitsRefreshFailed: 'Limit refresh failed for {failed} account(s)',
+  // Spoken only when the rate would empty the window before its reset.
+  limitBurnWarn: 'at this rate, empty in {value}',
   quotaWindow5h: '5 hours',
   quotaWindowWeekly: 'Weekly',
   fieldProject: 'Project',

@@ -91,6 +91,13 @@ export interface AccountView {
   limits: QuotaGroup[] | null
   /** When `limits` was measured (Unix ms), or null when never. */
   limitsUpdatedAt: number | null
+  /**
+   * Burn rate per window bucket (bucketId -> fraction/hour), or null until a
+   * second probe has been sampled. Arrives via `account.limits`, not here —
+   * `account.list` is deliberately probe-free and the rate only exists after
+   * the sampling path has run twice.
+   */
+  limitBurn: Record<string, number> | null
   /** This account's ledger entry, when it has recorded traffic. */
   usage: AccountUsageView | null
 }
@@ -239,6 +246,15 @@ export interface AgyRpcMethods {
         index: number
         groups: QuotaGroup[] | null
         updatedAt: number | null
+        /**
+         * Burn rate per window bucket (bucketId -> fraction/hour), or null.
+         *
+         * Derived in memory from the last two quota probes far enough apart;
+         * null until a second sample exists. The UI only speaks when the rate
+         * would exhaust a window BEFORE its reset — otherwise the reset time
+         * the row already shows is the answer.
+         */
+        burn: Record<string, number> | null
       }>
       /** Accounts measured by THIS call. */
       measured: number

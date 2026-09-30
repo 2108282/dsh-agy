@@ -55,6 +55,8 @@ function makeHarness(options: {
   limitsResult?: { measured: string[], failed: string[], skipped: number }
   /** What the session's in-flight snapshot reports (defaults to an idle pool). */
   inFlight?: Array<{ index: number, email: string | null, count: number }>
+  /** What the session's burn-rate snapshot reports (defaults to none). */
+  limitBurn?: Array<{ index: number, perHour: Record<string, number> }>
   baseUrl?: () => string
 } = {}): Harness {
   const accounts = options.accounts ?? [account()]
@@ -100,6 +102,7 @@ function makeHarness(options: {
       calls.push({ method: 'inFlightAccounts', args: [] })
       return options.inFlight ?? []
     },
+    limitBurnRates: async () => options.limitBurn ?? [],
     // The real activateAccount writes through the store and clears affinity;
     // the stub mirrors its store contract so the RPC's bounds behavior is
     // exercised against the same persistence.
@@ -255,6 +258,22 @@ describe('agy management RPC', () => {
       busy: Array<{ index: number, email: string | null, count: number }>
     }
     expect(result.busy).toEqual([{ index: 1, email: 'b@y.com', count: 2 }])
+  })
+
+  it('carries the burn rates on the limits reply, per index', async () => {
+    // The rate only exists after the sampling path has seen two probes; the
+    // reply degrades to null rather than failing when the session has none.
+    const withRate = makeHarness({ limitBurn: [{ index: 0, perHour: { 'g-5h': 0.02 } }] })
+    const result = await withRate.management.call('account.limits', {}) as {
+      limits: Array<{ burn: Record<string, number> | null }>
+    }
+    expect(result.limits[0]?.burn).toEqual({ 'g-5h': 0.02 })
+
+    const withoutRate = makeHarness()
+    const plain = await withoutRate.management.call('account.limits', {}) as {
+      limits: Array<{ burn: Record<string, number> | null }>
+    }
+    expect(plain.limits[0]?.burn).toBeNull()
   })
 
   it('reports an idle pool as an empty busy list', async () => {
