@@ -1457,15 +1457,19 @@ function RecentCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
             table(
               h('tr', null,
                 h('th', { style: { width: '72px' } }, t('colTime')),
-                h('th', null, t('colAccount')),
+                // The identity columns get the Usage tab's `.agy-mail` treatment
+                // (single line, ellipsis, full value on hover): a fixed-layout
+                // table lets long ids wrap mid-word and hang a second line past
+                // the row boundary — the misalignment this replaces.
+                h('th', { style: { width: '38%' } }, t('colAccount')),
                 h('th', null, t('colModel')),
                 h('th', { style: { width: '64px' } }, t('colResult')),
                 h('th', { style: { width: '56px' } }, t('colDuration')),
                 h('th', { style: { width: '48px' } }, t('colOutput'))),
               recent.map((entry, index) => h('tr', { key: `${entry.at}-${index}` },
                 h('td', null, recentAgo(entry.at, now, t)),
-                h('td', null, entry.account ?? '—'),
-                h('td', null, entry.model ?? '—'),
+                h('td', null, h('span', { className: 'agy-mail', title: entry.account ?? undefined }, entry.account ?? '—')),
+                h('td', null, h('span', { className: 'agy-mail', title: entry.model ?? undefined }, entry.model ?? '—')),
                 h('td', null, h('span', { className: 'agy-recent-state', 'data-kind': kindOf(entry) }, textOf(entry))),
                 h('td', null, entry.latencyMs === null ? '—' : formatDuration(entry.latencyMs)),
                 h('td', { className: 'agy-num' }, entry.output === null ? '—' : tokenText(entry.output))))))))
