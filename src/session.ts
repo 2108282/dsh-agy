@@ -250,6 +250,26 @@ export class AgySessionManager {
     else this.inFlight.set(key, { count: count - 1, at: now })
   }
 
+  /**
+   * Which accounts have upstream requests in flight, for the UI's live line.
+   *
+   * The join runs HERE, not in the RPC layer: the in-flight map is keyed by
+   * `accountKey` (id ?? email ?? idx-<refresh>), a derivation the management
+   * surface must not have to replicate — its own email-first key would miss
+   * every account carrying both fields. Counts go through `inFlightCount`, so
+   * an entry leaked past its TTL reads as idle instead of busy forever.
+   */
+  async inFlightAccounts(): Promise<Array<{ index: number; email: string | null; count: number }>> {
+    const storage = await this.store.load()
+    const now = Date.now()
+    const busy: Array<{ index: number; email: string | null; count: number }> = []
+    for (const [index, account] of storage.accounts.entries()) {
+      const count = this.inFlightCount(this.accountKey(account), now)
+      if (count > 0) busy.push({ index, email: account.email ?? null, count })
+    }
+    return busy
+  }
+
   /** The map key for a conversation; anonymous callers share one bucket. */
   private conversationKeyFor(conversationKey?: string): string {
     const trimmed = conversationKey?.trim()

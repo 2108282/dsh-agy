@@ -29,7 +29,7 @@ import {
 import type { StateDotState, TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
-import type { AccountView, AgyRpcClient, ModelView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
+import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
 
@@ -64,6 +64,15 @@ type TabId = 'accounts' | 'models' | 'usage' | 'credentials'
  * it — see `actionError` in `AgySettings`.
  */
 const ACTION_MESSAGE_TTL_MS = 3_500
+
+/**
+ * How often the section re-reads the pool's in-flight snapshot.
+ *
+ * The call is a pure in-memory read on the host (no token refresh, no quota
+ * probe), so a tight-ish interval is free; 3s makes the live line feel live
+ * without a visible request cost.
+ */
+const POOL_POLL_INTERVAL_MS = 3_000
 
 /** Connection shape this plugin needs (structural, so no host-only import). */
 interface ConnectionLike {
@@ -180,6 +189,20 @@ function average(total: number, count: number): number {
 /** Total tokens across the four disjoint buckets. */
 function totalTokens(counters: UsageCounters): number {
   return counters.input + counters.output + counters.cacheRead + counters.cacheWrite
+}
+
+/**
+ * Cumulative average OUTPUT rate for one scope, in tokens per second.
+ *
+ * Pure and exported for a direct unit test. The ledger stores SUMMED wall time
+ * and summed output tokens — not per-request samples — so this is a lifetime
+ * average, not a live rate; output includes reasoning tokens and the wall time
+ * includes the first-token wait. Null when nothing was timed or produced, so
+ * the row simply does not render rather than showing a fake zero.
+ */
+export function throughputTokenPerSecond(totals: UsageCounters): number | null {
+  if (totals.latencyN === 0 || totals.latencyMs <= 0 || totals.output <= 0) return null
+  return Math.round(totals.output / (totals.latencyMs / 1_000))
 }
 
 /**
@@ -486,6 +509,7 @@ function AccountDetail(props: {
   const usage = account.usage
   // One clock reading per render, so every reset label agrees (as the quota list does).
   const now = Date.now()
+  const throughput = usage === null ? null : throughputTokenPerSecond(usage.totals)
 
   // The verification challenge, when the upstream raised one. The state badge
   // says the account is parked; THIS is the only place that says how to un-park
@@ -522,6 +546,12 @@ function AccountDetail(props: {
       ? t('noProject')
       : `${t('latencyAverage', { value: formatDuration(average(usage.totals.latencyMs, usage.totals.latencyN)) })}`
         + ` · ${t('latencyTtft', { value: formatDuration(average(usage.totals.ttftMs, usage.totals.ttftN)) })}`],
+    // A lifetime average, not a live rate — the ledger stores sums, not samples.
+    // Absent entirely when nothing was timed, rather than rendering a fake 0.
+    ...(throughput === null ? [] : [[
+      t('fieldThroughput'),
+      `${t('throughputValue', { n: throughput })} · ${t('throughputNote')}`,
+    ] as [ReactNode, ReactNode]]),
   ]
   // Disabled is the one state whose recovery REQUIRES a human action, so the
   // row must say what happened, when, and what to do next. The cause space has
@@ -695,6 +725,8 @@ export function resolveSelectedAccountIndex(
 function AccountsTab(props: {
   accounts: AccountView[]
   busy: boolean
+  /** Accounts with upstream requests in flight, from the latest pool.status. */
+  busyNow: AgyRpcResult<'pool.status'>['busy']
   handlers: AccountHandlers
   /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
   lang?: string
@@ -703,6 +735,29 @@ function AccountsTab(props: {
   const { accounts, busy, handlers, t } = props
   const [selected, setSelected] = useState<number | null>(null)
   const selectedRef = useRef<HTMLDivElement | null>(null)
+  // One clock reading per render: the row metas' relative "active N ago"
+  // fragments must agree with each other (as the detail card's already do).
+  const now = Date.now()
+
+  /**
+   * The live line: who is serving right now, and how much.
+   *
+   * Present ONLY while something is in flight — an idle pool renders no strip,
+   * so the quiet state stays quiet. The dot is the host `StateDot`'s ongoing
+   * state, so the animation is the platform's.
+   */
+  const liveLine = props.busyNow.length === 0 ? null : (() => {
+    const total = props.busyNow.reduce((sum, entry) => sum + entry.count, 0)
+    const [first] = props.busyNow
+    // The label's subject is computed first, not inline: keeping the params
+    // object free of nested braces is also what the placeholder test can see.
+    const subject = first === undefined ? '' : first.email ?? `#${first.index}`
+    return h('div', { className: 'agy-live' },
+      h(StateDot, { state: 'ongoing', size: 8 }),
+      h('span', null, props.busyNow.length === 1
+        ? t('liveOne', { email: subject, count: total })
+        : t('liveMany', { count: total, accounts: props.busyNow.length })))
+  })()
 
   // Clamp by index, not by re-deriving a "selected id": deletion renumbers every
   // row, so an id-based selection would have to be remapped anyway.
@@ -745,11 +800,17 @@ function AccountsTab(props: {
     h('div', { className: 'agy-rowtitle' },
       h('span', { className: 'agy-rowname' }, account.email ?? `#${account.index}`),
       account.active ? h(Tag, { tone: 'info' }, t('currentAccount')) : null),
-    h('div', { className: 'agy-rowmeta' },
-      (account.projectId ?? t('noProject')),
-      account.usage === null || account.usage.totals.requests === 0
-        ? null
-        : ` · ${t('colRequests')} ${account.usage.totals.requests}`)),
+      h('div', { className: 'agy-rowmeta' },
+        (account.projectId ?? t('noProject')),
+        account.usage === null || account.usage.totals.requests === 0
+          ? null
+          : ` · ${t('rowRequestsTotal', { n: account.usage.totals.requests })}`,
+        // The recency fragment: "is this account still alive" is a scan-level
+        // question the all-time count cannot answer. Any source counts — a
+        // verify is as much activity as a turn of chat.
+        account.usage === null || account.usage.lastUsedAt === null
+          ? null
+          : ` · ${t('lastActive', { ago: agoText(new Date(account.usage.lastUsedAt).toISOString(), t, now) })}`)),
   h('div', { className: 'agy-rowactions' },
     stateBadge(account.state, account.state === 'cooling'
       ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil, props.lang)}`
@@ -769,7 +830,10 @@ function AccountsTab(props: {
     // styles.ts for why this is a container query rather than a viewport one.
     h('div', { className: 'agy-split-wrap' },
       h('div', { className: 'agy-split' },
-        card(t('colAccount'), h('div', { className: 'agy-rows' }, ...rows),
+        card(t('colAccount'),
+          h('div', null,
+            liveLine,
+            h('div', { className: 'agy-rows' }, ...rows)),
           `${accounts.length}`),
         // `key` remounts the detail per account so its proxy draft cannot carry
         // over: without it React reuses the instance and a draft typed for one
@@ -1492,6 +1556,15 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): 
   /** Model ids whose own test call is in flight (see the per-row test button). */
   const [modelTesting, setModelTesting] = useState<ReadonlySet<string>>(() => new Set())
   const [stats, setStats] = useState<StatsView | null>(null)
+  /**
+   * Accounts with upstream requests in flight, from the polled `pool.status`.
+   *
+   * A poll, not a push: the section has no push channel, and the call is a pure
+   * in-memory read on the host. A failed poll is display-only and stays silent —
+   * the previous frame (including "idle") holds until the next tick, which is
+   * the honest degradation for a status line.
+   */
+  const [poolBusy, setPoolBusy] = useState<AgyRpcResult<'pool.status'>['busy']>([])
   const [error, setError] = useState<string | undefined>(undefined)
   /** A non-fatal outcome worth reporting (e.g. a partial credential import). */
   const [notice, setNoticeState] = useState<string | undefined>(undefined)
@@ -1635,6 +1708,20 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): 
   }, [rpc, setActionError, setNotice, t])
 
   useEffect(() => { void refresh() }, [refresh])
+
+  // The live line's poll. Runs for the section's lifetime — the interval is
+  // cheap by design (one local read), and a hidden panel skips its ticks.
+  useEffect(() => {
+    const tick = (): void => {
+      if (document.hidden) return
+      void rpc.call('pool.status', {})
+        .then((result) => { if (alive.current) setPoolBusy(result.busy) })
+        .catch(() => { /* display-only; the next tick retries */ })
+    }
+    tick()
+    const timer = setInterval(tick, POOL_POLL_INTERVAL_MS)
+    return () => { clearInterval(timer) }
+  }, [rpc])
   useEffect(() => {
     // Only on the tab that shows them, and after the rows exist so the merge has
     // something to write into.
@@ -1854,7 +1941,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): 
     }, label, count === undefined ? null : h('span', { className: 'agy-count' }, String(count)))
 
   const body = tab === 'accounts'
-    ? h(AccountsTab, { accounts, busy, handlers, lang: props.lang, t })
+    ? h(AccountsTab, { accounts, busy, busyNow: poolBusy, handlers, lang: props.lang, t })
     : tab === 'models'
       ? modelError === undefined
         ? h(ModelsTab, {

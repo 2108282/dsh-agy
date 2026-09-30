@@ -43,6 +43,16 @@ export const zh = {
 
   colAccount: '账号',
   colRequests: '请求',
+  // The row's count is ALL-TIME, while the Usage tab defaults to "today" — the
+  // bare 请求 label let the two figures read as the same quantity.
+  rowRequestsTotal: '累计请求 {n}',
+  lastActive: '{ago}活跃',
+  // The live line: present only while upstream requests are in flight.
+  liveOne: '正在通过 {email} 生成 · {count} 个并发',
+  liveMany: '正在生成 · {count} 个并发 · {accounts} 个账号',
+  fieldThroughput: '吞吐',
+  throughputValue: '≈ {n} token/s',
+  throughputNote: '累计平均',
   colActions: '操作',
   emptyAccounts: '还没有账号。切到「凭据」标签导入，或点击上方「登录」。',
 
@@ -227,6 +237,14 @@ export const en: Record<AgyLocaleKey, string> = {
 
   colAccount: 'Account',
   colRequests: 'Requests',
+  // All-time, while the Usage tab defaults to "today" — see the zh note.
+  rowRequestsTotal: '{n} requests in total',
+  lastActive: 'active {ago}',
+  liveOne: 'Generating via {email} · {count} in flight',
+  liveMany: 'Generating · {count} in flight across {accounts} account(s)',
+  fieldThroughput: 'Throughput',
+  throughputValue: '≈ {n} token/s',
+  throughputNote: 'cumulative average',
   colActions: 'Actions',
   emptyAccounts: 'No accounts yet. Import one from the Credentials tab, or use Sign in above.',
 

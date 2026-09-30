@@ -424,6 +424,28 @@ describe('usage-driven selection', () => {
     expect(back!.index).toBe(0)
   })
 
+  it('reports in-flight work per account and empties as requests settle', async () => {
+    // The live line's source: started/settled through the public note API, and
+    // the snapshot mirrors it per account, in store order.
+    const a = account('a@x')
+    const b = account('b@x')
+    const sessions = new AgySessionManager({ store: new InMemoryAccountStore(storage([a, b], 0)) })
+    expect(await sessions.inFlightAccounts()).toEqual([])
+
+    sessions.noteRequestStarted(a)
+    sessions.noteRequestStarted(a)
+    sessions.noteRequestStarted(b)
+    expect(await sessions.inFlightAccounts()).toEqual([
+      { index: 0, email: 'a@x', count: 2 },
+      { index: 1, email: 'b@x', count: 1 },
+    ])
+
+    sessions.noteRequestSettled(a)
+    sessions.noteRequestSettled(a)
+    sessions.noteRequestSettled(b)
+    expect(await sessions.inFlightAccounts()).toEqual([])
+  })
+
   it('ingests fresh family quotas from fetchAvailableModels when the cache is stale', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)

@@ -118,19 +118,22 @@ function asIndex(payload: unknown): number {
 /**
  * Flatten one account's ledger entry for transport.
  *
- * `models` and `lastUsedAt` are deliberately NOT carried: the per-model table
- * that read `models` was removed (the cumulative metric strip states the same
- * figures better), and the `lastUsedAt` ordering rule went with it. Sending
- * fields no client reads is a wire surface with no consumer, which reads as
- * intentional to the next person and invites a stale assumption.
+ * `models` is deliberately NOT carried: the per-model table that read it was
+ * removed (the cumulative metric strip states the same figures better), and
+ * sending fields no client reads is a wire surface with no consumer, which
+ * reads as intentional to the next person and invites a stale assumption.
+ * `lastUsedAt` DOES travel — the account row's activity fragment reads it.
  */
 function toAccountUsageView(
-  usage: { totals: UsageCounters; sources: Record<UsageSource, number> } | undefined,
+  usage: { totals: UsageCounters; sources: Record<UsageSource, number>; lastUsedAt?: number } | undefined,
 ): AccountUsageView | null {
   if (usage === undefined) return null
   return {
     totals: usage.totals,
     sources: usage.sources,
+    lastUsedAt: typeof usage.lastUsedAt === 'number' && Number.isFinite(usage.lastUsedAt)
+      ? usage.lastUsedAt
+      : null,
   }
 }
 
@@ -288,6 +291,8 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
 
   const methods: Record<AgyRpcMethod, (payload: unknown) => Promise<unknown>> = {
     'account.list': async () => ({ accounts: await listAccounts() }),
+
+    'pool.status': async () => ({ busy: await sessions.inFlightAccounts() }),
 
     'account.activate': async (payload) => {
       const index = asIndex(payload)

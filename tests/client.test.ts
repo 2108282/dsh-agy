@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
-import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, tokenText } from '../src/client/index.ts'
+import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText } from '../src/client/index.ts'
 import { en, zh } from '../src/client/locales.ts'
+import { zeroCounters } from '../src/usage-types.ts'
 import type { AccountView, ModelView } from '../src/rpc-contract.ts'
+import type { UsageCounters } from '../src/usage-types.ts'
 
 /** Minimal client context: locale, connection (RPC transport), and the slot registry. */
 function makeContext(options: { withConnection?: boolean } = {}) {
@@ -304,6 +306,32 @@ describe('canActivateAccount', () => {
     // so the two guards do not overlap — but if the store ever disagreed, the
     // safe answer is still "no button".
     expect(canActivateAccount(view('disabled', true))).toBe(false)
+  })
+})
+
+describe('throughput calculation', () => {
+  // The counters the calculation reads; everything else is inert.
+  const totals = (output: number, latencyMs: number, latencyN: number): UsageCounters =>
+    ({ ...zeroCounters(), output, latencyMs, latencyN })
+
+  it('is null when nothing was timed or produced, not a fake zero', () => {
+    // The detail row is absent for null, so a never-used account must not
+    // render "≈ 0 token/s" — that would read as "measured, and dead".
+    expect(throughputTokenPerSecond(zeroCounters())).toBeNull()
+    expect(throughputTokenPerSecond(totals(0, 5_000, 1))).toBeNull()
+    expect(throughputTokenPerSecond(totals(500, 0, 0))).toBeNull()
+  })
+
+  it('divides output tokens by the summed wall time', () => {
+    // 100 output tokens across 2 seconds of wall time.
+    expect(throughputTokenPerSecond(totals(100, 2_000, 1))).toBe(50)
+    // Two requests: the sums are already aggregated by the ledger, so the
+    // average needs no per-request sample.
+    expect(throughputTokenPerSecond(totals(300, 1_000 + 2_000, 2))).toBe(100)
+  })
+
+  it('rounds to whole tokens per second', () => {
+    expect(throughputTokenPerSecond(totals(10, 300, 1))).toBe(33)
   })
 })
 

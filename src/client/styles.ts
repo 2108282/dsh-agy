@@ -96,6 +96,17 @@ const CSS = `
    rounded rect inset 2px from the card edge and transparent at rest. A
    full-bleed rectangle reads as a slab and fights the card's own radius. */
 .agy-rows { display: flex; flex-direction: column; gap: 2px; }
+/* The live line: one status strip above the rows, present ONLY while upstream
+   requests are in flight — an idle pool renders no strip, so quiet stays quiet.
+   The pulsing dot is the host StateDot primitive ('ongoing'), so the animation
+   is the platform's; this rule is layout and tone only. Sits OUTSIDE .agy-rows,
+   so the master list's scroll cap does not scroll the status away. */
+.agy-live {
+  display: flex; align-items: center; gap: 7px;
+  margin: 2px 2px 6px; padding: 7px 8px; border-radius: 10px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary, #61666b);
+  background: var(--dsw-alias-bg-layer-2, #f4f5f7);
+}
 /* Master/detail: the account list beside the selected account's detail, so a
  * row and the panel it opens stay in view together.
  *

@@ -98,14 +98,21 @@ export interface AccountView {
 /**
  * One account's ledger, flattened for transport.
  *
- * Only the two fields the account detail actually renders. `models` and
- * `lastUsedAt` were carried here with no reader — the per-model table that used
- * the former was removed, and the ordering rule that used the latter went with
- * it — so they are gone rather than left as a wire surface nobody consumes.
+ * `models` was carried here with no reader — the per-model table that used it
+ * was removed — and is gone rather than left as a wire surface nobody consumes.
  */
 export interface AccountUsageView {
   totals: UsageCounters
   sources: Record<UsageSource, number>
+  /**
+   * Epoch ms of the account's most recent ledger record of any source, or null.
+   *
+   * The ledger already maintained this per account; the account row's "active N
+   * ago" fragment is its reader. (An earlier revision carried `lastUsedAt` with
+   * no reader and dropped it; per that rule the field returns WITH its reader
+   * in the same commit.)
+   */
+  lastUsedAt: number | null
 }
 
 /** A model row in the Model tab. */
@@ -166,6 +173,19 @@ export interface ImportResult {
 /** Methods and their payload/result shapes. */
 export interface AgyRpcMethods {
   'account.list': { payload: Record<string, never>; result: { accounts: AccountView[] } }
+  /**
+   * Which accounts have upstream requests in flight right now.
+   *
+   * A pure in-memory read on the host — no token refresh, no quota probe — so
+   * the client can poll it cheaply. An empty `busy` is an idle pool, not an
+   * error; a failed call is display-only and leaves the previous frame.
+   */
+  'pool.status': {
+    payload: Record<string, never>
+    result: {
+      busy: Array<{ index: number; email: string | null; count: number }>
+    }
+  }
   'account.activate': { payload: { index: number }; result: { ok: true; index: number } }
   'account.delete': { payload: { index: number }; result: { ok: true } }
   'account.verify': { payload: { index: number }; result: { ok: boolean; email?: string; error?: string } }

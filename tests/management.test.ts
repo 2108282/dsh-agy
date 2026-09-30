@@ -53,6 +53,8 @@ function makeHarness(options: {
   exportBlob?: unknown
   checkAccounts?: unknown
   limitsResult?: { measured: string[], failed: string[], skipped: number }
+  /** What the session's in-flight snapshot reports (defaults to an idle pool). */
+  inFlight?: Array<{ index: number, email: string | null, count: number }>
   baseUrl?: () => string
 } = {}): Harness {
   const accounts = options.accounts ?? [account()]
@@ -93,6 +95,10 @@ function makeHarness(options: {
     refreshLimits: async (_storage: unknown, refreshOptions?: { force?: boolean }) => {
       calls.push({ method: 'refreshLimits', args: [refreshOptions] })
       return options.limitsResult ?? { measured: [], failed: [], skipped: 0 }
+    },
+    inFlightAccounts: async () => {
+      calls.push({ method: 'inFlightAccounts', args: [] })
+      return options.inFlight ?? []
     },
     // The real activateAccount writes through the store and clears affinity;
     // the stub mirrors its store contract so the RPC's bounds behavior is
@@ -228,10 +234,35 @@ describe('agy management RPC', () => {
       usage: { input: 10, output: 2, cacheRead: 3, cacheWrite: 0 },
     })
     const { accounts } = await harness.management.call('account.list', {}) as {
-      accounts: Array<{ usage: { totals: { requests: number, input: number } } | null }>
+      accounts: Array<{ usage: { totals: { requests: number, input: number }, lastUsedAt: number | null } | null }>
     }
     expect(accounts[0]?.usage?.totals.requests).toBe(1)
     expect(accounts[0]?.usage?.totals.input).toBe(10)
+    // The row's "active N ago" fragment reads this; the ledger stamps it on
+    // every record, so a traffic-bearing account always carries it.
+    expect(accounts[0]?.usage?.lastUsedAt).toBeGreaterThan(0)
+  })
+
+  it('reports which accounts have requests in flight, as a pure local read', async () => {
+    // `pool.status` must never touch upstream — it is polled every few seconds
+    // while the panel is open, and a quota probe or token refresh per tick
+    // would turn a status line into a bill.
+    const harness = makeHarness({
+      accounts: [account({ email: 'a@x.com' }), account({ email: 'b@y.com' })],
+      inFlight: [{ index: 1, email: 'b@y.com', count: 2 }],
+    })
+    const result = await harness.management.call('pool.status', {}) as {
+      busy: Array<{ index: number, email: string | null, count: number }>
+    }
+    expect(result.busy).toEqual([{ index: 1, email: 'b@y.com', count: 2 }])
+  })
+
+  it('reports an idle pool as an empty busy list', async () => {
+    // Empty is the idle pool, not an error: the live line keys off it to
+    // disappear, so a quiet pool must render no strip at all.
+    const { management } = makeHarness()
+    const result = await management.call('pool.status', {}) as { busy: unknown[] }
+    expect(result.busy).toEqual([])
   })
 
   it('exposes the cached 5h/weekly windows, and null when never measured', async () => {
