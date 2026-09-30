@@ -85,6 +85,11 @@ export interface UsageRecord {
   poolEvent?: boolean
   /** Marks a rotation in a pool event. */
   rotated?: boolean
+  /**
+   * The failure classification ('rate-limit', 'network-error', ...), when the
+   * record failed. Diagnostics only — the ledger counters ignore it.
+   */
+  reason?: string
 }
 
 /** One account's health check result (refresh + userinfo). */
@@ -1184,6 +1189,8 @@ export class AgySessionManager {
         ok: false,
         rotated: true,
         poolEvent: true,
+        // The rotation's cause IS the answer the recent list exists for.
+        reason: kind,
       })
     }
   }

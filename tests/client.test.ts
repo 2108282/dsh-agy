@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
-import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText } from '../src/client/index.ts'
+import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText, truncateIdentity } from '../src/client/index.ts'
 import { en, zh } from '../src/client/locales.ts'
 import { zeroCounters } from '../src/usage-types.ts'
 import type { AccountView, ModelView } from '../src/rpc-contract.ts'
@@ -307,6 +307,19 @@ describe('canActivateAccount', () => {
     // so the two guards do not overlap — but if the store ever disagreed, the
     // safe answer is still "no button".
     expect(canActivateAccount(view('disabled', true))).toBe(false)
+  })
+})
+
+describe('truncateIdentity', () => {
+  it('leaves short values alone', () => {
+    expect(truncateIdentity('gemini-3.8-flash')).toBe('gemini-3.8-flash')
+  })
+
+  it('cuts from the middle so both ends survive', () => {
+    // The email keeps its domain; the model id keeps its tier suffix — the
+    // two halves a reader actually distinguishes accounts and models by.
+    expect(truncateIdentity('mahmoud01142458311@gmail.com')).toBe('mahmoud0114…@gmail.com')
+    expect(truncateIdentity('gemini-3.8-flash-tiered')).toBe('gemini-3.8-…ash-tiered')
   })
 })
 

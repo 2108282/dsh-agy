@@ -31,14 +31,15 @@ describe('recent activity ring', () => {
     let tick = 0
     const store = storeAt(file, () => 1_700_000_000_000 + tick++ * 1_000)
     store.record({ account: 'a@x', model: 'm1', source: 'chat', ok: true, usage: { input: 1, output: 5, cacheRead: 0, cacheWrite: 0 }, latencyMs: 900, ttftMs: 300 })
-    store.record({ account: 'b@y', model: 'm2', source: 'test', ok: false, rateLimited: true })
-    store.record({ account: 'b@y', source: 'chat', ok: true, poolEvent: true, rotated: true })
+    store.record({ account: 'b@y', model: 'm2', source: 'test', ok: false, rateLimited: true, reason: 'rate-limit' })
+    store.record({ account: 'b@y', source: 'chat', ok: false, poolEvent: true, rotated: true, reason: 'network-error' })
     const recent = store.recentRequests()
     // Newest first, and a pool event shows as its own kind rather than a request.
     expect(recent.map((entry) => entry.kind)).toEqual(['rotation', 'test', 'chat'])
-    expect(recent[0]).toMatchObject({ kind: 'rotation', account: 'b@y', ok: true } as never)
-    expect(recent[1]).toMatchObject({ kind: 'test', ok: false, rateLimited: true, output: null, latencyMs: null } as never)
-    expect(recent[2]).toMatchObject({ kind: 'chat', ok: true, latencyMs: 900, ttftMs: 300, output: 5 } as never)
+    // The rotation row carries the cause; a success row carries none.
+    expect(recent[0]).toMatchObject({ kind: 'rotation', account: 'b@y', ok: false, reason: 'network-error' } as never)
+    expect(recent[1]).toMatchObject({ kind: 'test', ok: false, rateLimited: true, reason: 'rate-limit', output: null, latencyMs: null } as never)
+    expect(recent[2]).toMatchObject({ kind: 'chat', ok: true, reason: null, latencyMs: 900, ttftMs: 300, output: 5 } as never)
     // The ring is in-memory only: recording must not create the file.
     expect(existsSync(file)).toBe(false)
   })

@@ -120,6 +120,13 @@ export interface UsageRecord {
    * counters and leaves the request counters alone.
    */
   poolEvent?: boolean
+  /**
+   * The failure classification this record carries ('rate-limit',
+   * 'network-error', 'auth-failure', 'verification-required', 'project-error',
+   * 'quota-exhausted'), when it failed. The counters ignore it: it exists for
+   * the recent-activity ring, where "why did it rotate" is the whole question.
+   */
+  reason?: string
 }
 
 /** Cap of the in-memory recent-activity ring (see `UsageStats.recentRequests`). */
@@ -144,6 +151,8 @@ export interface RecentActivity {
   latencyMs: number | null
   ttftMs: number | null
   output: number | null
+  /** Failure classification token, or null when the record succeeded. */
+  reason: string | null
 }
 
 function zeroAccount(now: number): AccountUsage {
@@ -614,6 +623,7 @@ export class UsageStats {
       latencyMs: record.latencyMs ?? null,
       ttftMs: record.ttftMs ?? null,
       output: record.usage?.output ?? null,
+      reason: record.ok === true ? null : record.reason ?? null,
     })
     if (this.recent.length > RECENT_MAX) {
       this.recent.splice(0, this.recent.length - RECENT_MAX)

@@ -426,6 +426,24 @@ function recentAgo(at: number, now: number, t: T): string {
   return agoText(new Date(at).toISOString(), t, now)
 }
 
+/**
+ * Middle-truncate an identity for the recent list.
+ *
+ * Both ends carry the signal — an email's domain, a model id's tier suffix —
+ * so the cut is taken from the MIDDLE, and bounding the rendered length (not
+ * relying on CSS clipping of a `table-layout: fixed` cell) is what keeps the
+ * columns honest. The full value stays on the cell's title.
+ * @param text - the full identity.
+ * @param max - rendered character budget including the ellipsis.
+ * @returns the truncated display string.
+ */
+export function truncateIdentity(text: string, max = 22): string {
+  if (text.length <= max) return text
+  const head = Math.ceil((max - 1) / 2)
+  const tail = max - 1 - head
+  return `${text.slice(0, head)}…${text.slice(-tail)}`
+}
+
 // ─── building blocks ─────────────────────────────────────────────────────────
 
 /**
@@ -1386,6 +1404,44 @@ function recentResultKind(entry: RecentEntry): 'ok' | 'fail' | 'limited' | 'rota
 }
 
 /**
+ * Localized label for a failure-classification token, falling back to the raw
+ * token so a classification added upstream still reads as something.
+ */
+function failureReasonLabel(reason: string, t: T): string {
+  switch (reason) {
+    case 'rate-limit': return t('colRateLimited')
+    case 'network-error': return t('cooldownReasonNetworkError')
+    case 'auth-failure': return t('disabledCredentials')
+    case 'verification-required': return t('cooldownReasonValidationRequired')
+    case 'quota-exhausted': return t('cooldownReasonQuotaExhausted')
+    case 'project-error': return t('cooldownReasonProjectError')
+    default: return reason
+  }
+}
+
+/**
+ * The result cell's text. Rotation rows say WHY (`reason` rides the record
+ * since the ring captures the classification); a failed request with a
+ * non-rate-limit classification also names it — the rate-limit case is already
+ * the whole RateLimited label, and doubling it reads as a stutter.
+ */
+function recentResultText(entry: RecentEntry, t: T): string {
+  const kind = recentResultKind(entry)
+  if (kind === 'rotation') {
+    return entry.reason === null
+      ? t('colRotations')
+      : `${t('colRotations')} · ${failureReasonLabel(entry.reason, t)}`
+  }
+  if (kind === 'limited') return t('colRateLimited')
+  if (kind === 'fail') {
+    return entry.reason === null || entry.reason === 'rate-limit'
+      ? t('colFailed')
+      : `${t('colFailed')} · ${failureReasonLabel(entry.reason, t)}`
+  }
+  return t('recentOk')
+}
+
+/**
  * The "what just happened" list: the most recent records this process saw,
  * newest first, collapsed by default and polled while open.
  *
@@ -1426,15 +1482,6 @@ function RecentCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   }, [open, load])
 
   const now = Date.now()
-  const kindOf = (entry: RecentEntry): string => recentResultKind(entry)
-  const textOf = (entry: RecentEntry): string => {
-    switch (recentResultKind(entry)) {
-      case 'rotation': return t('colRotations')
-      case 'limited': return t('colRateLimited')
-      case 'fail': return t('colFailed')
-      default: return t('recentOk')
-    }
-  }
 
   return h('div', { className: 'agy-disclosure agy-recent', 'data-open': open },
     h('button', {
@@ -1455,22 +1502,27 @@ function RecentCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
           ? h('div', { className: 'agy-empty' }, t('recentEmpty'))
           : h('div', { className: 'agy-table-wrap' },
             table(
+              // Every column carries an explicit width: a fixed-layout table
+              // with an auto column starved it to a sliver, and the identity
+              // truncation below bounds content so the widths hold.
               h('tr', null,
-                h('th', { style: { width: '72px' } }, t('colTime')),
-                // The identity columns get the Usage tab's `.agy-mail` treatment
-                // (single line, ellipsis, full value on hover): a fixed-layout
-                // table lets long ids wrap mid-word and hang a second line past
-                // the row boundary — the misalignment this replaces.
-                h('th', { style: { width: '38%' } }, t('colAccount')),
-                h('th', null, t('colModel')),
-                h('th', { style: { width: '64px' } }, t('colResult')),
+                h('th', { style: { width: '64px' } }, t('colTime')),
+                h('th', { style: { width: '30%' } }, t('colAccount')),
+                h('th', { style: { width: '24%' } }, t('colModel')),
+                h('th', { style: { width: '96px' } }, t('colResult')),
                 h('th', { style: { width: '56px' } }, t('colDuration')),
                 h('th', { style: { width: '48px' } }, t('colOutput'))),
               recent.map((entry, index) => h('tr', { key: `${entry.at}-${index}` },
                 h('td', null, recentAgo(entry.at, now, t)),
-                h('td', null, h('span', { className: 'agy-mail', title: entry.account ?? undefined }, entry.account ?? '—')),
-                h('td', null, h('span', { className: 'agy-mail', title: entry.model ?? undefined }, entry.model ?? '—')),
-                h('td', null, h('span', { className: 'agy-recent-state', 'data-kind': kindOf(entry) }, textOf(entry))),
+                h('td', null, h('span', {
+                  className: 'agy-mail',
+                  title: entry.account ?? undefined,
+                }, entry.account === null ? '—' : truncateIdentity(entry.account))),
+                h('td', null, h('span', {
+                  className: 'agy-mail',
+                  title: entry.model ?? undefined,
+                }, entry.model === null ? '—' : truncateIdentity(entry.model))),
+                h('td', null, h('span', { className: 'agy-recent-state', 'data-kind': recentResultKind(entry) }, recentResultText(entry, t))),
                 h('td', null, entry.latencyMs === null ? '—' : formatDuration(entry.latencyMs)),
                 h('td', { className: 'agy-num' }, entry.output === null ? '—' : tokenText(entry.output))))))))
 }

@@ -141,6 +141,12 @@ export interface RecentRequestView {
   kind: 'chat' | 'cli' | 'verify' | 'test' | 'rotation'
   ok: boolean
   rateLimited: boolean
+  /**
+   * Failure classification ('rate-limit', 'network-error', 'auth-failure',
+   * 'verification-required', ...), or null on success — what a rotation row
+   * exists to say.
+   */
+  reason: string | null
   latencyMs: number | null
   ttftMs: number | null
   output: number | null
