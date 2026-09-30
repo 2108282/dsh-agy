@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
-import { apply, orderModels, resolveSelectedAccountIndex, tokenText } from '../src/client/index.ts'
+import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, tokenText } from '../src/client/index.ts'
 import { en, zh } from '../src/client/locales.ts'
 import type { AccountView, ModelView } from '../src/rpc-contract.ts'
 
@@ -18,6 +18,7 @@ function makeContext(options: { withConnection?: boolean } = {}) {
     locale: {
       register: (ns: string) => { dictionaries.push(ns); return () => {} },
       bind: () => (key: string) => key,
+      getLocale: () => ({ active: 'zh' as const, locales: [], revision: 0 }),
     },
     logger: { warn: (message: string) => { warnings.push(message) } },
     slots: {
@@ -261,6 +262,47 @@ describe('token count formatting', () => {
     expect(tokenText(100_000)).toBe('100K')
     expect(tokenText(9_999_999)).toBe('10.0M')
     expect(tokenText(10_000_000)).toBe('10.0M')
+  })
+})
+
+describe('canActivateAccount', () => {
+  // A lean builder: the action's visibility depends on exactly two fields, so
+  // the other required ones are inert here.
+  function view(state: AccountView['state'], active = false): AccountView {
+    return {
+      index: 0,
+      email: 'acc@example.com',
+      projectId: 'proj',
+      active,
+      state,
+      cooldownUntil: null,
+      cooldownReason: null,
+      cooldownSetAt: null,
+      verificationUrl: null,
+      verificationRequired: false,
+      rateLimits: null,
+      fingerprint: null,
+      fingerprintHistory: 0,
+      proxy: null,
+      usage: null,
+      limits: null,
+      limitsUpdatedAt: null,
+    }
+  }
+
+  it('offers the action to every non-current account except a disabled one', () => {
+    expect(canActivateAccount(view('active'))).toBe(true)
+    expect(canActivateAccount(view('cooling'))).toBe(true)
+    expect(canActivateAccount(view('verification-required'))).toBe(true)
+    expect(canActivateAccount(view('disabled'))).toBe(false)
+  })
+
+  it('never offers it on the account that is already the pool preference', () => {
+    expect(canActivateAccount(view('active', true))).toBe(false)
+    // A disabled account cannot be the preference (`active` requires enabled),
+    // so the two guards do not overlap — but if the store ever disagreed, the
+    // safe answer is still "no button".
+    expect(canActivateAccount(view('disabled', true))).toBe(false)
   })
 })
 

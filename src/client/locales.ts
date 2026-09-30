@@ -19,7 +19,11 @@ export const zh = {
   tabUsage: '用量',
   tabCredentials: '凭据',
 
-  stateActive: '使用中',
+  // A pool-eligibility state, not a usage report: it means "enabled, not cooling,
+  // not parked" — the account MAY be picked. "使用中" would claim the account is
+  // serving requests right now, which collides with `currentAccount` (the one the
+  // pool preference points at) and is false for every other healthy row.
+  stateActive: '可用',
   stateCooling: '冷却中',
   stateVerificationRequired: '待验证',
   stateDisabled: '已停用',
@@ -75,7 +79,9 @@ export const zh = {
   relMonths: '{n} 个月',
   relYears: '{n} 年',
 
-  actionActivate: '激活',
+  // Switches the pool PREFERENCE to this account; it does not enable a disabled
+  // one (that is what 验证 does), which is why the verb is "set as current".
+  actionActivate: '设为当前',
   actionVerify: '验证',
   actionDelete: '删除',
   actionTest: '测试调用',
@@ -195,12 +201,13 @@ export const en: Record<AgyLocaleKey, string> = {
   tabUsage: 'Usage',
   tabCredentials: 'Credentials',
 
-  stateActive: 'Active',
+  // Pool-eligibility state, not a usage report — see the zh note on `stateActive`.
+  stateActive: 'Ready',
   stateCooling: 'Cooling down',
   stateVerificationRequired: 'Needs verification',
   stateDisabled: 'Disabled',
   coolingUntil: 'Cooling until',
-  currentAccount: 'current',
+  currentAccount: 'Current',
   noProject: '—',
   valueUnknown: '—',
 
@@ -251,7 +258,8 @@ export const en: Record<AgyLocaleKey, string> = {
   relMonths: '{n} mo',
   relYears: '{n} y',
 
-  actionActivate: 'Activate',
+  // Sets the pool preference; does not enable a disabled account — see the zh note.
+  actionActivate: 'Set as current',
   actionVerify: 'Verify',
   actionDelete: 'Delete',
   actionTest: 'Test call',

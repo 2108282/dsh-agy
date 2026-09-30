@@ -258,8 +258,13 @@ function windowLabel(window: string, t: T): string {
  * carry the date, or a 24h quota cooldown reads as though it ends in a few
  * minutes. (`untilText` is the relative form, used where "how long from now" is
  * the question rather than "when".)
+ *
+ * `lang` is the UI language ('zh' | 'en'), not the browser locale: the words on
+ * this panel follow the host's language setting, so the dates must too — a zh
+ * panel rendering `9/24/2026` (the browser's en-US ordering) was the symptom.
+ * `undefined` degrades to the browser default, the pre-`lang` behaviour.
  */
-function clockTime(iso: string | null): string {
+function clockTime(iso: string | null, lang?: string): string {
   if (iso === null) return '—'
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return '—'
@@ -268,8 +273,8 @@ function clockTime(iso: string | null): string {
     && date.getMonth() === now.getMonth()
     && date.getDate() === now.getDate()
   return sameDay
-    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    ? date.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' })
+    : date.toLocaleString(lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
 const MINUTE_MS = 60_000
@@ -472,6 +477,8 @@ function AccountDetail(props: {
   account: AccountView
   busy: boolean
   handlers: AccountHandlers
+  /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
+  lang?: string
   t: T
 }): ReactNode {
   const { account, busy, handlers, t } = props
@@ -491,7 +498,7 @@ function AccountDetail(props: {
       ? t('fingerprintNone')
       : t('fingerprintRegenerated', {
         count: account.fingerprintHistory,
-        date: new Date(account.fingerprint.createdAt).toLocaleDateString(),
+        date: new Date(account.fingerprint.createdAt).toLocaleDateString(props.lang),
       })],
     // The age matters as much as the reason: "network error" alone reads the
     // same whether it happened seconds or days ago, which is exactly how a stale
@@ -528,10 +535,16 @@ function AccountDetail(props: {
 
   const identity = card(t('detailTitle'), defs(identityRows), account.email ?? `#${account.index}`)
 
+  // Deleting lives here, in the one-account surface, not on every list row: a
+  // destructive action per row sat one misclick from the row's other buttons,
+  // and the confirm() dialog was the only guard. The row keeps the frequent,
+  // safe actions; the detail — where the user's attention already is — owns the
+  // destructive one.
   const actions = card(t('colActions'), h('div', { className: 'agy-actions' },
     button(t('actionTest'), () => { handlers.onTest(account.index) }, { disabled: busy }),
     button(t('actionExport'), () => { handlers.onExport(account.index) }, { disabled: busy }),
-    button(t('actionRegenerateFingerprint'), () => { handlers.onRegenerateFingerprint(account.index) }, { disabled: busy })))
+    button(t('actionRegenerateFingerprint'), () => { handlers.onRegenerateFingerprint(account.index) }, { disabled: busy }),
+    button(t('actionDelete'), () => { handlers.onDelete(account.index) }, { variant: 'danger', disabled: busy })))
 
   /**
    * The 5-hour / weekly windows, placed ABOVE the cumulative usage card.
@@ -631,6 +644,20 @@ function AccountDetail(props: {
 }
 
 /**
+ * Whether the row should offer "set as current".
+ *
+ * A pure rule, exported for a direct unit test. Two cases hide the action:
+ * the account is already the pool's preference, or it is DISABLED — `activate`
+ * only writes the preference and cannot re-enable, so on a disabled row the
+ * button was a no-op the user would read as broken. The repair path for a
+ * button was a no-op the user would read as broken. The repair path for a
+ * disabled account is `actionVerify`, which stays on the row.
+ */
+export function canActivateAccount(account: AccountView): boolean {
+  return !account.active && account.state !== 'disabled'
+}
+
+/**
  * Pick the selected account index: defaults to the active account (badge "current")
  * when present, otherwise falls back to index 0. Clamps to valid bounds.
  */
@@ -652,6 +679,8 @@ function AccountsTab(props: {
   accounts: AccountView[]
   busy: boolean
   handlers: AccountHandlers
+  /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
+  lang?: string
   t: T
 }): ReactNode {
   const { accounts, busy, handlers, t } = props
@@ -706,17 +735,13 @@ function AccountsTab(props: {
         : ` · ${t('colRequests')} ${account.usage.totals.requests}`)),
   h('div', { className: 'agy-rowactions' },
     stateBadge(account.state, account.state === 'cooling'
-      ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil)}`
+      ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil, props.lang)}`
       : stateLabel(account.state, t)),
-    account.active ? null : button(t('actionActivate'), () => {
+    canActivateAccount(account) ? button(t('actionActivate'), () => {
       setSelected(at)
       handlers.onActivate(account.index)
-    }, { size: 'sm', disabled: busy }),
-    button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }),
-    button(t('actionDelete'), () => {
-      setSelected(null)
-      handlers.onDelete(account.index)
-    }, { size: 'sm', variant: 'danger', disabled: busy }))))
+    }, { size: 'sm', disabled: busy }) : null,
+    button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }))))
 
   return h('div', { className: 'agy-root' },
     // The container-query wrapper the `.agy-split` breakpoint measures; see
@@ -729,9 +754,27 @@ function AccountsTab(props: {
         // over: without it React reuses the instance and a draft typed for one
         // account was still in the box after selecting another, one Save away
         // from writing A's proxy to B.
+        //
+        // `onDelete` is wrapped here, not in the shared handlers object: the
+        // row-level delete used to clear the selection before acting (deletion
+        // renumbers every index), and that selection state lives in THIS
+        // component. Deleting from the detail's action card must behave the same.
         current === undefined
           ? null
-          : h(AccountDetail, { key: String(current.index), account: current, busy, handlers, t }))))
+          : h(AccountDetail, {
+            key: String(current.index),
+            account: current,
+            busy,
+            handlers: {
+              ...handlers,
+              onDelete: (index: number) => {
+                setSelected(null)
+                handlers.onDelete(index)
+              },
+            },
+            lang: props.lang,
+            t,
+          }))))
 }
 
 /**
@@ -1250,7 +1293,7 @@ function tokenComposition(counters: UsageCounters, t: T): ReactNode {
   }))
 }
 
-function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
+function UsageTab(props: { stats: StatsView | null, lang?: string, t: T }): ReactNode {
   const { t } = props
   const [range, setRange] = useState<RangeId>('today')
   const stats = props.stats
@@ -1282,7 +1325,7 @@ function UsageTab(props: { stats: StatsView | null, t: T }): ReactNode {
     h('span', { className: 'agy-grow' }),
     stats.since === null
       ? null
-      : h('span', { className: 'agy-aside' }, t('since', { date: new Date(stats.since).toLocaleDateString() })))
+      : h('span', { className: 'agy-aside' }, t('since', { date: new Date(stats.since).toLocaleDateString(props.lang) })))
 
   /**
    * The headline: total Token FIRST, then the three buckets that add up to it.
@@ -1415,7 +1458,7 @@ function CredentialsTab(props: {
 // ─── root ────────────────────────────────────────────────────────────────────
 
 /** The Settings section body. */
-export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): ReactNode {
   const { rpc, t } = props
   const [tab, setTab] = useState<TabId>('accounts')
   const [accounts, setAccounts] = useState<AccountView[]>([])
@@ -1790,7 +1833,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     }, label, count === undefined ? null : h('span', { className: 'agy-count' }, String(count)))
 
   const body = tab === 'accounts'
-    ? h(AccountsTab, { accounts, busy, handlers, t })
+    ? h(AccountsTab, { accounts, busy, handlers, lang: props.lang, t })
     : tab === 'models'
       ? modelError === undefined
         ? h(ModelsTab, {
@@ -1878,7 +1921,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T }): ReactNode {
           h('div', { className: 'agy-error' }, modelError),
           button(t('refresh'), () => { void loadModels() }, { size: 'sm' }))
       : tab === 'usage'
-        ? h(UsageTab, { stats, t })
+        ? h(UsageTab, { stats, lang: props.lang, t })
         : h(CredentialsTab, {
           busy,
           t,
@@ -1958,11 +2001,16 @@ export function apply(ctx: ClientContext): void {
   // Bound once from the host's locale service: the slot content is re-created on
   // a language switch (the locale plugin bumps the ledger), so `t` stays current.
   const t = ctx.locale.bind(NS)
+  // The UI language for date formatting, read once per mount for the same
+  // reason. Optional-call against an older host whose locale service predates
+  // `getLocale`: undefined then degrades to the browser default, which is the
+  // pre-`lang` behaviour, not a crash.
+  const lang = ctx.locale.getLocale?.().active
   ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'agy',
     order: 30,
     locale: NS,
     label: () => t('title'),
-  }, () => h(AgySettings, { rpc, t }))), 'dsh-agy: Settings section')
+  }, () => h(AgySettings, { rpc, t, lang }))), 'dsh-agy: Settings section')
 }
