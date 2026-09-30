@@ -9,7 +9,9 @@ import {
 } from '../src/runtime/classify.ts'
 import {
   computeSoftQuotaCacheTtlMs,
+  clearExpiredState,
   decideRotation,
+  hasHealthyCachedQuota,
   isCoolingDown,
   isFamilyRateLimited,
   pickNextAccountIndex,
@@ -78,6 +80,10 @@ describe('classifyHttpError', () => {
     expect(unknown.rateLimitCategory).toBe('unknown')
     const resource = classifyHttpError(429, new Headers(), JSON.stringify({ error: { status: 'RESOURCE_EXHAUSTED' } }))
     expect(resource.rateLimitCategory).toBe('quota_exhausted')
+    const perMinute = classifyHttpError(429, new Headers(), JSON.stringify({ error: { message: 'Quota exceeded for quota metric and limit Queries per minute' } }))
+    expect(perMinute.rateLimitCategory).toBe('rate_limited')
+    const checkQuota = classifyHttpError(429, new Headers(), JSON.stringify({ error: { message: 'Resource has been exhausted (e.g. check quota).' } }))
+    expect(checkQuota.rateLimitCategory).toBe('rate_limited')
   })
 
   it('classifies 401 and plain 403 as auth-failure', () => {
@@ -297,6 +303,47 @@ describe('rotation state machine', () => {
     const decision = decideRotation('rate-limit', acc, 0, undefined, 'quota_exhausted')
     expect(decision.action).toBe('cool')
     expect(acc.coolingDownUntil! - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1000)
+  })
+
+  it('downgrades quota_exhausted to rotate when account has healthy cached quota without resetTime', () => {
+    const acc = account()
+    acc.cachedLimits = {
+      groups: [
+        {
+          name: 'Gemini Models',
+          windows: [
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.95 },
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.8 },
+          ],
+        },
+      ],
+      updatedAt: Date.now(),
+    }
+    const decision = decideRotation('rate-limit', acc, 0, undefined, 'quota_exhausted')
+    expect(decision.action).toBe('rotate')
+    expect(acc.coolingDownUntil).toBeUndefined()
+    expect(acc.cooldownReason).toBeUndefined()
+  })
+
+  it('self-heals quota-exhausted cooldown in clearExpiredState when cached quota is healthy', () => {
+    const acc = account()
+    acc.coolingDownUntil = Date.now() + 24 * 60 * 60 * 1000
+    acc.cooldownReason = 'quota-exhausted'
+    acc.cachedLimits = {
+      groups: [
+        {
+          name: 'Gemini Models',
+          windows: [
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.95 },
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.5 },
+          ],
+        },
+      ],
+      updatedAt: Date.now(),
+    }
+    clearExpiredState(acc, Date.now())
+    expect(acc.coolingDownUntil).toBeUndefined()
+    expect(acc.cooldownReason).toBeUndefined()
   })
 
   it('revokes on auth-failure and disables the account', () => {

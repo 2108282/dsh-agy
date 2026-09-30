@@ -466,6 +466,7 @@ export class AgyAdapter extends LlmAdapter {
             : { tieredBudgetFor: this.options.tieredBudgetFor }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
+          appendBehaviorInstruction: process.env.DSH_AGY_PROMPT_INJECT !== '0',
         })
         let response: Response
         try {

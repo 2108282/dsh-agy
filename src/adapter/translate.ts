@@ -346,6 +346,12 @@ function messageToContent(
  */
 const AGY_BUILTIN_TOOL_NAMES = new Set(['google_search', 'web_search', 'search_web', 'googleSearch'])
 
+export const AGY_BEHAVIOR_INSTRUCTION = `【Antigravity 协作交互规范】
+1. 思考与推理（Thinking）：你的思考过程（thought / reasoning）必须与用户使用的语言保持一致（默认使用中文），请一律使用中文进行深度思考和问题拆解。
+2. 边对话边执行（Crucial）：在执行任何工具操作（如 bash、edit、write 等）之前，必须先用简短自然的一两句话（中文）向用户说明你正在排查什么、发现的问题或接下来计划执行的操作，然后再调用工具。切勿在没有向用户说明的情况下默默连续调用工具！实现一边与用户对话沟通、一边高效推进任务的协作体验。
+3. 持续思考：在收到工具执行结果后，若需要进一步分析或多步排查，请继续进行思考并向用户简述发现，再调用下一个工具。
+4. 对话语言：与用户的所有对话交互一律使用中文。`
+
 /** Level-thinking: single id + selectable low/medium/high via thinkingLevel (catalog thinking:'level'). */
 const LEVEL_THINKING_LEVELS = new Set(['low', 'medium', 'high'])
 
@@ -452,6 +458,7 @@ export function toAgyRequestBody(
      * `thinkingLevel` — the tiered model's adaptive entry, given an explicit cap.
      */
     tieredBudgetFor?: () => number | undefined
+    appendBehaviorInstruction?: boolean
   },
 ): AgyRequestBody {
   const messages = normalizeMessages(options.messages)
@@ -471,9 +478,14 @@ export function toAgyRequestBody(
   // (documented identically on both supported dsh-llm lines). Both sources feed
   // the system slot; routing the message through `contents` instead would put
   // the system prompt on the wire as a USER turn.
-  const systemText = [options.system, systemTextFromMessages(messages)]
+  let systemText = [options.system, systemTextFromMessages(messages)]
     .filter((text): text is string => typeof text === 'string' && text !== '')
     .join('\n\n')
+  if (context.appendBehaviorInstruction) {
+    systemText = systemText
+      ? `${systemText}\n\n${AGY_BEHAVIOR_INSTRUCTION}`
+      : AGY_BEHAVIOR_INSTRUCTION
+  }
 
   const tools = toolsToDeclarations(options.tools)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}

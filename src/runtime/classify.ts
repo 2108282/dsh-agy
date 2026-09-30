@@ -96,8 +96,28 @@ const QUOTA_EXHAUSTED_KEYWORDS = [
   'quota_exhausted',
   'quota exhausted',
   'quota reached',
+  'quota limit reached',
+  'daily quota exceeded',
+  'weekly quota exceeded',
   'enable overages',
   'individual quota',
+  'insufficient_quota',
+  'exceeded your current quota',
+]
+
+const RATE_LIMIT_KEYWORDS = [
+  'queries per minute',
+  'requests per minute',
+  'tokens per minute',
+  'per minute',
+  'per-minute',
+  'rate limit',
+  'rate_limit',
+  'concurrent requests',
+  'too many requests',
+  'resource has been exhausted (e.g. check quota)',
+  'rpm',
+  'tpm',
 ]
 
 /** Classify a 429 body into the four upstream categories. */
@@ -108,6 +128,9 @@ export function classifyRateLimit(
   const text = (bodyText ?? '').toLowerCase()
   if (QUOTA_EXHAUSTED_KEYWORDS.some((keyword) => text.includes(keyword))) {
     return 'quota_exhausted'
+  }
+  if (RATE_LIMIT_KEYWORDS.some((keyword) => text.includes(keyword))) {
+    return 'rate_limited'
   }
   if (retryAfterMs !== undefined && retryAfterMs < 3000) {
     return 'soft_rate_limit'
