@@ -29,8 +29,8 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { resolveDshHome } from './store/keyring.ts'
+import { dirname } from 'node:path'
+import { migrateToAgyDir } from './store/paths.ts'
 import {
   THINKING_BUDGET_MAX,
   THINKING_BUDGET_MIN,
@@ -125,7 +125,10 @@ export function parseThinkingDocument(text: string): ThinkingDocument {
 }
 
 export interface ThinkingBudgetOptions {
-  /** Defaults to `$DSH_HOME/agy-thinking.json`. */
+  /**
+   * Defaults to `$DSH_HOME/agy/agy-thinking.json`, migrating the legacy
+   * `$DSH_HOME/agy-thinking.json` by one-shot rename (see `migrateToAgyDir`).
+   */
   file?: string
   /**
    * Minimum gap between hot-path file revalidations. Defaults to
@@ -161,7 +164,7 @@ export class ThinkingBudgetStore {
   private checkedAt: number
 
   constructor(options: ThinkingBudgetOptions = {}) {
-    this.file = options.file ?? join(resolveDshHome(), 'agy-thinking.json')
+    this.file = options.file ?? migrateToAgyDir('agy-thinking.json').file
     this.revalidateIntervalMs = options.revalidateIntervalMs ?? DEFAULT_REVALIDATE_INTERVAL_MS
     const initial = this.readWithRaw()
     this.doc = initial.doc

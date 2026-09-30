@@ -112,7 +112,7 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     return () => {}
   }
 
-  const { store, sessions, adapter, stats, modelVisibility, thinkingBudget } = await createAgyRuntime(ctx)
+  const { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget } = await createAgyRuntime(ctx)
   // Read per use rather than once here: the bound port is only known after the
   // server's listen callback has run.
   const baseUrl = (): string => webBaseUrl(host, webServer, webStartup?.port)
@@ -120,6 +120,8 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     store,
     sessions,
     stats,
+    // The persisted ring, not just this boot's in-memory one.
+    recentRequests: () => recentStore.recentRequests(),
     modelVisibility,
     // Expose only the two operations the RPC needs, not the whole store.
     thinkingBudget: {

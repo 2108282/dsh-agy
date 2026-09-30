@@ -24,7 +24,7 @@ import { foldWindowBreakdown } from '../stats.ts'
 import { THINKING_BUDGET_MAX, THINKING_BUDGET_MIN } from '../thinking-budget.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN } from '../thinking-types.ts'
 import { dayKey } from '../stats.ts'
-import type { UsageCounters, UsageSource } from '../stats.ts'
+import type { RecentActivity, UsageCounters, UsageSource } from '../stats.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { AgySessionManager } from '../session.ts'
 import type { ModelVisibility } from '../model-visibility.ts'
@@ -50,6 +50,13 @@ export interface AgyManagementOptions {
   store: AccountStore
   sessions: AgySessionManager
   stats: UsageStats
+  /**
+   * The persisted recent-activity ring (see `recent-store.ts`).
+   *
+   * A plain accessor rather than the store instance, matching `thinkingBudget`:
+   * this module needs exactly one operation and cannot reach the rest.
+   */
+  recentRequests: () => RecentActivity[]
   modelVisibility: ModelVisibility
   /**
    * The global reasoning-level budget map (see `thinking-budget.ts`).
@@ -139,7 +146,7 @@ function toAccountUsageView(
 }
 
 export function createAgyManagement(options: AgyManagementOptions): AgyManagement {
-  const { store, sessions, stats, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
+  const { store, sessions, stats, recentRequests, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
   const thinkingBudget = options.thinkingBudget
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
@@ -313,7 +320,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
 
     'pool.status': async () => ({ busy: await sessions.inFlightAccounts() }),
 
-    'pool.recent': async () => ({ recent: stats.recentRequests() }),
+    'pool.recent': async () => ({ recent: recentRequests() }),
 
     'account.activate': async (payload) => {
       const index = asIndex(payload)
