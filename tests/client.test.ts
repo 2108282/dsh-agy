@@ -311,27 +311,39 @@ describe('canActivateAccount', () => {
 
 describe('throughput calculation', () => {
   // The counters the calculation reads; everything else is inert.
-  const totals = (output: number, latencyMs: number, latencyN: number): UsageCounters =>
-    ({ ...zeroCounters(), output, latencyMs, latencyN })
+  const totals = (over: Partial<UsageCounters>): UsageCounters =>
+    ({ ...zeroCounters(), ...over })
 
-  it('is null when nothing was timed or produced, not a fake zero', () => {
+  it('is null when nothing was timed, produced, or first-tokened', () => {
     // The detail row is absent for null, so a never-used account must not
-    // render "≈ 0 token/s" — that would read as "measured, and dead".
+    // render "≈ 0 token/s" — that would read as "measured, and dead". A scope
+    // with wall time but NO first-token report cannot separate decode from
+    // wait, so it is null too rather than a whole-request average.
     expect(throughputTokenPerSecond(zeroCounters())).toBeNull()
-    expect(throughputTokenPerSecond(totals(0, 5_000, 1))).toBeNull()
-    expect(throughputTokenPerSecond(totals(500, 0, 0))).toBeNull()
+    expect(throughputTokenPerSecond(totals({ output: 100, latencyMs: 5_000, latencyN: 1 }))).toBeNull()
+    // A first token at/after the wall clock (skew, or a degenerate sample).
+    expect(throughputTokenPerSecond(totals({ output: 500, latencyMs: 1_000, latencyN: 1, ttftMs: 1_200, ttftN: 1 }))).toBeNull()
   })
 
-  it('divides output tokens by the summed wall time', () => {
-    // 100 output tokens across 2 seconds of wall time.
-    expect(throughputTokenPerSecond(totals(100, 2_000, 1))).toBe(50)
-    // Two requests: the sums are already aggregated by the ledger, so the
-    // average needs no per-request sample.
-    expect(throughputTokenPerSecond(totals(300, 1_000 + 2_000, 2))).toBe(100)
+  it('divides output by the window AFTER the first token, not the wall clock', () => {
+    // 100 tokens over 2s of wall time, 1.5s of it waiting for the first token:
+    // the streamed half-second carried 100 tokens → 200 tok/s. Dividing by the
+    // wall clock instead reported ~8× low on a channel whose first-token wait
+    // is ~90% of the request (the "40 vs ~300" report).
+    expect(throughputTokenPerSecond(totals({ output: 100, latencyMs: 2_000, latencyN: 1, ttftMs: 1_500, ttftN: 1 }))).toBe(200)
+  })
+
+  it('averages per request when the two clocks cover different request counts', () => {
+    // Failed requests carry wall time but no first token, so latencyN can
+    // exceed ttftN. Raw sums would hand the failures' wait to the decode
+    // window; the per-request averages keep the rate on streamed requests.
+    expect(throughputTokenPerSecond(totals({
+      output: 150, latencyMs: 3_000, latencyN: 2, ttftMs: 1_000, ttftN: 1,
+    }))).toBe(150)
   })
 
   it('rounds to whole tokens per second', () => {
-    expect(throughputTokenPerSecond(totals(10, 300, 1))).toBe(33)
+    expect(throughputTokenPerSecond(totals({ output: 10, latencyMs: 400, latencyN: 1, ttftMs: 100, ttftN: 1 }))).toBe(33)
   })
 })
 

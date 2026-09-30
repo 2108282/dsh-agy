@@ -52,7 +52,10 @@ export const zh = {
   liveMany: '正在生成 · {count} 个并发 · {accounts} 个账号',
   fieldThroughput: '吞吐',
   throughputValue: '≈ {n} token/s',
-  throughputNote: '累计平均',
+  // The qualifier that makes the number meaningful: the denominator EXCLUDES the
+  // first-token wait (which the 延迟 row right above shows separately), so the
+  // figure is the streaming decode rate, not a whole-request average.
+  throughputNote: '首 token 后 · 累计平均',
   colActions: '操作',
   emptyAccounts: '还没有账号。切到「凭据」标签导入，或点击上方「登录」。',
 
@@ -244,7 +247,8 @@ export const en: Record<AgyLocaleKey, string> = {
   liveMany: 'Generating · {count} in flight across {accounts} account(s)',
   fieldThroughput: 'Throughput',
   throughputValue: '≈ {n} token/s',
-  throughputNote: 'cumulative average',
+  // Excludes the first-token wait — see the zh note.
+  throughputNote: 'after first token · cumulative',
   colActions: 'Actions',
   emptyAccounts: 'No accounts yet. Import one from the Credentials tab, or use Sign in above.',
 

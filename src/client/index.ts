@@ -194,15 +194,24 @@ function totalTokens(counters: UsageCounters): number {
 /**
  * Cumulative average OUTPUT rate for one scope, in tokens per second.
  *
- * Pure and exported for a direct unit test. The ledger stores SUMMED wall time
- * and summed output tokens — not per-request samples — so this is a lifetime
- * average, not a live rate; output includes reasoning tokens and the wall time
- * includes the first-token wait. Null when nothing was timed or produced, so
- * the row simply does not render rather than showing a fake zero.
+ * Pure and exported for a direct unit test. The denominator is the STREAMING
+ * window (average latency minus average time-to-first-token), NOT the wall
+ * clock: on this channel the pre-first-token wait (upstream queue, routing,
+ * prompt processing, silent thinking) is ~90% of the request — measured 7.5s
+ * of an 8.3s average — so dividing by wall time understated the decode rate
+ * about 8× (40 tok/s shown where the account really streamed ~300).
+ *
+ * Per-request AVERAGES, not raw sums: a failed request carries wall time but
+ * never a first token (`latencyN` > `ttftN`), so subtracting raw sums would
+ * hand its wait to the decode window. Both averages must exist — a scope with
+ * no timed request or no reported first token gets null, hiding the row rather
+ * than showing a fake rate.
  */
 export function throughputTokenPerSecond(totals: UsageCounters): number | null {
-  if (totals.latencyN === 0 || totals.latencyMs <= 0 || totals.output <= 0) return null
-  return Math.round(totals.output / (totals.latencyMs / 1_000))
+  if (totals.latencyN === 0 || totals.ttftN === 0 || totals.output <= 0) return null
+  const decodeMs = totals.latencyMs / totals.latencyN - totals.ttftMs / totals.ttftN
+  if (decodeMs <= 0) return null
+  return Math.round(totals.output / totals.latencyN / (decodeMs / 1_000))
 }
 
 /**
@@ -546,8 +555,9 @@ function AccountDetail(props: {
       ? t('noProject')
       : `${t('latencyAverage', { value: formatDuration(average(usage.totals.latencyMs, usage.totals.latencyN)) })}`
         + ` · ${t('latencyTtft', { value: formatDuration(average(usage.totals.ttftMs, usage.totals.ttftN)) })}`],
-    // A lifetime average, not a live rate — the ledger stores sums, not samples.
-    // Absent entirely when nothing was timed, rather than rendering a fake 0.
+    // Streaming decode rate (output over the window AFTER the first token), a
+    // lifetime average — the ledger stores sums, not samples. Absent entirely
+    // when nothing was timed, rather than rendering a fake 0.
     ...(throughput === null ? [] : [[
       t('fieldThroughput'),
       `${t('throughputValue', { n: throughput })} · ${t('throughputNote')}`,
