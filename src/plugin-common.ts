@@ -86,15 +86,49 @@ async function warmVersionCache(store: AccountStore): Promise<void> {
   await resolveAntigravityVersion(fetchImpl).catch(() => {})
 }
 
-/** Build the store, session manager, and adapter for one plugin entry. */
-export async function createAgyRuntime(ctx: Context): Promise<{
+/** The runtime one plugin entry uses: store, sessions, adapter, and the caches. */
+export interface AgyRuntime {
   store: AccountStore
   sessions: AgySessionManager
   adapter: AgyAdapter
   stats: UsageStats
   modelVisibility: ModelVisibility
   thinkingBudget: ThinkingBudgetStore
-}> {
+}
+
+/**
+ * The process-wide runtime promise, shared by both entry points.
+ *
+ * Splitting it was a real defect, not a stylistic one: the ledger FILE merges
+ * across instances, so counters looked fine, but every in-memory surface is
+ * per instance — the web entry's ring and in-flight map could never see the
+ * main plugin's chat traffic (same process, two rings), and `account.activate`
+ * cleared affinity pins on the WRONG session manager while the serving one
+ * kept its stale pin. Both entries call this in one process; one memo here is
+ * what makes that "shared runtime" claim true. Separate profiles are separate
+ * processes, so the memo never bridges compositions.
+ */
+let sharedRuntime: Promise<AgyRuntime> | undefined
+
+/** Build (once per process) and return the runtime both entries share. */
+export async function createAgyRuntime(ctx: Context): Promise<AgyRuntime> {
+  if (sharedRuntime === undefined) {
+    sharedRuntime = buildAgyRuntime(ctx).catch((error) => {
+      // A failed build must not poison every later activation: drop the memo
+      // so the next entry (or a retried apply) builds fresh.
+      sharedRuntime = undefined
+      throw error
+    })
+  }
+  return sharedRuntime
+}
+
+/** Test-only: drop the process memo so a test builds an isolated runtime. */
+export function _resetAgyRuntimeForTest(): void {
+  sharedRuntime = undefined
+}
+
+async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   const { codec } = await resolveCodec(ctx)
   const dshHome = resolveDshHome()
   const store = new JsonAccountStore({ file: `${dshHome}/agy-accounts.json`, codec })
