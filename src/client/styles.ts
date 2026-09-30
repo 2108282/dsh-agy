@@ -389,6 +389,53 @@ const CSS = `
   color: var(--dsw-alias-label-primary, #1f2329); background: var(--dsw-alias-bg-layer-1, #fff);
   border: 0.5px solid var(--dsw-alias-border-l2, #eef0f3); border-radius: 8px; }
 .agy-textarea:focus { border-color: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6); }
+
+/* ── Conversation-header quota badge ────────────────────────────────────── */
+/* The badge renders in the session header rather than inside this panel, but it
+   shows the same windows the limits card above shows, so it must read as the
+   same component. Geometry is the only thing written here (the host has no
+   primitive for a header indicator); every colour, border and type role comes
+   from the theme, and the controls inside are the host's own Button/Pill/Tag. */
+.agy-quota-anchor { position: relative; display: inline-flex; align-items: center; }
+.agy-quota-badge { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary, #61666b); }
+.agy-quota-badge:hover { color: var(--dsw-alias-label-primary, #1f2329); }
+
+/* Floating card, the host's own elevation plus a theme token surface: the
+   HoverCard's fixed dark panel is a preview slab, while this one carries live
+   figures and has to stay readable in both themes. */
+.agy-quota-pop {
+  position: fixed; z-index: 100; box-sizing: border-box;
+  display: flex; flex-direction: column; gap: 10px;
+  width: 320px; padding: 12px 14px;
+  border: 0.5px solid var(--dsw-alias-border-l2, #eef0f3); border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: var(--dsw-shadow-lv3);
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-primary, #1f2329);
+}
+.agy-quota-pop-head { display: flex; align-items: center; gap: 8px; }
+.agy-quota-pop-title { flex: 1; font: var(--dsw-font-xs-strong-13); }
+.agy-quota-pop-actions { display: flex; align-items: center; gap: 4px; }
+.agy-quota-account { display: flex; align-items: center; gap: 6px;
+  font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
+.agy-quota-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, #61666b); }
+.agy-quota-project { margin-left: auto; }
+.agy-quota-age { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
+.agy-quota-cards { display: flex; flex-direction: column; gap: 8px; }
+.agy-quota-card { display: flex; flex-direction: column; gap: 6px; }
+.agy-quota-card-title { font: var(--dsw-font-xxxs-strong-11); color: var(--dsw-alias-label-secondary, #61666b); }
+.agy-quota-item { display: flex; flex-direction: column; gap: 3px; }
+/* Same four-column reading order as the limits card: label, bar, figure, wall. */
+.agy-quota-row { display: grid; grid-template-columns: 64px 1fr 40px auto; align-items: center; gap: 8px; }
+.agy-quota-k { color: var(--dsw-alias-label-secondary, #61666b); }
+.agy-quota-track { height: 6px; overflow: hidden; border-radius: 3px; background: var(--dsw-alias-bg-layer-2, #f4f5f7); }
+.agy-quota-track > i { display: block; height: 100%; border-radius: 3px; }
+.agy-quota-p { text-align: right; font: var(--dsw-font-xxxs-strong-11); }
+.agy-quota-reset { white-space: nowrap; color: var(--dsw-alias-label-tertiary, #8f959e); }
+.agy-quota-note { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
+.agy-quota-empty { padding: 12px 0; text-align: center; color: var(--dsw-alias-label-tertiary, #8f959e); }
+.agy-quota-foot { display: flex; flex-direction: column; gap: 2px; padding-top: 8px;
+  border-top: 0.5px solid var(--dsw-alias-border-l1, #f4f5f7);
+  font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e); }
 `
 
 /** Install the stylesheet once (idempotent across plugin reloads): a second

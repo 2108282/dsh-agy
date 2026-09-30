@@ -12,7 +12,7 @@
  * readable where nested `createElement` calls become a parenthesis maze.
  */
 
-import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -29,6 +29,9 @@ import {
 import type { StateDotState, TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
+import { h } from './element.ts'
+import { AgyQuotaBadge } from './quota-badge.ts'
+import { agoText, quotaColor, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
 import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
@@ -37,6 +40,25 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** Copy owned by the Antigravity Settings section. */
     agy: AgyLocaleKey
+  }
+
+  /**
+   * The Session header's action row.
+   *
+   * The face is OWNED by `@deepseek-ai/dsh-client-ui-conversation`, which this
+   * package deliberately does not depend on: that UI package brings its own
+   * app-shell peer set, and a plugin registering ONE slot should not install a
+   * shell to name it. The entry below mirrors that package's declaration (a
+   * list-ordered slot scoped to a Session, whose owner face is empty because
+   * header actions read the standard session kit) — the same declaration-merging
+   * idiom already used for `LocaleNamespaceMap` above.
+   */
+  interface SlotMap {
+    'conversation.session.header.actions': {
+      kind: 'list'
+      scope: 'session'
+      owner: Record<string, never>
+    }
   }
 }
 
@@ -82,28 +104,6 @@ interface ConnectionLike {
   rpc: {
     call: (channel: string, endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>
   }
-}
-
-/**
- * Element shorthand: flat children, no nesting ceremony.
- *
- * The component overload accepts children as trailing arguments too, because
- * React's `createElement` handles them natively for function components.
- */
-function h(tag: string, props?: Record<string, unknown> | null, ...children: ReactNode[]): ReactNode
-function h<Props>(
-  // `key` rides in props for `createElement`, so the component overload must
-  // admit it even though it is not part of the component's own props type.
-  component: (props: Props) => ReactNode,
-  props: Props & { key?: string | number },
-  ...children: ReactNode[]
-): ReactNode
-function h(
-  tag: string | ((props: never) => ReactNode),
-  props?: Record<string, unknown> | null,
-  ...children: ReactNode[]
-): ReactNode {
-  return createElement(tag as string, props ?? null, ...children)
 }
 
 /** Call one management method and unwrap the Connection RPC envelope. */
@@ -238,23 +238,6 @@ function promptTokens(counters: UsageCounters): number {
   return counters.input + counters.cacheRead + counters.cacheWrite
 }
 
-/** Quota tint by remaining fraction: healthy / low / critical. */
-function quotaColor(fraction: number): string {
-  if (fraction > 0.7) return 'var(--dsw-alias-state-success-primary, #22c55e)'
-  if (fraction >= 0.3) return 'var(--dsw-alias-state-warn-primary, #f59e0b)'
-  return 'var(--dsw-alias-state-error-primary, #ec1313)'
-}
-
-/** Localized account-state label. */
-function stateLabel(state: AccountView['state'], t: T): string {
-  switch (state) {
-    case 'active': return t('stateActive')
-    case 'cooling': return t('stateCooling')
-    case 'verification-required': return t('stateVerificationRequired')
-    case 'disabled': return t('stateDisabled')
-  }
-}
-
 /**
  * Localized label for a reasoning level.
  *
@@ -267,22 +250,6 @@ function levelLabel(level: string, t: T): string {
     case 'medium': return t('thinkingLevelMedium')
     case 'high': return t('thinkingLevelHigh')
     default: return level
-  }
-}
-
-/**
- * Localized label for an upstream quota window token.
- *
- * Upstream sends `5h` / `weekly` today. The tokens are mapped rather than
- * printed so the panel follows the UI language, and an UNRECOGNIZED token falls
- * back to its raw value: upstream may add a window, and showing `30d` is better
- * than a blank or a wrong localized label.
- */
-function windowLabel(window: string, t: T): string {
-  switch (window) {
-    case '5h': return t('quotaWindow5h')
-    case 'weekly': return t('quotaWindowWeekly')
-    default: return window
   }
 }
 
@@ -336,40 +303,6 @@ function dayLabel(day: string, lang?: string): string {
   return new Date(y, m - 1, d).toLocaleDateString(lang, { month: 'short', day: 'numeric' })
 }
 
-const MINUTE_MS = 60_000
-const HOUR_MS = 60 * MINUTE_MS
-const DAY_MS = 24 * HOUR_MS
-
-/**
- * Time until a future moment, as localized copy.
- *
- * A quota reset wall is often more than 24h out, so a bare `HH:mm` cannot say
- * whether it means today or tomorrow — the failure this replaces. Bucket
- * boundaries mirror the host's `relativeTime` (which is defined for past-dated
- * rows and would need its arguments reversed to serve a future one, so the
- * comparison is written out here instead); the words stay in this plugin's own
- * dictionary, which is exactly the split that API intends.
- */
-function untilText(iso: string | null, t: T, now: number): string {
-  if (iso === null) return '—'
-  const at = new Date(iso).getTime()
-  if (Number.isNaN(at)) return '—'
-  const diff = at - now
-  if (diff <= 0) return t('relNow')
-  const value = diff < MINUTE_MS
-    ? t('relNow')
-    : diff < HOUR_MS
-      ? t('relMinutes', { n: Math.floor(diff / MINUTE_MS) })
-      : diff < DAY_MS
-        ? t('relHours', { n: Math.floor(diff / HOUR_MS) })
-        : diff < 30 * DAY_MS
-          ? t('relDays', { n: Math.floor(diff / DAY_MS) })
-          : diff < 365 * DAY_MS
-            ? t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
-            : t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
-  return t('quotaResetIn', { value })
-}
-
 /**
  * Localized label for a cooldown reason.
  *
@@ -384,34 +317,6 @@ function cooldownReasonLabel(reason: string, t: T): string {
     case 'project-error': return t('cooldownReasonProjectError')
     default: return reason
   }
-}
-
-/**
- * How long ago a past moment was (the mirror of `untilText`).
- *
- * Reuses the same `rel*` magnitudes so the two read consistently, but adds a
- * direction suffix: a bare magnitude beside a cooldown could equally mean when
- * it started or when it ends. The suffix and every magnitude come from the
- * dictionary, so nothing here is language-specific.
- */
-function agoText(iso: string | null, t: T, now: number): string {
-  if (iso === null) return '—'
-  const at = new Date(iso).getTime()
-  if (Number.isNaN(at)) return '—'
-  const diff = now - at
-  // A clock skew or a just-written stamp reads as "just now" rather than a
-  // negative age.
-  if (diff < MINUTE_MS) return t('relJustNow')
-  const value = diff < HOUR_MS
-    ? t('relMinutes', { n: Math.floor(diff / MINUTE_MS) })
-    : diff < DAY_MS
-      ? t('relHours', { n: Math.floor(diff / HOUR_MS) })
-      : diff < 30 * DAY_MS
-        ? t('relDays', { n: Math.floor(diff / DAY_MS) })
-        : diff < 365 * DAY_MS
-          ? t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
-          : t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
-  return t('relAgo', { value })
 }
 
 /**
@@ -443,7 +348,6 @@ export function truncateIdentity(text: string, max = 22): string {
   const tail = max - 1 - head
   return `${text.slice(0, head)}…${text.slice(-tail)}`
 }
-
 // ─── building blocks ─────────────────────────────────────────────────────────
 
 /**
@@ -2370,4 +2274,15 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     label: () => t('title'),
   }, () => h(AgySettings, { rpc, t, lang }))), 'dsh-agy: Settings section')
+// The badge is a SECOND registration on the same services, not a second
+  // entrypoint: it needs the slot registry it already injects, and the same RPC
+  // client. Its own slot is the session header, so it renders outside Settings
+  // and must not depend on that panel ever being opened.
+  ctx.effect(() => ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions',
+    id: 'agy-quota-badge',
+    order: 8,
+    label: () => t('title'),
+  }, () => h(AgyQuotaBadge, { rpc, t }))), 'dsh-agy: quota badge')
+
 }
