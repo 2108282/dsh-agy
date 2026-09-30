@@ -188,7 +188,7 @@ interface QuotaRefreshResult {
  * deliberately DETERMINISTIC rather than randomized: a per-request platform or
  * version would make one account appear to be several different machines, which
  * is the anomaly this identity exists to avoid. It reads
- * {@link getFingerprintData} so a `$DSH_HOME/agy-fingerprint-data.json` override
+ * {@link getFingerprintData} so a `$DSH_HOME/agy/agy-fingerprint-data.json` override
  * still applies on this path.
  */
 export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSession['impersonation'] {

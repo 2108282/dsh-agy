@@ -15,6 +15,7 @@ import { encodeCredentialBlob } from '../oauth/blob.ts'
 import { AGY_DEFAULT_REDIRECT_URI } from '../oauth/constants.ts'
 import { createAesGcmCodec, deriveKey, loadMasterKey, resolveDshHome, resolveMasterKeyCodec } from '../store/keyring.ts'
 import type { SecretCodec } from '../store/keyring.ts'
+import { migrateToAgyDir } from '../store/paths.ts'
 import { JsonAccountStore, maskProxyUrl } from '../store/accounts.ts'
 import { AgySessionManager } from '../session.ts'
 import { isAgyDisabled } from '../runtime/risk.ts'
@@ -30,6 +31,18 @@ const { version: PACKAGE_VERSION } = JSON.parse(
 
 function createStore(options: { readOnly?: boolean } = {}): JsonAccountStore {
   const dshHome = resolveDshHome()
+  // One-time move of the legacy home-directory file into `$DSH_HOME/agy/`.
+  // `skew` here means the NEW file already exists while a legacy one sits next
+  // to it — an old-version process wrote it again — so say so once, on stderr,
+  // and keep using the new layout.
+  const accounts = migrateToAgyDir('agy-accounts.json', dshHome)
+  if (accounts.skew) {
+    console.error(
+      'dsh-agy: legacy agy-accounts.json detected next to the agy folder — an older '
+      + 'dsh-agy process may still be writing it; its changes stay invisible until '
+      + 'every dsh surface is restarted',
+    )
+  }
   let codec: SecretCodec
   if (options.readOnly) {
     // Read-only commands must never create the master key or the credentials
@@ -43,7 +56,7 @@ function createStore(options: { readOnly?: boolean } = {}): JsonAccountStore {
   } else {
     codec = resolveMasterKeyCodec(dshHome).codec
   }
-  return new JsonAccountStore({ file: `${dshHome}/agy-accounts.json`, codec })
+  return new JsonAccountStore({ file: accounts.file, codec })
 }
 
 /** Read-only store with a friendly error when no credentials exist yet. */

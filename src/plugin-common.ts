@@ -14,6 +14,7 @@ import { AGY_PROVIDER } from './adapter/models.ts'
 import { ModelVisibility } from './model-visibility.ts'
 import { ThinkingBudgetStore } from './thinking-budget.ts'
 import { UsageStats } from './stats.ts'
+import { RecentActivityStore } from './recent-store.ts'
 import { probeFetch, proxiedFetch } from './proxy.ts'
 import { pickProbeProxyUrl } from './runtime/rotation.ts'
 import { resolveAntigravityVersion } from './runtime/version.ts'
@@ -31,6 +32,7 @@ import {
   resolveMasterKeyCodec,
 } from './store/keyring.ts'
 import type { SecretCodec } from './store/keyring.ts'
+import { migrateToAgyDir } from './store/paths.ts'
 
 export interface CredentialsSeam {
   resolve(ref: string): Promise<{ value: string } | undefined>
@@ -92,6 +94,7 @@ export interface AgyRuntime {
   sessions: AgySessionManager
   adapter: AgyAdapter
   stats: UsageStats
+  recentStore: RecentActivityStore
   modelVisibility: ModelVisibility
   thinkingBudget: ThinkingBudgetStore
 }
@@ -131,13 +134,39 @@ export function _resetAgyRuntimeForTest(): void {
 async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   const { codec } = await resolveCodec(ctx)
   const dshHome = resolveDshHome()
-  const store = new JsonAccountStore({ file: `${dshHome}/agy-accounts.json`, codec })
+  // Data files live in `$DSH_HOME/agy/`; the constructor-side migrations below
+  // each move their own legacy file once. One warn here covers the skew case
+  // for the whole runtime: every store's result is checked, and the message is
+  // the same shape, so callers see ONE diagnosis instead of five.
+  const accountsMigrated = migrateToAgyDir('agy-accounts.json', dshHome)
+  if (accountsMigrated.skew) {
+    ctx.logger.warn(
+      '[dsh-agy] legacy data file detected next to the agy folder — an older dsh-agy '
+      + 'process may still be writing the pre-0.5 layout; its writes will not be seen '
+      + 'until every dsh surface is restarted',
+    )
+  }
+  const store = new JsonAccountStore({ file: accountsMigrated.file, codec })
   void warmVersionCache(store)
+  // The persisted recent-activity ring, built FIRST so it seeds from disk
+  // before any record can arrive and `pool.recent` shows the other processes'
+  // history immediately. Same soft-fail reporting contract as the ledger.
+  const recentStore = new RecentActivityStore({
+    onFlushError: (error) => {
+      ctx.logger.warn(
+        `[dsh-agy] recent-activity file could not be written (${recentStore.path}): `
+        + `${error instanceof Error ? error.message : String(error)} — entries are buffered and will retry`,
+      )
+    },
+  })
   // The ledger reports the first failure of a run, once. Without it a ledger
   // that cannot be written (read-only $DSH_HOME, ENOSPC) simply stops counting
   // with nothing anywhere to explain why — the failure mode this whole
   // soft-fail design otherwise hides.
   const stats = new UsageStats({
+    // The ring's persistence half: every captured record is handed to the
+    // store (write-behind there, still I/O-free here).
+    persistRecent: (entry) => { recentStore.capture(entry) },
     onFlushError: (error) => {
       ctx.logger.warn(
         `[dsh-agy] usage ledger could not be written (${stats.path}): `
@@ -179,16 +208,21 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   // Warm up the model list in the background so the first model/effort selection
   // in DSH has zero latency and shows no loading spinner.
   void adapter.listAllModels().catch(() => {})
-  // Persist the ledger on normal termination. `exit` covers both a graceful
-  // shutdown and the CLI's explicit `process.exit` calls.
+  // Persist the ledger and the recent ring on normal termination. `exit`
+  // covers both a graceful shutdown and the CLI's explicit `process.exit`
+  // calls.
   //
   // Deliberately NO signal handlers: installing a SIGINT/SIGTERM listener
   // replaces Node's default terminate behavior, so it must flush and then
   // re-raise or Ctrl-C stops working — a real bug for the sake of at most one
   // throttle window (5s) of counts on an interrupted process. The timer in
-  // UsageStats already bounds that loss, and statistics are diagnostics.
-  process.once('exit', () => { stats.flushSync() })
-  return { store, sessions, adapter, stats, modelVisibility, thinkingBudget }
+  // UsageStats/RecentActivityStore already bounds that loss, and these are
+  // diagnostics.
+  process.once('exit', () => {
+    stats.flushSync()
+    recentStore.flushSync()
+  })
+  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget }
 }
 
 export { AGY_PROVIDER }

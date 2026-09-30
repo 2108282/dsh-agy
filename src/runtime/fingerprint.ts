@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { AGY_IDE_TYPE, AGY_PLATFORM_ENUM, currentAgyVersion } from '../oauth/constants.ts'
+import { migrateToAgyDir } from '../store/paths.ts'
 import type { ClientMetadata, Fingerprint, FingerprintVersion } from '../types.ts'
 import fingerprintData from './fingerprint-data.json'
 
@@ -29,19 +30,22 @@ export const DEFAULT_FINGERPRINT_DATA = fingerprintData as FingerprintData
 
 export const MAX_FINGERPRINT_HISTORY = 5
 
-const USER_OVERRIDE_FILE = 'agy-fingerprint-data.json'
+/** The override file's NAME (inside the agy data dir), for messages and tests. */
+export const FINGERPRINT_OVERRIDE_FILE = 'agy-fingerprint-data.json'
 
 /**
- * Effective fingerprint data: a user override at `$DSH_HOME/agy-fingerprint-data.json`
+ * Effective fingerprint data: a user override at `$DSH_HOME/agy/agy-fingerprint-data.json`
  * wins when present and parseable (hot-updatable without a code release — the
- * bundled copy is compiled in), otherwise the bundled defaults.
+ * bundled copy is compiled in), otherwise the bundled defaults. The legacy
+ * `$DSH_HOME/agy-fingerprint-data.json` location is migrated once by rename.
  */
 let cachedData: FingerprintData | null = null
 export function getFingerprintData(): FingerprintData {
   if (cachedData) return cachedData
   try {
+    // NOT `resolveDshHome()`-based: see the note on `getFingerprintData` above.
     const dshHome = process.env.DSH_HOME ? process.env.DSH_HOME : join(process.env.HOME ?? '.', '.dsh')
-    const overrideFile = join(dshHome, USER_OVERRIDE_FILE)
+    const overrideFile = migrateToAgyDir('agy-fingerprint-data.json', dshHome).file
     if (existsSync(overrideFile)) {
       const parsed = JSON.parse(readFileSync(overrideFile, 'utf8')) as FingerprintData
       if (parsed && Array.isArray(parsed.versionPool) && parsed.versionPool.length > 0) {
@@ -64,7 +68,7 @@ function randomFrom<T>(arr: readonly T[]): T {
  * Replace the pool data for one test, and restore the real source with `undefined`.
  *
  * `getFingerprintData()` caches its result in-process, so a test cannot exercise a
- * user override file (`$DSH_HOME/agy-fingerprint-data.json`) without a way to drop
+ * user override file (`$DSH_HOME/agy/agy-fingerprint-data.json`) without a way to drop
  * that cache.
  */
 export function _setFingerprintDataForTest(data: FingerprintData | undefined): void {
