@@ -371,12 +371,15 @@ function button(label: string, onClick: () => void, options: {
   disabled?: boolean
   title?: string
 } = {}): ReactNode {
+  const classNames = ['agy-btn', options.variant === 'danger' ? 'agy-btn-danger' : undefined]
+    .filter(Boolean)
+    .join(' ')
   return h(Button, {
     variant: options.variant === 'danger' ? 'outline' : (options.variant ?? 'outline'),
     size: options.size === 'sm' ? 'sm' : 'md',
     ...(options.disabled === true ? { disabled: true } : {}),
     ...(options.title === undefined ? {} : { title: options.title }),
-    ...(options.variant === 'danger' ? { className: 'agy-btn-danger' } : {}),
+    className: classNames,
     onClick: (event: { stopPropagation?: () => void }) => {
       event?.stopPropagation?.()
       onClick()
@@ -687,7 +690,11 @@ function AccountsTab(props: {
     role: 'button',
     tabIndex: 0,
     'aria-pressed': at === index,
-    onClick: () => { setSelected(at) },
+    onClick: (event: { target?: unknown }) => {
+      const el = event?.target as HTMLElement | undefined
+      if (el?.closest?.('button, [role="button"]:not(.agy-rowitem), input, a')) return
+      setSelected(at)
+    },
     onKeyDown: (event: { key: string, preventDefault: () => void }) => {
       if (event.key !== 'Enter' && event.key !== ' ') return
       // Space would otherwise scroll the settings panel.
@@ -708,15 +715,16 @@ function AccountsTab(props: {
     stateBadge(account.state, account.state === 'cooling'
       ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil)}`
       : stateLabel(account.state, t)),
-    account.active ? null : button(t('actionActivate'), () => {
-      setSelected(at)
-      handlers.onActivate(account.index)
-    }, { size: 'sm', disabled: busy }),
-    button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }),
-    button(t('actionDelete'), () => {
-      setSelected(null)
-      handlers.onDelete(account.index)
-    }, { size: 'sm', variant: 'danger', disabled: busy }))))
+    h('div', { className: 'agy-rowbtns' },
+      account.active ? null : button(t('actionActivate'), () => {
+        setSelected(at)
+        handlers.onActivate(account.index)
+      }, { size: 'sm', disabled: busy }),
+      button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }),
+      button(t('actionDelete'), () => {
+        setSelected(null)
+        handlers.onDelete(account.index)
+      }, { size: 'sm', variant: 'danger', disabled: busy })))))
 
   return h('div', { className: 'agy-root' },
     // The container-query wrapper the `.agy-split` breakpoint measures; see

@@ -1,1 +1,1 @@
-{"version":3,"file":"plugin.d.mts","names":[],"sources":["../../src/web/plugin.ts"],"mappings":";;;cAsCa;;cAGA;;UAGH;EACR,SAAS;IACP;IACA;IACA,UAAU,KAAK,iBAAiB,KAAK;;EAEvC;;WAES;;;;;;;;;;;;;;;;iBAiBK,WAAW,cAAc,WAAW,KAAK,wBAAwB;iBAIjE,MAAM,KAAK"}
+{"version":3,"file":"plugin.d.mts","names":[],"sources":["../../src/web/plugin.ts"],"mappings":";;;qBAsCa;;qBAGA;;UAGH;EACR,SAAS;IACP;IACA;IACA,UAAU,KAAK,iBAAiB,KAAK;;EAEvC;;WAES;;;;;;;;;;;;;;;;wBAiBK,WAAW,cAAc,WAAW,KAAK,wBAAwB;wBAIjE,MAAM,KAAK"}
