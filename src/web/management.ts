@@ -23,6 +23,7 @@ import { clearExpiredState } from '../runtime/rotation.ts'
 import { foldWindowBreakdown } from '../stats.ts'
 import { THINKING_BUDGET_MAX, THINKING_BUDGET_MIN } from '../thinking-budget.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN } from '../thinking-types.ts'
+import { dayKey } from '../stats.ts'
 import type { UsageCounters, UsageSource } from '../stats.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { AgySessionManager } from '../session.ts'
@@ -283,12 +284,27 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       return { counters: totals, models, accounts }
     }
 
+    // Last 7 LOCAL calendar days, zeros filled: the trend table's job is to
+    // show shape over time, and a gap day reads as data loss rather than idle.
+    // Same local keying as the ledger's own buckets (dayKey).
+    const daySeries = Array.from({ length: 7 }, (_, i) => {
+      const key = dayKey(now - (6 - i) * 86_400_000)
+      const bucket = doc.days[key]
+      return {
+        day: key,
+        requests: bucket?.totals.requests ?? 0,
+        failed: bucket?.totals.failed ?? 0,
+        rateLimited: bucket?.totals.rateLimited ?? 0,
+        rotations: bucket?.totals.rotations ?? 0,
+      }
+    })
     return {
       since: doc.totals.requests > 0 ? doc.since : null,
       all: { counters: doc.totals, models: allModels, accounts: allAccounts },
       today: breakdown(1),
       week: breakdown(7),
       month: breakdown(30),
+      days: daySeries,
     }
   }
 

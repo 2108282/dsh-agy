@@ -160,7 +160,7 @@ function emptyDocument(now: number): StatsDocument {
 }
 
 /** Local-time day key. Local (not UTC) so "today" matches the user's clock. */
-function dayKey(time: number): string {
+export function dayKey(time: number): string {
   const d = new Date(time)
   const month = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')

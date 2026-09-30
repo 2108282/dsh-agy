@@ -158,6 +158,19 @@ export interface StatsView {
   week: RangeBreakdown
   /** Last 30 days (the full retained window). */
   month: RangeBreakdown
+  /**
+   * Per-day request / failure / rate-limit / rotation counts, last 7 LOCAL
+   * calendar days oldest first, zeros filled — the trend table's job is to show
+   * shape over time, and a missing day reads as data loss rather than idle.
+   */
+  days: Array<{
+    /** Local day key (`YYYY-MM-DD`), matching the ledger's own bucketing. */
+    day: string
+    requests: number
+    failed: number
+    rateLimited: number
+    rotations: number
+  }>
 }
 
 /**

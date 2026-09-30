@@ -325,6 +325,17 @@ function clockTime(iso: string | null, lang?: string): string {
     : date.toLocaleString(lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
+/**
+ * A ledger day key ('YYYY-MM-DD', local by construction) as a short label.
+ * Parsed as LOCAL date parts — a UTC parse would shift the label a day for
+ * half the planet.
+ */
+function dayLabel(day: string, lang?: string): string {
+  const [y, m, d] = day.split('-').map(Number)
+  if (y === undefined || m === undefined || d === undefined || Number.isNaN(y)) return day
+  return new Date(y, m - 1, d).toLocaleDateString(lang, { month: 'short', day: 'numeric' })
+}
+
 const MINUTE_MS = 60_000
 const HOUR_MS = 60 * MINUTE_MS
 const DAY_MS = 24 * HOUR_MS
@@ -1603,6 +1614,25 @@ function UsageTab(props: { stats: StatsView | null, lang?: string, t: T }): Reac
     [t('labelTtft'), formatDuration(average(counters.ttftMs, counters.ttftN))],
   ]))
 
+  // The per-day trend, independent of the range picker: it answers "is this
+  // pool degrading over time", a question the range-folded tables above cannot
+  // show. Fixed 7-day window, zeros filled (see StatsView.days).
+  const trend = card(t('trendTitle'),
+    h('div', { className: 'agy-table-wrap' },
+      table(
+        h('tr', null,
+          h('th', null, t('colDay')),
+          numHeader(0, t('colRequests')),
+          numHeader(1, t('colFailed')),
+          numHeader(2, t('colRateLimited')),
+          numHeader(3, t('colRotations'))),
+        stats.days.map((row) => h('tr', { key: row.day },
+          h('td', null, dayLabel(row.day, props.lang)),
+          h('td', { className: 'agy-num' }, String(row.requests)),
+          h('td', { className: 'agy-num' }, String(row.failed)),
+          h('td', { className: 'agy-num' }, String(row.rateLimited)),
+          h('td', { className: 'agy-num' }, String(row.rotations)))))))
+
   // Column headers state the semantics directly, so no footnote is needed: the
   // prompt side is one column (all of it, cached included) and the cache line
   // beside it is the HIT count — a subset, which is why nobody adds the two up.
@@ -1658,7 +1688,7 @@ function UsageTab(props: { stats: StatsView | null, lang?: string, t: T }): Reac
   )
 
   return h('div', { className: 'agy-root' },
-    rangePicker, summary, timing, byModel, byAccount)
+    rangePicker, summary, timing, trend, byModel, byAccount)
 }
 
 // ─── Credentials tab ─────────────────────────────────────────────────────────

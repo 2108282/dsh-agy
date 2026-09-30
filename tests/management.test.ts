@@ -626,6 +626,11 @@ describe('agy management RPC', () => {
       expect(view.today.models.map((entry) => entry.model)).toEqual(['model-a'])
       expect(view.today.accounts.map((entry) => entry.account)).toEqual(['a@x.com'])
       expect(now).toBeGreaterThan(0)
+      // The trend series is the last 7 LOCAL calendar days, zeros filled —
+      // the 2020 bucket above exists but must not appear in the window.
+      expect(view.days).toHaveLength(7)
+      expect(view.days.at(-1)?.requests).toBeGreaterThanOrEqual(1)
+      expect(view.days.some((entry) => entry.day === '2020-01-01')).toBe(false)
     })
 
     it('reports an empty ledger without inventing a start date', async () => {
