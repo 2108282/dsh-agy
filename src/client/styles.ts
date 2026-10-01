@@ -31,16 +31,13 @@ const CSS = `
 .agy-sub { margin-top: 3px; font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary, #8f959e); }
 
 .agy-tabs {
-  display: flex; align-items: flex-end; gap: 18px; margin-top: 2px;
+  display: flex; align-items: flex-end; gap: 22px; margin-top: 2px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2, #eef0f3);
-  overflow-x: auto; scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
 }
-.agy-tabs::-webkit-scrollbar { display: none; }
 .agy-tab {
   position: relative; border: 0; padding: 7px 1px 9px; background: transparent;
   color: var(--dsw-alias-label-tertiary, #8f959e);
-  font: var(--dsw-font-xs-13); cursor: pointer; flex-shrink: 0;
+  font: var(--dsw-font-xs-13); cursor: pointer;
 }
 .agy-tab:hover, .agy-tab[data-active="true"] { color: var(--dsw-alias-label-primary, #1f2329); }
 /* Active tab is an underline rule, matching the Plugins settings section's own
@@ -99,6 +96,17 @@ const CSS = `
    rounded rect inset 2px from the card edge and transparent at rest. A
    full-bleed rectangle reads as a slab and fights the card's own radius. */
 .agy-rows { display: flex; flex-direction: column; gap: 2px; }
+/* The live line: one status strip above the rows, present ONLY while upstream
+   requests are in flight — an idle pool renders no strip, so quiet stays quiet.
+   The pulsing dot is the host StateDot primitive ('ongoing'), so the animation
+   is the platform's; this rule is layout and tone only. Sits OUTSIDE .agy-rows,
+   so the master list's scroll cap does not scroll the status away. */
+.agy-live {
+  display: flex; align-items: center; gap: 7px;
+  margin: 2px 2px 6px; padding: 7px 8px; border-radius: 10px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary, #61666b);
+  background: var(--dsw-alias-bg-layer-2, #f4f5f7);
+}
 /* Master/detail: the account list beside the selected account's detail, so a
  * row and the panel it opens stay in view together.
  *
@@ -119,20 +127,26 @@ const CSS = `
  */
 .agy-split-wrap { container-type: inline-size; }
 .agy-split { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
-/* In single-column/mobile view, allow the account list to expand naturally without
-   a nested 300px scroller, avoiding conflicting scroll gestures and overlapping
-   scrollbars over the right-side actions. */
-.agy-split .agy-rows { max-height: none; overflow-y: visible; }
 @container (min-width: 700px) {
-  .agy-split { grid-template-columns: minmax(0, 320px) minmax(0, 1fr); }
-  .agy-split .agy-rows { max-height: 480px; overflow-y: auto; }
+  .agy-split { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); }
 }
+/* Cap the master list so a large pool cannot push the detail it opens below the
+   fold — the reason the split exists at all. Scoped to the split: the Models tab
+   shares .agy-rows for its own long list and must keep growing freely. */
+.agy-split .agy-rows { max-height: 300px; overflow-y: auto; }
 .agy-rowitem {
+  /* Flex-wrap, NOT the former grid-template-columns: minmax(0,1fr) auto.
+     A grid's 1fr may shrink to zero, so the identity column yielded all its
+     width to the action cluster: at the 300px master column the row's ~167px of
+     state badge + Verify/Delete left ~45px for the email (which needs ~177px),
+     truncating every address to "a1…" even though the row had room to grow
+     downward. With a flex BASIS the actions wrap to a second line instead of
+     squeezing the name, and margin-left: auto keeps them right-aligned on the
+     same line whenever they do fit. */
   display: flex; flex-wrap: wrap;
-  align-items: center; gap: 8px 12px;
-  margin: 0; padding: 10px 10px; box-sizing: border-box;
-  min-height: 38px; border-radius: 12px; background: transparent;
-  transition: background-color .15s ease;
+  align-items: center; gap: 4px 12px;
+  margin: 0 2px; padding: 10px 8px; box-sizing: border-box;
+  min-height: 36px; border-radius: 12px; background: transparent;
 }
 .agy-rowitem[data-clickable="true"] { cursor: pointer; }
 .agy-rowitem[data-clickable="true"]:hover {
@@ -145,44 +159,20 @@ const CSS = `
   outline: 2px solid var(--dsw-alias-label-primary, #1f2329);
   outline-offset: -2px;
 }
-.agy-rowmain { min-width: 0; flex: 1 1 180px; display: flex; flex-direction: column; gap: 3px; }
-.agy-rowtitle { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.agy-rowmain { min-width: 0; flex: 1 1 160px; display: flex; flex-direction: column; gap: 3px; }
+.agy-rowtitle { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .agy-rowname {
   font: var(--dsw-font-xs-strong-13); color: var(--dsw-alias-label-primary, #1f2329);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .agy-rowmeta {
   font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* Actions cluster: wraps cleanly, separates state badge from action buttons */
-.agy-rowactions {
-  display: flex; align-items: center; gap: 8px; flex: 1 1 auto;
-  justify-content: flex-end; margin-left: auto; flex-wrap: wrap;
-}
-.agy-rowbtns {
-  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
-}
+/* margin-left: auto right-aligns the cluster while it shares a line with the
+   identity, and becomes inert once flex-wrap moves it to its own line. */
+.agy-rowactions { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
 .agy-state { display: inline-flex; align-items: center; gap: 6px; flex: none; }
-
-@container (max-width: 650px) {
-  .agy-rowitem {
-    padding: 10px 10px;
-    gap: 8px;
-  }
-  .agy-rowmain {
-    flex: 1 1 100%;
-  }
-  .agy-rowactions {
-    flex: 1 1 100%;
-    width: 100%;
-    justify-content: space-between;
-    margin-left: 0;
-  }
-  .agy-rowbtns {
-    margin-left: auto;
-  }
-}
 
 .agy-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .agy-actions > :first-child:not(button) { flex: 1; min-width: 150px; }
@@ -328,6 +318,12 @@ const CSS = `
   color: var(--dsw-alias-label-primary, #1f2329); }
 .agy-limit-reset { text-align: right; font: var(--dsw-font-xxxs-11);
   color: var(--dsw-alias-label-tertiary, #8f959e); }
+/* The burn projection: indented to align with the bar (58px label + 10px gap),
+   warn-tinted because "this window runs dry before it resets" is the one
+   projection that asks the reader to act. */
+.agy-limit-burn { padding: 0 0 4px 68px;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-state-warn-primary, #f59e0b); }
 
 /* ── Dense breakdown tables (Usage tab only) ─────────────────────────────── */
 .agy-table-wrap { padding: 6px 0 2px; }
@@ -371,22 +367,21 @@ const CSS = `
    active state); this only lays them out in a row. */
 .agy-chips { display: flex; gap: 6px; }
 
-/* Touch-friendly buttons and clear danger styling */
-.agy-btn {
-  position: relative;
-  z-index: 2;
-  touch-action: manipulation;
-  min-height: 28px;
-  cursor: pointer;
-}
-.agy-btn-danger {
-  color: var(--dsw-alias-state-error-primary, #ec1313) !important;
-  border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 30%, transparent) !important;
-}
-.agy-btn-danger:hover,
-.agy-btn-danger:active {
-  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 12%, transparent) !important;
-}
+/* Danger has no primitive variant; keep the ghost skin and tint the label. */
+.agy-btn-danger { color: var(--dsw-alias-state-error-primary, #ec1313) !important; }
+
+/* ── Recent activity ring ──────────────────────────────────────────────────
+   The "what just happened" list. Only the result cell carries color — ok
+   inherits the table's neutral, and a wall of tinted rows would read as an
+   alarm rather than a log. */
+.agy-recent-state { font: var(--dsw-font-xxs-12); }
+.agy-recent-state[data-kind="fail"] { color: var(--dsw-alias-state-error-primary, #ec1313); }
+.agy-recent-state[data-kind="limited"] { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+.agy-recent-state[data-kind="rotation"] { color: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6); }
+/* The recent list is a standalone disclosure on the tab root, not one block
+   inside a card body — the separator border-top the disclosure idiom uses
+   between sibling blocks would draw a stray line across nothing here. */
+.agy-recent.agy-disclosure { border-top: 0; }
 
 .agy-toolbar { display: flex; align-items: center; gap: 8px; }
 .agy-textarea { width: 100%; min-height: 88px; resize: vertical; outline: none;

@@ -53,6 +53,10 @@ function makeHarness(options: {
   exportBlob?: unknown
   checkAccounts?: unknown
   limitsResult?: { measured: string[], failed: string[], skipped: number }
+  /** What the session's in-flight snapshot reports (defaults to an idle pool). */
+  inFlight?: Array<{ index: number, email: string | null, count: number }>
+  /** What the session's burn-rate snapshot reports (defaults to none). */
+  limitBurn?: Array<{ index: number, perHour: Record<string, number> }>
   baseUrl?: () => string
 } = {}): Harness {
   const accounts = options.accounts ?? [account()]
@@ -94,6 +98,11 @@ function makeHarness(options: {
       calls.push({ method: 'refreshLimits', args: [refreshOptions] })
       return options.limitsResult ?? { measured: [], failed: [], skipped: 0 }
     },
+    inFlightAccounts: async () => {
+      calls.push({ method: 'inFlightAccounts', args: [] })
+      return options.inFlight ?? []
+    },
+    limitBurnRates: async () => options.limitBurn ?? [],
     // The real activateAccount writes through the store and clears affinity;
     // the stub mirrors its store contract so the RPC's bounds behavior is
     // exercised against the same persistence.
@@ -180,6 +189,38 @@ describe('agy management RPC', () => {
     expect(JSON.stringify(accounts)).not.toContain('refresh-a')
   })
 
+  it('publishes when an account was disabled, and only then', async () => {
+    // `enabled = false` has one cause (an upstream invalid_grant) and both
+    // writers persist `verificationRequiredAt` in the same mutation, so the
+    // wire can derive the disable time from it. The parked-but-ENABLED path
+    // writes the same field without disabling — exposing it raw would give
+    // "when it was disabled" a second, wrong meaning — and pre-field data must
+    // read as unknown (null), never as epoch zero.
+    const disabledAt = Date.now() - 60_000
+    const { management } = makeHarness({
+      accounts: [
+        account({
+          email: 'dead@x.com',
+          enabled: false,
+          verificationRequired: true,
+          verificationRequiredAt: disabledAt,
+          verificationRequiredReason: 'auth-failure',
+        }),
+        // Parked by a verification challenge, still enabled: NOT a disable time.
+        account({ email: 'parked@x.com', verificationRequired: true, verificationRequiredAt: disabledAt }),
+        // Disabled before the timestamp field existed.
+        account({ email: 'legacy@x.com', enabled: false }),
+      ],
+    })
+    const { accounts } = await management.call('account.list', {}) as {
+      accounts: Array<{ state: string, disabledAt: string | null }>
+    }
+    expect(accounts.map((entry) => entry.state)).toEqual(['disabled', 'verification-required', 'disabled'])
+    expect(accounts[0]?.disabledAt).toBe(new Date(disabledAt).toISOString())
+    expect(accounts[1]?.disabledAt).toBeNull()
+    expect(accounts[2]?.disabledAt).toBeNull()
+  })
+
   it('masks a configured proxy rather than echoing credentials', async () => {
     const { management } = await makeHarness({
       accounts: [account({ proxy: 'http://user:secret@proxy.test:8080' })],
@@ -196,10 +237,51 @@ describe('agy management RPC', () => {
       usage: { input: 10, output: 2, cacheRead: 3, cacheWrite: 0 },
     })
     const { accounts } = await harness.management.call('account.list', {}) as {
-      accounts: Array<{ usage: { totals: { requests: number, input: number } } | null }>
+      accounts: Array<{ usage: { totals: { requests: number, input: number }, lastUsedAt: number | null } | null }>
     }
     expect(accounts[0]?.usage?.totals.requests).toBe(1)
     expect(accounts[0]?.usage?.totals.input).toBe(10)
+    // The row's "active N ago" fragment reads this; the ledger stamps it on
+    // every record, so a traffic-bearing account always carries it.
+    expect(accounts[0]?.usage?.lastUsedAt).toBeGreaterThan(0)
+  })
+
+  it('reports which accounts have requests in flight, as a pure local read', async () => {
+    // `pool.status` must never touch upstream — it is polled every few seconds
+    // while the panel is open, and a quota probe or token refresh per tick
+    // would turn a status line into a bill.
+    const harness = makeHarness({
+      accounts: [account({ email: 'a@x.com' }), account({ email: 'b@y.com' })],
+      inFlight: [{ index: 1, email: 'b@y.com', count: 2 }],
+    })
+    const result = await harness.management.call('pool.status', {}) as {
+      busy: Array<{ index: number, email: string | null, count: number }>
+    }
+    expect(result.busy).toEqual([{ index: 1, email: 'b@y.com', count: 2 }])
+  })
+
+  it('carries the burn rates on the limits reply, per index', async () => {
+    // The rate only exists after the sampling path has seen two probes; the
+    // reply degrades to null rather than failing when the session has none.
+    const withRate = makeHarness({ limitBurn: [{ index: 0, perHour: { 'g-5h': 0.02 } }] })
+    const result = await withRate.management.call('account.limits', {}) as {
+      limits: Array<{ burn: Record<string, number> | null }>
+    }
+    expect(result.limits[0]?.burn).toEqual({ 'g-5h': 0.02 })
+
+    const withoutRate = makeHarness()
+    const plain = await withoutRate.management.call('account.limits', {}) as {
+      limits: Array<{ burn: Record<string, number> | null }>
+    }
+    expect(plain.limits[0]?.burn).toBeNull()
+  })
+
+  it('reports an idle pool as an empty busy list', async () => {
+    // Empty is the idle pool, not an error: the live line keys off it to
+    // disappear, so a quiet pool must render no strip at all.
+    const { management } = makeHarness()
+    const result = await management.call('pool.status', {}) as { busy: unknown[] }
+    expect(result.busy).toEqual([])
   })
 
   it('exposes the cached 5h/weekly windows, and null when never measured', async () => {
@@ -544,6 +626,11 @@ describe('agy management RPC', () => {
       expect(view.today.models.map((entry) => entry.model)).toEqual(['model-a'])
       expect(view.today.accounts.map((entry) => entry.account)).toEqual(['a@x.com'])
       expect(now).toBeGreaterThan(0)
+      // The trend series is the last 7 LOCAL calendar days, zeros filled —
+      // the 2020 bucket above exists but must not appear in the window.
+      expect(view.days).toHaveLength(7)
+      expect(view.days.at(-1)?.requests).toBeGreaterThanOrEqual(1)
+      expect(view.days.some((entry) => entry.day === '2020-01-01')).toBe(false)
     })
 
     it('reports an empty ledger without inventing a start date', async () => {
