@@ -127,20 +127,26 @@ const CSS = `
  */
 .agy-split-wrap { container-type: inline-size; }
 .agy-split { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
-/* In single-column/mobile view, allow the account list to expand naturally without
-   a nested 300px scroller, avoiding conflicting scroll gestures and overlapping
-   scrollbars over the right-side actions. */
-.agy-split .agy-rows { max-height: none; overflow-y: visible; }
 @container (min-width: 700px) {
-  .agy-split { grid-template-columns: minmax(0, 320px) minmax(0, 1fr); }
-  .agy-split .agy-rows { max-height: 480px; overflow-y: auto; }
+  .agy-split { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); }
 }
+/* Cap the master list so a large pool cannot push the detail it opens below the
+   fold — the reason the split exists at all. Scoped to the split: the Models tab
+   shares .agy-rows for its own long list and must keep growing freely. */
+.agy-split .agy-rows { max-height: 300px; overflow-y: auto; }
 .agy-rowitem {
+  /* Flex-wrap, NOT the former grid-template-columns: minmax(0,1fr) auto.
+     A grid's 1fr may shrink to zero, so the identity column yielded all its
+     width to the action cluster: at the 300px master column the row's ~167px of
+     state badge + Verify/Delete left ~45px for the email (which needs ~177px),
+     truncating every address to "a1…" even though the row had room to grow
+     downward. With a flex BASIS the actions wrap to a second line instead of
+     squeezing the name, and margin-left: auto keeps them right-aligned on the
+     same line whenever they do fit. */
   display: flex; flex-wrap: wrap;
-  align-items: center; gap: 6px 12px;
-  margin: 0; padding: 10px 10px; box-sizing: border-box;
+  align-items: center; gap: 4px 12px;
+  margin: 0 2px; padding: 10px 8px; box-sizing: border-box;
   min-height: 36px; border-radius: 12px; background: transparent;
-  transition: background-color .15s ease;
 }
 .agy-rowitem[data-clickable="true"] { cursor: pointer; }
 .agy-rowitem[data-clickable="true"]:hover {
@@ -154,43 +160,19 @@ const CSS = `
   outline-offset: -2px;
 }
 .agy-rowmain { min-width: 0; flex: 1 1 160px; display: flex; flex-direction: column; gap: 3px; }
-.agy-rowtitle { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.agy-rowtitle { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .agy-rowname {
   font: var(--dsw-font-xs-strong-13); color: var(--dsw-alias-label-primary, #1f2329);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .agy-rowmeta {
   font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* Actions cluster: wraps cleanly, separates state badge from action buttons */
-.agy-rowactions {
-  display: flex; align-items: center; gap: 8px; flex: 1 1 auto;
-  justify-content: flex-end; margin-left: auto; flex-wrap: wrap;
-}
-.agy-rowbtns {
-  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
-}
+/* margin-left: auto right-aligns the cluster while it shares a line with the
+   identity, and becomes inert once flex-wrap moves it to its own line. */
+.agy-rowactions { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
 .agy-state { display: inline-flex; align-items: center; gap: 6px; flex: none; }
-
-@container (max-width: 650px) {
-  .agy-rowitem {
-    padding: 10px 10px;
-    gap: 8px;
-  }
-  .agy-rowmain {
-    flex: 1 1 100%;
-  }
-  .agy-rowactions {
-    flex: 1 1 100%;
-    width: 100%;
-    justify-content: space-between;
-    margin-left: 0;
-  }
-  .agy-rowbtns {
-    margin-left: auto;
-  }
-}
 
 .agy-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .agy-actions > :first-child:not(button) { flex: 1; min-width: 150px; }
