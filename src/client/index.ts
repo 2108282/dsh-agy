@@ -906,11 +906,12 @@ function AccountsTab(props: {
         // end is the question the reader asks — the mirror of the cooling badge.
         ? t('verificationRetry', { time: clockTime(account.cooldownUntil, props.lang) })
         : stateLabel(account.state, t)),
-    canActivateAccount(account) ? button(t('actionActivate'), () => {
-      setSelected(at)
-      handlers.onActivate(account.index)
-    }, { size: 'sm', disabled: busy }) : null,
-    button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }))))
+    h('div', { className: 'agy-rowbtns' },
+      canActivateAccount(account) ? button(t('actionActivate'), () => {
+        setSelected(at)
+        handlers.onActivate(account.index)
+      }, { size: 'sm', disabled: busy }) : null,
+      button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy })))))
 
   return h('div', { className: 'agy-root' },
     // The container-query wrapper the `.agy-split` breakpoint measures; see
