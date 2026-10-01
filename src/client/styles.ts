@@ -141,6 +141,7 @@ const CSS = `
 .agy-split .agy-rows { max-height: 190px; overflow-y: auto; }
 .agy-rowitem {
   display: flex;
+  flex-wrap: wrap;
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
