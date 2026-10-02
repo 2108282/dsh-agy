@@ -125,10 +125,13 @@ const CSS = `
  * Tooltip (used by the thinking-budget fields) positions its bubble with
  * position: fixed. Scoping it here keeps that behaviour intact.
  */
+/* Master/detail grid: stacked on narrow containers, two columns when room permits.
+ * The Settings panel provides ~612px inline space on desktop (800px modal - 188px
+ * nav - 48px padding), so the breakpoint must sit below ~550px (480px) to trigger two columns. */
 .agy-split-wrap { container-type: inline-size; }
 .agy-split { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
-@container (min-width: 700px) {
-  .agy-split { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); }
+@container (min-width: 480px) {
+  .agy-split { grid-template-columns: minmax(210px, 1fr) minmax(260px, 1.4fr); }
 }
 /* Cap the master list so a large pool cannot push the detail it opens below the
    fold — the reason the split exists at all. Scoped to the split: the Models tab
@@ -394,16 +397,14 @@ const CSS = `
 /** Install the stylesheet once (idempotent across plugin reloads). */
 export function installAgyStyles(): () => void {
   if (typeof document === 'undefined') return () => {}
-  if (document.getElementById(STYLE_ID) !== null) {
-    return () => {
-      document.getElementById(STYLE_ID)?.remove()
-    }
+  const existing = document.getElementById(STYLE_ID)
+  if (existing !== null) {
+    if (existing.textContent !== CSS) existing.textContent = CSS
+    return () => {}
   }
   const style = document.createElement('style')
   style.id = STYLE_ID
   style.textContent = CSS
   document.head.appendChild(style)
-  return () => {
-    document.getElementById(STYLE_ID)?.remove()
-  }
+  return () => {}
 }
