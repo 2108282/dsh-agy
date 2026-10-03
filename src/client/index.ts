@@ -1691,6 +1691,9 @@ function CredentialsTab(props: {
 /** The Settings section body. */
 export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): ReactNode {
   const { rpc, t } = props
+  useEffect(() => {
+    installAgyStyles()
+  }, [])
   const [tab, setTab] = useState<TabId>('accounts')
   const [accounts, setAccounts] = useState<AccountView[]>([])
   const [models, setModels] = useState<ModelView[]>([])

@@ -1,38 +1,25 @@
 /**
- * Conversation-header quota badge.
+ * Conversation-header quota badge & popover.
  *
- * Shows the tightest of the active account's tracked windows — the same figures
- * the Settings section's limits card renders, from the same RPC — and opens the
- * window breakdown on hover or click.
+ * Shows the tightest of the active account's tracked windows, and opens the
+ * window breakdown floating card on hover or click.
  *
- * The header is a glanceable surface, so the badge itself is one number: the
- * percentage, or an em dash when nothing has been measured (unknown headroom is
- * not zero headroom). Everything else — the driving window, the reset walls, the
- * snapshot's age, the account — is one hover away.
- *
- * Built from the host's own controls (`Button`, `Pill`, `Tag`, `StateDot`) and
- * positioned with the host's `useAnchoredPosition`, so focus rings, disabled
- * states, size tiers, theming and viewport clamping are the platform's rather
- * than an imitation.
- *
- * The panel is NOT portaled: `react-dom` is not a dependency of this package (the
- * bundle requires `react` and the primitives, both shared into the shell's frozen
- * module table), so the panel renders inside its anchor wrapper and is placed with
- * a fixed position from `useAnchoredPosition`.
+ * Built with DSH native UI primitives (Button, Tag, StateDot, useAnchoredPosition,
+ * useDismissOnOutsidePointer) and semantic design tokens (--dsw-*).
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Button,
-  Pill,
   StateDot,
   Tag,
   useAnchoredPosition,
   useDismissOnOutsidePointer,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { h } from './element.ts'
+import { installAgyStyles } from './styles.ts'
 import {
   agoText,
   buildQuotaCards,
@@ -44,106 +31,216 @@ import {
   stateLabel,
   windowLabel,
   type QuotaTranslate,
-  type QuotaWindowRow,
 } from './quota-view.ts'
 import type { AccountView, AgyRpcClient } from '../rpc-contract.ts'
+import type { QuotaWindow } from '../types.ts'
 
 /**
- * How often the badge re-reads the pool.
- *
- * Cheap by construction: `account.list` is probe-free, and the window refresh it
- * asks for is TTL-gated on the host side. The badge also re-reads on focus and on
- * the tab becoming visible again, so a session left in the background for hours
- * still shows a current figure the moment it is looked at.
+ * How often the badge re-reads the pool (2 minutes).
  */
 const REFRESH_INTERVAL_MS = 120_000
 
 /**
- * Grace period before a hover-close.
- *
- * The panel hangs below the badge, so the pointer has to cross a gap to reach it;
- * closing on the button's own leave would make the panel unreachable.
+ * Grace period before hover close (250ms).
  */
 const HOVER_CLOSE_DELAY_MS = 250
 
-/** One tag tone per account state, matching the Settings section's own badge. */
-function toneFor(state: AccountView['state']): TagTone {
-  if (state === 'active') return 'success'
-  if (state === 'cooling') return 'warning'
-  return 'danger'
+/**
+ * Quota bar and percentage color for a window.
+ * Strictly unified with upstream Settings panel via quotaColor(percent / 100).
+ * Thresholds: >70% success green, 30%-70% warning amber, <30% error red.
+ */
+function quotaColorForWindow(_window: string, percent: number | null): string {
+  if (percent === null) return 'var(--dsw-alias-label-tertiary, #64748b)'
+  return quotaColor(percent / 100)
 }
 
-/** One window row: label, bar, figure, reset wall, and why it has no figure. */
-function windowRow(row: QuotaWindowRow, t: QuotaTranslate): ReactNode {
-  // The note is only needed when there is no figure: either upstream never
-  // reported one, or the reading is from a period that has already ended. A
-  // stale row still shows its reset wall, which is what says when to look again.
-  const note = row.percent === null
-    ? h('div', { className: 'agy-quota-note' }, row.stale ? t('quotaStaleNote') : t('quotaUnmeasuredNote'))
-    : null
-  return h('div', { className: 'agy-quota-item', key: row.bucketId },
-    h('div', { className: 'agy-quota-row' },
-      h('span', { className: 'agy-quota-k' }, row.label),
-      h('span', { className: 'agy-quota-track' },
-        row.percent === null
-          ? null
-          : h('i', { style: { width: `${row.percent}%`, background: quotaColor(row.percent / 100) } })),
-      h('span', { className: 'agy-quota-p' }, row.percent === null ? t('valueUnknown') : `${row.percent}%`),
-      h('span', { className: 'agy-quota-reset' }, row.reset)),
-    note)
+function groupTag(title: string): string {
+  if (/gemini/i.test(title)) return 'Google'
+  if (/3p|claude|gpt|anthropic|openai/i.test(title)) return 'Claude + GPT'
+  return 'Antigravity'
 }
 
 /**
- * The badge and its panel.
- *
- * `rpc` and `t` are injected by the plugin registration exactly as the Settings
- * section receives them; the slot content has no way to reach `ctx` itself.
+ * Format window reset time using i18n dictionary keys:
+ * - 5h window: e.g. "3h 15m" / "45m"
+ * - daily/weekly window: full date + countdown: "MM/DD HH:mm (6d 2h later)" / "(3d later)" / "(45m later)"
+ */
+function formatWindowReset(window: string, resetTime: string | null | undefined, t: QuotaTranslate, now: number = Date.now()): string | null {
+  if (!resetTime) return null
+  const resetDate = new Date(resetTime)
+  const diffMs = resetDate.getTime() - now
+
+  if (diffMs <= 0) {
+    return t('quotaResetPassed')
+  }
+
+  const diffMins = Math.floor(diffMs / (60 * 1000))
+  const diffHours = Math.floor(diffMins / 60)
+  const diffDays = Math.floor(diffHours / 24)
+
+  if (window === '5h') {
+    if (diffHours > 0) {
+      const remainingMins = diffMins % 60
+      return t('badgeReset5hHoursMins', { hours: diffHours, mins: remainingMins })
+    }
+    return t('badgeReset5hMins', { mins: Math.max(1, diffMins) })
+  }
+
+  let countdown = ''
+  if (diffDays > 0) {
+    const remainingHours = diffHours % 24
+    countdown = remainingHours > 0
+      ? t('badgeCountdownDaysHours', { days: diffDays, hours: remainingHours })
+      : t('badgeCountdownDays', { days: diffDays })
+  } else if (diffHours > 0) {
+    countdown = t('badgeCountdownHours', { hours: diffHours })
+  } else {
+    countdown = t('badgeCountdownMins', { mins: Math.max(1, diffMins) })
+  }
+
+  const month = resetDate.getMonth() + 1
+  const day = resetDate.getDate()
+  const hours = resetDate.getHours().toString().padStart(2, '0')
+  const minutes = resetDate.getMinutes().toString().padStart(2, '0')
+  const timeStr = `${hours}:${minutes}`
+
+  return t('badgeResetFullDate', {
+    month,
+    day,
+    time: timeStr,
+    countdown,
+  })
+}
+
+interface EnrichedWindow {
+  bucketId: string
+  label: string
+  percent: number | null
+  color: string
+  reset: string | null
+  stale: boolean
+}
+
+interface EnrichedCard {
+  key: string
+  title: string
+  badgeTag: string
+  windows: EnrichedWindow[]
+}
+
+/** Render one window row of a quota card. */
+function renderWindow(
+  window: EnrichedWindow,
+  index: number,
+  t: QuotaTranslate,
+): ReactNode {
+  return h(
+    'div',
+    {
+      key: window.bucketId,
+      className: 'agy-ui-limit-row',
+      style: index > 0 ? { marginTop: '5px' } : undefined,
+    },
+    h(
+      'div',
+      { className: 'agy-ui-limit-header' },
+      h('span', { className: 'agy-ui-limit-title' }, window.label),
+      h(
+        'span',
+        { className: 'agy-ui-limit-percent', style: { color: window.color } },
+        window.percent === null ? '—' : `${window.percent}%`,
+      ),
+    ),
+    h(
+      'div',
+      { className: 'agy-ui-progress-track' },
+      h('div', {
+        className: 'agy-ui-progress-fill',
+        style: {
+          width: `${window.percent ?? 0}%`,
+          backgroundColor: window.color,
+        },
+      }),
+    ),
+    window.reset
+      ? h(
+          'div',
+          { className: 'agy-ui-quota-footer' },
+          h('span', null, window.reset),
+        )
+      : null,
+    window.percent === null
+      ? h(
+          'div',
+          { className: 'agy-ui-window-note' },
+          window.stale ? t('quotaStaleNote') : t('quotaUnmeasuredNote'),
+        )
+      : null,
+  )
+}
+
+/**
+ * The badge and its popover modal.
  */
 export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate }): ReactNode {
   const [accounts, setAccounts] = useState<AccountView[]>([])
-  const [busy, setBusy] = useState(false)
-  const [hovered, setHovered] = useState(false)
-  const [pinned, setPinned] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [isUpdating, setIsUpdating] = useState(false)
+  const [isHovered, setIsHovered] = useState(false)
+  const [isPinned, setIsPinned] = useState(false)
+  const [isMobile, setIsMobile] = useState(false)
   const [now, setNow] = useState(() => Date.now())
+
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
-  const closeTimerRef = useRef<number | null>(null)
+  const leaveTimerRef = useRef<number | null>(null)
+  const lastFetchTimeRef = useRef<number>(0)
   const failedAtRef = useRef<number | null>(null)
 
-  const open = pinned || hovered
+  useEffect(() => {
+    installAgyStyles()
+    const checkMobile = () => {
+      setIsMobile(typeof window !== 'undefined' && window.innerWidth <= 640)
+    }
+    checkMobile()
+    window.addEventListener('resize', checkMobile)
+    return () => window.removeEventListener('resize', checkMobile)
+  }, [])
 
-  const load = useCallback(async (force: boolean) => {
-    setBusy(true)
+  const load = useCallback(async (isManual: boolean = false) => {
+    const currentNow = Date.now()
+    if (!isManual && lastFetchTimeRef.current > 0 && currentNow - lastFetchTimeRef.current < 120_000 - 1_000) {
+      return
+    }
+    lastFetchTimeRef.current = currentNow
+
+    setIsUpdating(true)
+    setLoading(true)
     try {
       const listed = await rpc.call('account.list', {})
-      // A reply from the channel is authoritative even when it is empty; only a
-      // FAILURE keeps the last good rows, which is why the catch below writes
-      // nothing at all.
       setAccounts(listed.accounts)
-      const probe = shouldProbeLimits({ force, failedAt: failedAtRef.current, now: Date.now() })
+
+      const probe = shouldProbeLimits({ force: isManual, failedAt: failedAtRef.current, now: Date.now() })
       if (probe !== 'off') {
         const limits = await rpc.call('account.limits', probe === 'force' ? { force: true } : {})
         const byIndex = new Map(limits.limits.map((entry) => [entry.index, entry]))
         setAccounts((current) => current.map((account) => {
           const entry = byIndex.get(account.index)
-          // An account the probe skipped keeps the windows it already had: the
-          // host's cached snapshot is the last good reading, and a failed probe
-          // writes nothing (by design — see refreshLimits).
           return entry === undefined
             ? account
             : { ...account, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
         }))
-        // A run that measured nothing but failed is the one case the host's TTL
-        // cannot cover: it wrote no snapshot, so the next automatic tick would
-        // probe again. Back that off; an explicit refresh is never held back.
         failedAtRef.current = limits.measured === 0 && limits.failed > 0 ? Date.now() : null
       }
-    } catch {
-      // Deliberately silent: a failed refresh must not blank a working badge, and
-      // the panel's age line already says how current the figures are.
+    } catch (err) {
+      console.warn('[dsh-agy] quota refresh failed:', err)
     } finally {
-      setBusy(false)
+      setLoading(false)
       setNow(Date.now())
+      setTimeout(() => {
+        setIsUpdating(false)
+      }, 1200)
     }
   }, [rpc])
 
@@ -152,50 +249,27 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     const timer = window.setInterval(() => {
       if (document.visibilityState !== 'hidden') void load(false)
     }, REFRESH_INTERVAL_MS)
-    const onFocus = (): void => { if (document.visibilityState !== 'hidden') void load(false) }
-    window.addEventListener('focus', onFocus)
-    document.addEventListener('visibilitychange', onFocus)
+    const onWake = (): void => {
+      if (document.visibilityState !== 'hidden') void load(false)
+    }
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
     return () => {
       window.clearInterval(timer)
-      window.removeEventListener('focus', onFocus)
-      document.removeEventListener('visibilitychange', onFocus)
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+      if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
     }
   }, [load])
 
-  // A pinned panel is dismissed by a pointerdown outside it; a hover-opened one
-  // closes with the pointer.
-  useDismissOnOutsidePointer(rootRef, pinned, setPinned, panelRef)
+  const isOpen = isPinned || isHovered
 
-  useEffect(() => () => {
-    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
-  }, [])
+  // Dismiss pinned popover on outside pointer
+  useDismissOnOutsidePointer(rootRef, isPinned, setIsPinned, panelRef)
 
-  const scheduleClose = useCallback(() => {
-    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
-    closeTimerRef.current = window.setTimeout(() => {
-      closeTimerRef.current = null
-      setHovered(false)
-    }, HOVER_CLOSE_DELAY_MS)
-  }, [])
-
-  const keepOpen = useCallback(() => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
-    }
-    setHovered(true)
-  }, [])
-
-  const active = accounts.find((account) => account.active) ?? accounts[0]
-  const quota = pickBadgeQuota(accounts, now)
-  const cards = buildQuotaCards(active, t, now)
-  const dotState = dotStateFor(accounts)
-  const reading = quota === null
-    ? t('badgeUnmeasured')
-    : t('badgeReading', { window: windowLabel(quota.window, t), percent: quota.percent })
-
+  // Anchored position calculation for desktop placement
   const anchored = useAnchoredPosition({
-    open,
+    open: isOpen && !isMobile,
     anchorRef: rootRef,
     panelRef,
     side: 'bottom',
@@ -203,80 +277,327 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     margin: 12,
   })
 
-  const panel = open
-    ? h('div', {
-      ref: panelRef,
-      className: 'agy-quota-pop',
-      // The panel must be mounted before it can be measured, so the first frame
-      // renders hidden rather than at the viewport origin.
-      style: anchored === null ? { visibility: 'hidden' } : { ...anchored, visibility: 'visible' },
-      onMouseEnter: keepOpen,
-      onMouseLeave: scheduleClose,
-    },
-      h('div', { className: 'agy-quota-pop-head' },
-        h('span', { className: 'agy-quota-pop-title' }, t('badgeTitle')),
-        pinned ? h(Pill, { className: 'agy-quota-pill' }, t('badgePinned')) : null,
-        h('span', { className: 'agy-quota-pop-actions' },
-          h(Button, {
-            variant: 'ghost',
-            size: 'sm',
-            disabled: busy,
-            onClick: () => { void load(true) },
-          }, t('refresh')),
-          h(Button, {
-            variant: 'ghost',
-            size: 'sm',
-            onClick: () => { setPinned(false); setHovered(false) },
-          }, t('badgeClose')))),
-      active === undefined
-        ? h('div', { className: 'agy-quota-empty' }, t('badgeNoAccount'))
-        : h('div', { className: 'agy-quota-account' },
-          h('span', { className: 'agy-quota-email' }, desensitizeEmail(active.email)),
-          h(Tag, { tone: toneFor(active.state) }, stateLabel(active.state, t)),
-          h('span', { className: 'agy-quota-project' }, active.projectId ?? t('noProject'))),
-      active !== undefined && active.verificationRequired && active.verificationUrl !== null
-        ? h('div', { className: 'agy-quota-note' },
-          h('a', {
-            className: 'agy-link',
-            href: active.verificationUrl,
-            target: '_blank',
-            rel: 'noreferrer noopener',
-          }, t('verificationOpen')))
-        : null,
-      active !== undefined && active.limitsUpdatedAt !== null
-        ? h('div', { className: 'agy-quota-age' },
-          t('limitsMeasured', { ago: agoText(new Date(active.limitsUpdatedAt).toISOString(), t, now) }))
-        : null,
-      cards.length === 0
-        ? h('div', { className: 'agy-quota-empty' }, t('limitsUnavailable'))
-        : h('div', { className: 'agy-quota-cards' }, ...cards.map((card) => h('div', {
-          className: 'agy-quota-card',
-          key: card.key,
-        },
-          h('div', { className: 'agy-quota-card-title' }, card.title),
-          ...card.windows.map((row) => windowRow(row, t))))),
-      h('div', { className: 'agy-quota-foot' },
-        h('span', null, t('quotaSourceCaption')),
-        h('span', null, t('quotaManageHint'))))
+  const handleMouseEnterBadge = () => {
+    if (leaveTimerRef.current !== null) {
+      window.clearTimeout(leaveTimerRef.current)
+      leaveTimerRef.current = null
+    }
+    setIsHovered(true)
+  }
+
+  const handleMouseLeaveBadge = () => {
+    if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
+    leaveTimerRef.current = window.setTimeout(() => {
+      setIsHovered(false)
+    }, HOVER_CLOSE_DELAY_MS)
+  }
+
+  const handleMouseEnterPopover = () => {
+    if (leaveTimerRef.current !== null) {
+      window.clearTimeout(leaveTimerRef.current)
+      leaveTimerRef.current = null
+    }
+  }
+
+  const handleMouseLeavePopover = () => {
+    if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
+    leaveTimerRef.current = window.setTimeout(() => {
+      setIsHovered(false)
+    }, HOVER_CLOSE_DELAY_MS)
+  }
+
+  const handleTogglePin = (e?: { stopPropagation: () => void }) => {
+    e?.stopPropagation()
+    setIsPinned((prev) => !prev)
+    setIsHovered(true)
+  }
+
+  const handleClose = () => {
+    if (leaveTimerRef.current !== null) {
+      window.clearTimeout(leaveTimerRef.current)
+      leaveTimerRef.current = null
+    }
+    setIsPinned(false)
+    setIsHovered(false)
+  }
+
+  const handleRefreshClick = async (e: { stopPropagation: () => void }) => {
+    e.stopPropagation()
+    if (loading) return
+    await load(true)
+  }
+
+  const activeAccount = accounts.find((a) => a.active) ?? accounts[0]
+  const accountCount = accounts.length
+  const rawDot = dotStateFor(accounts)
+  const dotState = rawDot === 'done' ? 'active' : rawDot === 'warning' ? 'cooling' : 'disabled'
+  const badgeQuota = pickBadgeQuota(accounts, now)
+  const badgeWindow = badgeQuota?.window && badgeQuota.window !== '5h' ? `${windowLabel(badgeQuota.window, t)} ` : ''
+  const displayText = badgeQuota !== null ? `AGY · ${badgeWindow}${badgeQuota.percent}%` : `AGY ✦ ${accountCount}`
+
+  // Map limits groups to get real window type & raw resetTime
+  const rawWindowMap = new Map<string, QuotaWindow>()
+  if (activeAccount?.limits) {
+    for (const group of activeAccount.limits) {
+      for (const w of group.windows) {
+        rawWindowMap.set(`${group.name}:${w.window}`, w)
+      }
+    }
+  }
+
+  const rawCards = buildQuotaCards(activeAccount, t, now)
+  const cards: EnrichedCard[] = rawCards.map((rc) => ({
+    key: rc.key,
+    title: rc.title,
+    badgeTag: groupTag(rc.title),
+    windows: rc.windows.map((w) => {
+      const windowType = w.bucketId === '5h' || w.bucketId === 'weekly' || w.bucketId === 'daily' || w.bucketId === 'monthly'
+        ? w.bucketId
+        : (w.bucketId.includes('week') ? 'weekly' : '5h')
+      const matchedLimit = rawWindowMap.get(`${rc.title}:${windowType}`)
+      const exactReset = matchedLimit?.resetTime
+        ? formatWindowReset(windowType, matchedLimit.resetTime, t, now)
+        : w.reset
+
+      return {
+        bucketId: w.bucketId,
+        label: w.label,
+        percent: w.percent,
+        color: quotaColorForWindow(windowType, w.percent),
+        reset: exactReset,
+        stale: w.stale,
+      }
+    }),
+  }))
+  const limitsAge = activeAccount?.limitsUpdatedAt
+    ? agoText(new Date(activeAccount.limitsUpdatedAt).toISOString(), t, now)
     : null
 
-  return h('span', {
-    ref: rootRef,
-    className: 'agy-quota-anchor',
-    onMouseEnter: keepOpen,
-    onMouseLeave: scheduleClose,
-  },
-    h(Button, {
-      variant: 'ghost',
-      size: 'sm',
-      className: 'agy-quota-badge',
-      'aria-label': t('badgeAria'),
-      title: `${reading} · ${t('badgeHint')}`,
-      onClick: () => { setPinned((current) => !current) },
-      onFocus: keepOpen,
-      onBlur: scheduleClose,
+  const badgeReadingStr = badgeQuota !== null
+    ? t('badgeReading', { window: badgeWindow, percent: badgeQuota.percent })
+    : t('badgeUnmeasured')
+  const badgeTooltip = t('badgeTooltip', { count: accountCount, reading: badgeReadingStr })
+
+  const popoverContent = h(
+    'div',
+    {
+      ref: panelRef,
+      className: `agy-ui-popover ${isMobile ? 'mobile' : 'desktop'}`,
+      style: !isMobile
+        ? (anchored === null
+            ? { visibility: 'hidden' as const }
+            : {
+                position: 'fixed' as const,
+                top: `${anchored.top}px`,
+                left: `${anchored.left}px`,
+                visibility: 'visible' as const,
+                zIndex: 999999,
+              })
+        : undefined,
+      onMouseEnter: handleMouseEnterPopover,
+      onMouseLeave: handleMouseLeavePopover,
+      onClick: (e: { stopPropagation: () => void }) => { e.stopPropagation() },
     },
-      h(StateDot, { state: dotState, size: 8 }),
-      quota === null ? t('valueUnknown') : `${quota.percent}%`),
-    panel)
+    // Mobile handle
+    isMobile ? h('div', { className: 'agy-ui-mobile-handle' }) : null,
+
+    // Header
+    h(
+      'div',
+      { className: 'agy-ui-modal-header' },
+      h(
+        'div',
+        { className: 'agy-ui-modal-title' },
+        h('span', { className: 'agy-ui-sparkle' }, '✦'),
+        h('span', null, t('badgeTitle')),
+        isPinned && !isMobile ? h(Tag, { tone: 'solid', className: 'agy-ui-pinned-tag' }, t('badgePinned')) : null,
+      ),
+      h(
+        'div',
+        { className: 'agy-ui-header-actions' },
+        !isMobile
+          ? h(
+              Button,
+              {
+                variant: 'ghost',
+                size: 'sm',
+                className: `agy-ui-icon-btn ${isPinned ? 'active' : ''}`,
+                title: isPinned ? t('badgeUnpinHint') : t('badgeHint'),
+                onClick: handleTogglePin,
+              },
+              h(
+                'svg',
+                { width: '13', height: '13', viewBox: '0 0 24 24', fill: isPinned ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: '2' },
+                h('path', { d: 'M12 2v8m0 0l3-3m-3 3L9 7M5 10h14a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 1 2-2zM12 15v7' }),
+              ),
+            )
+          : null,
+        h(
+          Button,
+          {
+            variant: 'ghost',
+            size: 'sm',
+            className: 'agy-ui-icon-btn',
+            title: t('badgeRefreshHint'),
+            onClick: handleRefreshClick,
+            disabled: loading,
+          },
+          h(
+            'svg',
+            {
+              className: loading || isUpdating ? 'agy-ui-spinning' : '',
+              width: '13',
+              height: '13',
+              viewBox: '0 0 24 24',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: '2',
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+            },
+            h('path', { d: 'M21.5 2v6h-6M2.5 22v-6h6M2.5 11.5a10 10 0 0 1 17.5-4.5l1.5 2M21.5 12.5a10 10 0 0 1-17.5 4.5l-1.5-2' }),
+          ),
+        ),
+        h(
+          Button,
+          {
+            variant: 'ghost',
+            size: 'sm',
+            className: 'agy-ui-icon-btn',
+            title: t('badgeClose'),
+            onClick: handleClose,
+          },
+          h(
+            'svg',
+            { width: '13', height: '13', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round' },
+            h('line', { x1: '18', y1: '6', x2: '6', y2: '18' }),
+            h('line', { x1: '6', y1: '6', x2: '18', y2: '18' }),
+          ),
+        ),
+      ),
+    ),
+
+    // Body
+    h(
+      'div',
+      { className: 'agy-ui-modal-body' },
+      activeAccount
+        ? h(
+            'div',
+            { className: 'agy-ui-account-card' },
+            h(
+              'div',
+              null,
+              h('div', { className: 'agy-ui-account-email' }, desensitizeEmail(activeAccount.email)),
+              h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${activeAccount.projectId || t('thinkingDefaultAll')}`),
+            ),
+            h(
+              Tag,
+              {
+                tone: activeAccount.state === 'active' ? 'success' : activeAccount.state === 'cooling' ? 'warning' : 'danger',
+                className: `agy-ui-state-pill ${activeAccount.state || 'active'}`,
+              },
+              stateLabel(activeAccount.state || 'active', t),
+            ),
+          )
+        : h(
+            'div',
+            { className: 'agy-ui-account-card' },
+            h('div', { className: 'agy-ui-account-email', style: { color: 'var(--dsw-alias-label-tertiary, #94a3b8)' } }, t('badgeNoAccount')),
+          ),
+
+      activeAccount?.verificationRequired && activeAccount?.verificationUrl
+        ? h(
+            'div',
+            { className: 'agy-ui-verify-note' },
+            h('span', null, t('badgeVerifyRequired')),
+            h(
+              'a',
+              {
+                className: 'agy-ui-link-btn',
+                href: activeAccount.verificationUrl,
+                target: '_blank',
+                rel: 'noopener noreferrer',
+              },
+              t('badgeAppealLink'),
+            ),
+          )
+        : null,
+
+      h('div', { className: 'agy-ui-section-label' }, t('badgeSectionMonitor')),
+
+      ...cards.map((card) =>
+        h(
+          'div',
+          { key: card.key, className: 'agy-ui-quota-card' },
+          h(
+            'div',
+            { className: 'agy-ui-quota-header' },
+            h(
+              'div',
+              { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+              h('span', { className: 'agy-ui-model-name' }, card.title),
+              h(Tag, { tone: 'outline', className: 'agy-ui-model-tag' }, card.badgeTag),
+            ),
+          ),
+          ...card.windows.map((w, idx) => renderWindow(w, idx, t)),
+        ),
+      ),
+
+      cards.length === 0
+        ? h('div', { className: 'agy-ui-window-note', style: { padding: '8px 0' } }, t('badgeNoQuotaData'))
+        : null,
+
+      limitsAge ? h('div', { className: 'agy-ui-limit-age' }, t('badgeMeasuredAt', { time: limitsAge })) : null,
+    ),
+
+    // Footer
+    h(
+      'div',
+      { className: 'agy-ui-modal-footer' },
+      h('span', null, t('quotaSourceCaption')),
+      h('span', null, t('quotaManageHint')),
+    ),
+  )
+
+  const popoverNode = isOpen
+    ? (isMobile
+        ? h(
+            'div',
+            {
+              className: 'agy-ui-popover-container mobile',
+              onClick: handleClose,
+            },
+            popoverContent,
+          )
+        : popoverContent)
+    : null
+
+  return h(
+    'span',
+    {
+      ref: rootRef,
+      style: { position: 'relative', display: 'inline-flex', alignItems: 'center' },
+    },
+    h(
+      Button,
+      {
+        variant: 'ghost',
+        size: 'sm',
+        className: `agy-ui-badge ${isPinned ? 'pinned' : ''}`,
+        title: badgeTooltip,
+        'aria-label': t('badgeAria'),
+        onClick: handleTogglePin,
+        onMouseEnter: handleMouseEnterBadge,
+        onMouseLeave: handleMouseLeaveBadge,
+      },
+      h(StateDot, {
+        state: rawDot as StateDotState,
+        size: 7,
+        className: `agy-ui-dot ${dotState}${isUpdating ? ' updating' : ''}`,
+      }),
+      h('span', null, displayText),
+    ),
+    popoverNode,
+  )
 }
