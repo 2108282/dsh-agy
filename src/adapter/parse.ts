@@ -254,6 +254,14 @@ export async function* parseAgySse(
         finishReason = mapFinishReason(candidate.finishReason)
       }
       for (const part of candidate.content?.parts ?? []) {
+        // A zero-length text part is a routine wire shape (the daily endpoint
+        // ends turns with `{thoughtSignature, text: ""}`) — fabricating an
+        // empty block from it poisoned session history for stricter
+        // downstream serializers (issue #77). Skip it without touching an
+        // open block, so "Hel" + "" + "lo" stays one block; `!part.functionCall`
+        // keeps a text+functionCall part on its current branch. Signatures
+        // ride functionCall parts only, so the skip loses nothing.
+        if (part.text === '' && !part.functionCall) continue
         if (part.text !== undefined && part.thought !== true) {
           out.push(...ensureBlock('text'))
           open!.text += part.text
