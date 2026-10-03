@@ -793,6 +793,49 @@ describe('parseAgySse', () => {
       for await (const _ of chunks) void _
     }).rejects.toThrow(/quota/)
   })
+
+  it('throws when stream terminates prematurely without [DONE] or finishReason', async () => {
+    await expect(async () => {
+      const chunks = parseAgySse(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"half answer"}]}}]}]',
+      ]))
+      for await (const _ of chunks) void _
+    }).rejects.toThrow(/terminated prematurely/)
+  })
+
+  it('throws on raw bare JSON error without data: prefix', async () => {
+    await expect(async () => {
+      const chunks = parseAgySse(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}]',
+        '{"error":{"code":500,"status":"INTERNAL","message":"Internal error encountered."}}',
+      ]))
+      for await (const _ of chunks) void _
+    }).rejects.toThrow(/Internal error encountered/)
+  })
+
+  it('throws when upstream stops candidate due to SAFETY or policy block', async () => {
+    await expect(async () => {
+      const chunks = parseAgySse(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"sensitive"}]},"finishReason":"SAFETY"}]}]',
+        'data: [DONE]',
+      ]))
+      for await (const _ of chunks) void _
+    }).rejects.toThrow(/blocked by upstream policy: SAFETY/)
+  })
+
+  it('throws on residual trailing bare JSON error without trailing newline', async () => {
+    const rawError = '{"error":{"code":503,"status":"UNAVAILABLE","message":"Backend unavailable"}}'
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(rawError))
+        controller.close()
+      },
+    })
+    await expect(async () => {
+      const chunks = parseAgySse(stream)
+      for await (const _ of chunks) void _
+    }).rejects.toThrow(/Backend unavailable/)
+  })
 })
 
 describe('models', () => {

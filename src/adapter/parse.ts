@@ -59,6 +59,24 @@ export function parseSseDataLine(line: string): SsePayload | null {
   return payload ?? null
 }
 
+/**
+ * Attempt to parse a non-SSE raw JSON error body (e.g. `{"error":{"code":500,"message":"..."}}`)
+ * that upstream occasionally emits before or upon dropping the connection.
+ */
+export function extractBareJsonError(raw: string): { code?: number; status?: string; message?: string } | null {
+  const trimmed = raw.trim()
+  if (!trimmed || !trimmed.startsWith('{')) return null
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: { code?: number; status?: string; message?: string } }
+    if (parsed.error && typeof parsed.error === 'object') {
+      return parsed.error
+    }
+  } catch {
+    // not valid/complete JSON
+  }
+  return null
+}
+
 function mapFinishReason(reason: string | undefined): FinishReason {
   switch (reason) {
     case 'MAX_TOKENS':
@@ -100,6 +118,8 @@ export async function* parseAgySse(
   let blockIndex = 0
   let finishReason: FinishReason = { kind: 'stop' }
   let sawUsage = false
+  let sawDone = false
+  let sawFinishReason = false
   let lastUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number } | null = null
 
   interface OpenBlock {
@@ -167,7 +187,19 @@ export async function* parseAgySse(
       while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newlineIndex)
         buffer = buffer.slice(newlineIndex + 1)
-        if (!line.startsWith('data:')) continue
+        const trimmed = line.trim()
+        if (trimmed === 'data: [DONE]' || trimmed === 'data:[DONE]') {
+          sawDone = true
+          continue
+        }
+        if (!trimmed.startsWith('data:')) {
+          const bareErr = extractBareJsonError(line)
+          if (bareErr) {
+            const message = bareErr.message ?? bareErr.status ?? 'upstream error'
+            throw new Error(`agy stream error (${bareErr.code ?? 'unknown'}): ${message}`)
+          }
+          continue
+        }
         const payload = parseSseDataLine(line)
         if (!payload) continue
         if (payload.error) {
@@ -176,6 +208,10 @@ export async function* parseAgySse(
         }
         for (const candidate of payload.candidates ?? []) {
           if (candidate.finishReason) {
+            sawFinishReason = true
+            if (candidate.finishReason === 'SAFETY' || candidate.finishReason === 'RECITATION' || candidate.finishReason === 'BLOCKLIST' || candidate.finishReason === 'PROHIBITED_CONTENT' || candidate.finishReason === 'SPII') {
+              throw new Error(`agy stream blocked by upstream policy: ${candidate.finishReason}`)
+            }
             finishReason = mapFinishReason(candidate.finishReason)
           }
           for (const part of candidate.content?.parts ?? []) {
@@ -243,6 +279,16 @@ export async function* parseAgySse(
           }
         }
       }
+    }
+    if (buffer.trim()) {
+      const residualErr = extractBareJsonError(buffer)
+      if (residualErr) {
+        const message = residualErr.message ?? residualErr.status ?? 'upstream error'
+        throw new Error(`agy stream error (${residualErr.code ?? 'unknown'}): ${message}`)
+      }
+    }
+    if (!sawDone && !sawFinishReason) {
+      throw new Error('agy stream terminated prematurely without [DONE] or finishReason')
     }
     const closed = closeBlock()
     if (closed) yield closed
