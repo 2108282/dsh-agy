@@ -110,14 +110,20 @@ const CSS = `
 /* Master/detail: the account list beside the selected account's detail, so a
  * row and the panel it opens stay in view together.
  *
- * The collapse MUST be a CONTAINER query, not a viewport one. This section
- * renders inside the Settings panel, which is ~600px wide even on a large
- * display, so the former @media (max-width: 720px) never fired: the split
- * stayed two-column everywhere and the 300px master column squeezed the detail
- * to ~280px. That is the reported symptom (the panel "feels too narrow"): the
- * account email truncated to "a1…" and the latency value wrapped onto three
- * lines. The measured constraint is the PANEL's width, so the query must follow
- * it.
+ * The collapse MUST be a CONTAINER query, not a viewport one. The former
+ * @media (max-width: 720px) never fired inside the Settings panel, so the
+ * split stayed two-column on every desktop and a fixed 300px master column
+ * squeezed the detail to ~280px: the account email truncated to "a1…" and the
+ * latency value wrapped onto three lines (the reported "panel feels too
+ * narrow"). The measured constraint is the PANEL's width — ~564px of inline
+ * space on desktop (800px modal - 188px nav - 48px padding) — so the query
+ * must follow it. The first breakpoint (700px) overcorrected: it never fired
+ * either, so the split stacked everywhere and the opened detail fell below
+ * the fold — the regression the split exists to prevent. Two columns are safe
+ * at the real width because the master column now yields — minmax(210px, …),
+ * ≈240px here — and .agy-rowitem wraps its action cluster instead of
+ * squeezing the email. The breakpoint must ALSO stay above what the columns
+ * demand (210 + 260 + 12 gap = 482px), or the grid overflows at the trigger.
  *
  * The containment lives on a dedicated wrapper, NOT on .agy-root:
  * container-type: inline-size applies layout containment, which makes the
@@ -125,12 +131,9 @@ const CSS = `
  * Tooltip (used by the thinking-budget fields) positions its bubble with
  * position: fixed. Scoping it here keeps that behaviour intact.
  */
-/* Master/detail grid: stacked on narrow containers, two columns when room permits.
- * The Settings panel provides ~612px inline space on desktop (800px modal - 188px
- * nav - 48px padding), so the breakpoint must sit below ~550px (480px) to trigger two columns. */
 .agy-split-wrap { container-type: inline-size; }
 .agy-split { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
-@container (min-width: 480px) {
+@container (min-width: 490px) {
   .agy-split { grid-template-columns: minmax(210px, 1fr) minmax(260px, 1.4fr); }
 }
 /* Cap the master list so a large pool cannot push the detail it opens below the
@@ -394,7 +397,12 @@ const CSS = `
 .agy-textarea:focus { border-color: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6); }
 `
 
-/** Install the stylesheet once (idempotent across plugin reloads). */
+/** Install the stylesheet once (idempotent across plugin reloads): a second
+ *  install never appends a duplicate, and one whose content has gone stale
+ *  (a previous bundle's CSS) is refreshed in place. The disposer is
+ *  deliberately a NO-OP — it runs on every Cordis effect re-evaluation, and
+ *  removing the element there stripped every .agy-* style mid-session; the
+ *  element is unique by id and inert once the section is gone. */
 export function installAgyStyles(): () => void {
   if (typeof document === 'undefined') return () => {}
   const existing = document.getElementById(STYLE_ID)
