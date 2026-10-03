@@ -7,7 +7,6 @@
 
 import { EnvHttpProxyAgent, ProxyAgent } from 'undici'
 import { createConnection } from 'node:net'
-import { createRequire } from 'node:module'
 import { isProxyRouted } from './types.ts'
 import type { AccountRouting } from './types.ts'
 import { redactCredentials } from './redact.ts'
@@ -239,11 +238,25 @@ export function _clearProxyHealthCacheForTest(): void {
 }
 
 // ── Dispatcher creation (cached) ──
-async function createSocksDispatcher(proxyUrl: string, dispatcherOpts: Record<string, unknown>): Promise<any> {
-  // @ts-ignore — optional dep, only required for socks5
-  const { SocksProxyAgent } = await import('socks-proxy-agent')
-  // socks-proxy-agent is compatible with undici dispatcher interface via fetch
-  return new (SocksProxyAgent as any)(proxyUrl) as any
+/**
+ * Decoded proxy credentials. `URL.username`/`password` are the percent-ENCODED
+ * substrings, and undici decodes them only where it parses the URI itself: the
+ * HTTP tunnel path builds `proxy-authorization` from decoded values, but the
+ * SOCKS5 sub-path forwards `opts.username`/`opts.password` VERBATIM to the auth
+ * subnegotiation, so an encoded `p%40ss` would reach the proxy literally and be
+ * rejected. Decoding here is what makes both paths see the real credentials.
+ */
+function decodedProxyAuth(proxyUrl: string): { username?: string; password?: string } {
+  try {
+    const u = new URL(proxyUrl)
+    if (!u.username) return {}
+    return {
+      username: decodeURIComponent(u.username),
+      ...(u.password ? { password: decodeURIComponent(u.password) } : {}),
+    }
+  } catch {
+    return {}
+  }
 }
 
 function createHttpDispatcher(proxyUrl: string, dispatcherOpts: Record<string, unknown>): any {
@@ -252,6 +265,7 @@ function createHttpDispatcher(proxyUrl: string, dispatcherOpts: Record<string, u
     uri: clean,
     // tunnel all (http+https) via CONNECT, same as OmniRoute
     proxyTunnel: true,
+    ...decodedProxyAuth(clean),
     ...dispatcherOpts,
   } as any)
 }
@@ -268,6 +282,12 @@ function createHttpDispatcher(proxyUrl: string, dispatcherOpts: Record<string, u
  * non-zero, and `pipelining: 0` forces every connection to reset on completion,
  * so they are inert here. They are kept at the conservative value spec #8 asks
  * for rather than being replaced by a setting that would never take effect.
+ *
+ * SOCKS5 exception (measured against undici 7.29): the socks sub-path drops
+ * these options — the per-origin pool behind its Socks5ProxyAgent accepts only
+ * pipelining/connections/connect — so on a socks5:// proxy both call classes
+ * run at undici's defaults (~300s per-gap) and the streaming `bodyTimeout: 0`
+ * guarantee above does NOT hold. There is no option channel to change that.
  */
 const DISPATCHER_OPTS = {
   headersTimeout: 30_000,
@@ -293,40 +313,6 @@ function dispatcherCacheKey(normalized: string, streaming: boolean): string {
   return streaming ? `${normalized}|stream` : normalized
 }
 
-/**
- * Synchronous dispatcher for a proxy URL (control-plane class only).
- *
- * Streaming must NOT use this: it needs `bodyTimeout: 0`, and the socks path
- * already requires the async variant. Kept sync for callers that cannot await.
- */
-export function dispatcherFor(proxyUrl?: string): any | undefined {
-  if (!proxyUrl) return envAgent as any
-  const normalized = normalizeProxyUrl(proxyUrl)
-  const cached = dispatcherCache.get(dispatcherCacheKey(normalized, false))
-  if (cached) return cached
-  const famClean = normalized.replace(/\?family=(ipv4|ipv6)$/, '')
-  let dispatcher: any
-  if (famClean.startsWith('socks5:')) {
-    // SOCKS needs SocksProxyAgent. Try sync require for cached case; otherwise prefer async path (proxiedFetch uses dispatcherForAsync).
-    try {
-      const rq = createRequire(import.meta.url)
-      const mod = rq('socks-proxy-agent') as { SocksProxyAgent?: new (u: string) => unknown }
-      const Cls = mod.SocksProxyAgent
-      if (Cls) {
-        dispatcher = new (Cls as unknown as new (u: string) => unknown)(normalized) as unknown
-      } else {
-        throw new Error('no SocksProxyAgent')
-      }
-    } catch {
-      throw new Error('[proxy] socks dispatcher requires async creation — use dispatcherForAsync or proxiedFetch with proxyUrl')
-    }
-  } else {
-    dispatcher = createHttpDispatcher(normalized, DISPATCHER_OPTS as any)
-  }
-  dispatcherCache.set(dispatcherCacheKey(normalized, false), dispatcher)
-  return dispatcher
-}
-
 export async function dispatcherForAsync(
   proxyUrl?: string,
   options: { streaming?: boolean } = {},
@@ -337,13 +323,7 @@ export async function dispatcherForAsync(
   const key = dispatcherCacheKey(normalized, streaming)
   const cached = dispatcherCache.get(key)
   if (cached) return cached
-  const famClean = normalized.replace(/\?family=(ipv4|ipv6)$/, '')
-  let dispatcher: any
-  if (famClean.startsWith('socks5:')) {
-    dispatcher = await createSocksDispatcher(normalized, dispatcherOptsFor(streaming) as any)
-  } else {
-    dispatcher = createHttpDispatcher(normalized, dispatcherOptsFor(streaming) as any)
-  }
+  const dispatcher = createHttpDispatcher(normalized, dispatcherOptsFor(streaming) as any)
   dispatcherCache.set(key, dispatcher)
   return dispatcher
 }

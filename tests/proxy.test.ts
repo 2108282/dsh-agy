@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { EnvHttpProxyAgent } from 'undici'
+import { EnvHttpProxyAgent, ProxyAgent, request } from 'undici'
+import { createServer, type AddressInfo, type Socket } from 'node:net'
 import { proxiedFetch, proxyAgent, proxyStreamingAgent, dispatcherForAsync, dispatcherOptsFor, normalizeProxyUrl, proxyUrlForLogs, _clearDispatcherCacheForTest } from '../src/proxy.ts'
 
 describe('proxy env support', () => {
@@ -121,5 +122,127 @@ describe('proxy URL in log messages', () => {
     expect(proxyUrlForLogs('http://user:pass@127.0.0.1:9')).toBe('http://127.0.0.1:9')
     expect(proxyUrlForLogs('socks5://u:p@h')).toBe('socks5://h:1080')
     expect(proxyUrlForLogs('http://h:8080')).toBe('http://h:8080')
+  })
+})
+
+// ── In-process SOCKS5 server (localhost only, no network, no global fetch) ──
+// Speaks greeting + optional user/pass auth + CONNECT, then answers the tunneled
+// request with a fixed HTTP response. Byte-accumulating state machine, so it is
+// robust to TCP segment splits.
+interface FakeSocks {
+  port: number
+  /** Credentials received at the RFC 1929 auth subnegotiation, `user:pass`. */
+  receivedAuth: string[]
+  close: () => Promise<void>
+}
+
+async function startFakeSocks(opts: { requireAuth?: boolean } = {}): Promise<FakeSocks> {
+  const receivedAuth: string[] = []
+  const sockets = new Set<Socket>()
+  const server = createServer((socket) => {
+    sockets.add(socket)
+    let stage: 'greet' | 'auth' | 'connect' | 'relay' = 'greet'
+    let relayed = false
+    let buf = Buffer.alloc(0)
+    socket.on('data', (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk])
+      for (;;) {
+        if (stage === 'greet') {
+          if (buf.length < 2) return
+          const nmethods = buf[1]!
+          if (buf.length < 2 + nmethods) return
+          buf = buf.subarray(2 + nmethods)
+          socket.write(Buffer.from([0x05, opts.requireAuth ? 0x02 : 0x00]))
+          stage = opts.requireAuth ? 'auth' : 'connect'
+        } else if (stage === 'auth') {
+          // VER ULEN UNAME PLEN PASSWD (RFC 1929)
+          if (buf.length < 2) return
+          const ulen = buf[1]!
+          if (buf.length < 2 + ulen + 1) return
+          const plen = buf[2 + ulen]!
+          if (buf.length < 3 + ulen + plen) return
+          receivedAuth.push(
+            `${buf.subarray(2, 2 + ulen).toString()}:${buf.subarray(3 + ulen, 3 + ulen + plen).toString()}`,
+          )
+          buf = buf.subarray(3 + ulen + plen)
+          socket.write(Buffer.from([0x01, 0x00]))
+          stage = 'connect'
+        } else if (stage === 'connect') {
+          // VER CMD RSV ATYP DST.ADDR DST.PORT
+          if (buf.length < 5) return
+          const atyp = buf[3]!
+          const addrLen = atyp === 0x01 ? 4 : atyp === 0x04 ? 16 : 1 + buf[4]!
+          if (buf.length < 4 + addrLen + 2) return
+          buf = buf.subarray(4 + addrLen + 2)
+          socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+          stage = 'relay'
+        } else {
+          if (!relayed && buf.length > 0) {
+            relayed = true
+            socket.write('HTTP/1.1 200 OK\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\nok')
+          }
+          return
+        }
+      }
+    })
+    socket.on('error', () => {})
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  return {
+    port: (server.address() as AddressInfo).port,
+    receivedAuth,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const s of sockets) s.destroy()
+        server.close(() => resolve())
+      }),
+  }
+}
+
+describe('socks5 rides undici native ProxyAgent (issue #79)', () => {
+  afterEach(() => {
+    _clearDispatcherCacheForTest()
+  })
+
+  it('builds a real undici ProxyAgent and caches it per call class', async () => {
+    const control = await dispatcherForAsync('socks5://127.0.0.1:1080')
+    const streaming = await dispatcherForAsync('socks5://127.0.0.1:1080', { streaming: true })
+    // The previous socks path handed fetch a Node `http.Agent` (socks-proxy-agent),
+    // which has no undici `dispatch` — every request died with
+    // `TypeError: agent.dispatch is not a function` before any connection.
+    expect(control).toBeInstanceOf(ProxyAgent)
+    expect(streaming).toBeInstanceOf(ProxyAgent)
+    expect(control).not.toBe(streaming)
+    expect(await dispatcherForAsync('socks5://127.0.0.1:1080')).toBe(control)
+  })
+
+  it('round-trips a request through a local SOCKS5 server', async () => {
+    const socks = await startFakeSocks()
+    try {
+      const dispatcher = await dispatcherForAsync(`socks5://127.0.0.1:${socks.port}`)
+      const res = await request('http://example.invalid/ping', { dispatcher })
+      const body = await res.body.text()
+      expect(res.statusCode).toBe(200)
+      expect(body).toBe('ok')
+    } finally {
+      await socks.close()
+    }
+  })
+
+  it('hands the SOCKS5 auth subnegotiation DECODED credentials', async () => {
+    // A stored URL keeps the encoded form (normalizeProxyUrl pins `p%40ss`), and
+    // undici forwards the username/password OPTIONS verbatim — only decoding
+    // them here stops the proxy from receiving the literal `p%40ss` and
+    // rejecting the auth.
+    const socks = await startFakeSocks({ requireAuth: true })
+    try {
+      const dispatcher = await dispatcherForAsync(`socks5://u:p%40ss@127.0.0.1:${socks.port}`)
+      const res = await request('http://example.invalid/ping', { dispatcher })
+      await res.body.text()
+      expect(res.statusCode).toBe(200)
+      expect(socks.receivedAuth).toEqual(['u:p@ss'])
+    } finally {
+      await socks.close()
+    }
   })
 })
