@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
 import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText, truncateIdentity } from '../src/client/index.ts'
+import { installAgyStyles } from '../src/client/styles.ts'
 import { en, zh } from '../src/client/locales.ts'
 import { zeroCounters } from '../src/usage-types.ts'
 import type { AccountView, ModelView } from '../src/rpc-contract.ts'
@@ -180,13 +181,12 @@ describe('usage table stylesheet', () => {
   })
 
   it('sizes the master/detail split from the panel, not the viewport', () => {
-    // Regression: the collapse used `@media (max-width: 720px)`, but this
-    // section renders inside a ~600px Settings panel, so the query never fired
-    // and the 320px master column squeezed the detail to ~270px on every
-    // desktop. The breakpoint must be a CONTAINER query — the measured
-    // constraint is the panel's inline size.
+    // Pins the constraint recorded on .agy-split in src/client/styles.ts: a
+    // CONTAINER query (the former viewport @media never fired inside the
+    // ~564px panel) whose breakpoint stays ABOVE the panel width — at the
+    // panel the split stacks by measurement; re-measure before moving it.
     expect(css).toMatch(/\.agy-split-wrap\s*\{[^}]*container-type:\s*inline-size/)
-    expect(css).toMatch(/@container\s*\(min-width:[^)]*\)/)
+    expect(css).toMatch(/@container\s*\(min-width:\s*700px\)/)
     expect(css).not.toMatch(/@media[^{]*\{\s*\.agy-split/)
   })
 
@@ -415,5 +415,64 @@ describe('resolveSelectedAccountIndex', () => {
     const accountsNoActive = [view(0, false), view(1, false)]
     expect(resolveSelectedAccountIndex(accountsNoActive, 5)).toBe(1)
     expect(resolveSelectedAccountIndex(accountsNoActive, -1)).toBe(0)
+  })
+})
+
+describe('installAgyStyles', () => {
+  type FakeStyle = { id: string, textContent: string, remove: () => void }
+  // The fake's remove() must REALLY detach from headChildren: the defect this
+  // pins is a disposer that calls `.remove()`, and a no-op stub once let that
+  // exact implementation pass this suite.
+  function installFakeDocument() {
+    const headChildren: FakeStyle[] = []
+    const fakeDocument = {
+      head: { appendChild: (el: FakeStyle) => { headChildren.push(el) } },
+      getElementById: (id: string) => headChildren.find((el) => el.id === id) ?? null,
+      createElement: (): FakeStyle => {
+        const el: FakeStyle = {
+          id: '', textContent: '',
+          remove: () => {
+            const i = headChildren.indexOf(el)
+            if (i >= 0) headChildren.splice(i, 1)
+          },
+        }
+        return el
+      },
+    }
+    const origDoc = globalThis.document
+    // @ts-expect-error test stub
+    globalThis.document = fakeDocument
+    return { headChildren, restore: () => { globalThis.document = origDoc } }
+  }
+
+  it('retains the stylesheet across effect disposal', () => {
+    const { headChildren, restore } = installFakeDocument()
+    try {
+      const dispose = installAgyStyles()
+      expect(headChildren).toHaveLength(1)
+      // The disposer is a deliberate no-op: Cordis re-evaluates effects
+      // mid-session, and removal there stripped every .agy-* style.
+      dispose()
+      expect(headChildren).toHaveLength(1)
+    } finally {
+      restore()
+    }
+  })
+
+  it('installs once and refreshes stale content on reinstall', () => {
+    const { headChildren, restore } = installFakeDocument()
+    try {
+      installAgyStyles()
+      installAgyStyles()
+      expect(headChildren).toHaveLength(1)
+      const installed = headChildren[0]!.textContent
+      // Simulate a previous bundle's CSS surviving in the host document.
+      headChildren[0]!.textContent = 'stale'
+      installAgyStyles()
+      expect(headChildren).toHaveLength(1)
+      expect(headChildren[0]!.textContent).toBe(installed)
+    } finally {
+      restore()
+    }
   })
 })

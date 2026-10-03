@@ -1,9 +1,9 @@
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Context } from "@deepseek-ai/cordis";
 //#region src/web/plugin.d.ts
-export declare const name = "dsh-agy-web";
+declare const name = "dsh-agy-web";
 /** The one service every composition provides; the rest are resolved lazily. */
-export declare const inject: string[];
+declare const inject: string[];
 /** The slice of the host's web-server service this entry uses. */
 interface WebServerLike {
   register(route: {
@@ -29,7 +29,8 @@ interface WebServerLike {
  * @param requestedPort - `webStartup.port`, the `--port` flag if one was given.
  * @returns `http://<host>:<port>`, no trailing slash.
  */
-export declare function webBaseUrl(host: string, webServer: Pick<WebServerLike, 'port'>, requestedPort?: number): string;
-export declare function apply(ctx: Context): void;
+declare function webBaseUrl(host: string, webServer: Pick<WebServerLike, 'port'>, requestedPort?: number): string;
+declare function apply(ctx: Context): void;
 //#endregion
+export { apply, inject, name, webBaseUrl };
 //# sourceMappingURL=plugin.d.mts.map

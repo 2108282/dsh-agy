@@ -113,16 +113,16 @@ const CSS = `
   background: var(--dsw-alias-bg-layer-2, #f4f5f7);
 }
 /* Master/detail: the account list beside the selected account's detail, so a
- * row and the panel it opens stay in view together.
- *
- * The collapse MUST be a CONTAINER query, not a viewport one. This section
- * renders inside the Settings panel, which is ~600px wide even on a large
- * display, so the former @media (max-width: 720px) never fired: the split
- * stayed two-column everywhere and the 300px master column squeezed the detail
- * to ~280px. That is the reported symptom (the panel "feels too narrow"): the
- * account email truncated to "a1…" and the latency value wrapped onto three
- * lines. The measured constraint is the PANEL's width, so the query must follow
- * it.
+ * row and the panel it opens stay in view together — but only when the
+ * container can host both columns comfortably. The Settings panel gives the
+ * wrap ~564px of inline space on desktop (800px modal - 188px nav - 48px
+ * padding), so at the panel the split STACKS into one full-width column:
+ * 564px cannot host two comfortable columns, and a forced 300px master
+ * truncated every email to "a1…" while squeezing the detail to ~280px (the
+ * original "panel feels too narrow" report). The breakpoint therefore sits
+ * ABOVE the panel width and must stay there; if the host's modal geometry
+ * changes, re-measure before moving it. The query is a CONTAINER one because
+ * the former viewport @media (max-width: 720px) never fired inside the panel.
  *
  * The containment lives on a dedicated wrapper, NOT on .agy-root:
  * container-type: inline-size applies layout containment, which makes the
@@ -463,19 +463,22 @@ const CSS = `
 }
 `
 
-/** Install the stylesheet once (idempotent across plugin reloads). */
+/** Install the stylesheet once (idempotent across plugin reloads): a second
+ *  install never appends a duplicate, and one whose content has gone stale
+ *  (a previous bundle's CSS) is refreshed in place. The disposer is
+ *  deliberately a NO-OP — it runs on every Cordis effect re-evaluation, and
+ *  removing the element there stripped every .agy-* style mid-session; the
+ *  element is unique by id and inert once the section is gone. */
 export function installAgyStyles(): () => void {
   if (typeof document === 'undefined') return () => {}
-  if (document.getElementById(STYLE_ID) !== null) {
-    return () => {
-      document.getElementById(STYLE_ID)?.remove()
-    }
+  const existing = document.getElementById(STYLE_ID)
+  if (existing !== null) {
+    if (existing.textContent !== CSS) existing.textContent = CSS
+    return () => {}
   }
   const style = document.createElement('style')
   style.id = STYLE_ID
   style.textContent = CSS
   document.head.appendChild(style)
-  return () => {
-    document.getElementById(STYLE_ID)?.remove()
-  }
+  return () => {}
 }

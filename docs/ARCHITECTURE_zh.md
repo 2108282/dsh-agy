@@ -56,7 +56,7 @@
 | `adapter/models` | `listModels() / resolveModel(id)` | fetchAvailableModels 拉取 + 目录元数据合并 + 过滤 + 降级 | fixture |
 | `stats` | `UsageStats.record() / flush() / snapshot()` | 累计账本：热路径内存累加、加锁合并落盘、滚动天窗口、防御式解析 | 单测（假锁 + 假时钟） |
 | `model-visibility` | `ModelVisibility.disabledFor(provider) / setDisabled()` | 被隐藏模型黑名单，内存读取供每次目录过滤使用 | 单测 |
-| `proxy` | `normalizeProxyUrl(url) / proxyUrlForLogs(url) / isProxyUnreachableError(err) / dispatcherForAsync(url, {streaming}) / dispatcherOptsFor(streaming) / isProxyReachable(url) / proxiedFetch(input, init, {proxyUrl, streaming})` | URL 归一化（`socks://`→`socks5://`、`socks5h`→`socks5`、默认端口、`?family=`）、2s TCP fast-fail（健康 30s / 不健康 2s 缓存）、dispatcher 按调用类别缓存（`ProxyAgent` keepAlive:1、`SocksProxyAgent` 懒加载 via `socks-proxy-agent`）、loopback 强制直连、fail-closed（跳过账号不冷却）、落盘加密 + 脱敏展示（经 `store/accounts`）。两类调用：控制面（`bodyTimeout` 30s）与流式（`bodyTimeout` 0 —— 生成流在推理期间可合法静默数分钟，而 `bodyTimeout` 是逐*间隔*静默计时器，不是总时长预算） | 纯单元 + TCP 探测 stub |
+| `proxy` | `normalizeProxyUrl(url) / proxyUrlForLogs(url) / isProxyUnreachableError(err) / dispatcherForAsync(url, {streaming}) / dispatcherOptsFor(streaming) / isProxyReachable(url) / proxiedFetch(input, init, {proxyUrl, streaming})` | URL 归一化（`socks://`→`socks5://`、`socks5h`→`socks5`、默认端口、`?family=`）、2s TCP fast-fail（健康 30s / 不健康 2s 缓存）、dispatcher 按调用类别缓存（`ProxyAgent` keepAlive:1；SOCKS5 走 undici 自带的 socks 路径 —— 它会丢弃 dispatcher 选项，故两类调用在 SOCKS 上均为 undici 默认的 ~300s 逐间隔，且其原样转发 `username`/`password` 选项，因此传入解码后的 userinfo）、loopback 强制直连、fail-closed（跳过账号不冷却）、落盘加密 + 脱敏展示（经 `store/accounts`）。两类调用：控制面（`bodyTimeout` 30s）与流式（`bodyTimeout` 0 —— 生成流在推理期间可合法静默数分钟，而 `bodyTimeout` 是逐*间隔*静默计时器，不是总时长预算） | 纯单元 + TCP 探测 stub |
 
 ## 3. 薄壳（刻意浅，不抽象）
 
