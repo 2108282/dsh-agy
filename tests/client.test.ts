@@ -182,9 +182,13 @@ describe('usage table stylesheet', () => {
 
   it('sizes the master/detail split from the panel, not the viewport', () => {
     // Regression: the collapse used `@media (max-width: 720px)`, but this
-    // section renders inside a ~612px Settings panel (800px modal - 188px nav),
-    // so a 700px breakpoint never fired (available width is ~554px).
-    // The breakpoint must be a container query <= 500px (e.g. 480px) to trigger two columns on desktop.
+    // section renders inside the Settings panel — ~564px of inline space on
+    // desktop (800px modal - 188px nav - 48px padding) — so the 700px
+    // breakpoint never fired and the split stacked on every desktop. The
+    // breakpoint must stay a container query BELOW that panel width and ABOVE
+    // what the columns demand (210 + 260 + 12 gap = 482px): 490px today. If
+    // this ever fails because the host changed the modal, re-measure the real
+    // inline size instead of loosening the regex.
     expect(css).toMatch(/\.agy-split-wrap\s*\{[^}]*container-type:\s*inline-size/)
     expect(css).toMatch(/@container\s*\(min-width:\s*(?:4\d\d|500)px\)/)
     expect(css).not.toMatch(/@media[^{]*\{\s*\.agy-split/)
@@ -419,27 +423,60 @@ describe('resolveSelectedAccountIndex', () => {
 })
 
 describe('installAgyStyles', () => {
-  it('installs stylesheet once and retains it across effect disposal', () => {
-    const headChildren: Array<{ id: string, textContent: string }> = []
-    const fakeHead = {
-      appendChild: (el: { id: string, textContent: string }) => { headChildren.push(el) },
-    }
+  type FakeStyle = { id: string, textContent: string, remove: () => void }
+  // The fake's remove() must REALLY detach from headChildren: the defect this
+  // pins is a disposer that calls `.remove()`, and a no-op stub once let that
+  // exact implementation pass this suite.
+  function installFakeDocument() {
+    const headChildren: FakeStyle[] = []
     const fakeDocument = {
-      head: fakeHead,
+      head: { appendChild: (el: FakeStyle) => { headChildren.push(el) } },
       getElementById: (id: string) => headChildren.find((el) => el.id === id) ?? null,
-      createElement: (_tag: string) => ({ id: '', textContent: '', remove: () => {} }),
+      createElement: (): FakeStyle => {
+        const el: FakeStyle = {
+          id: '', textContent: '',
+          remove: () => {
+            const i = headChildren.indexOf(el)
+            if (i >= 0) headChildren.splice(i, 1)
+          },
+        }
+        return el
+      },
     }
     const origDoc = globalThis.document
+    // @ts-expect-error test stub
+    globalThis.document = fakeDocument
+    return { headChildren, restore: () => { globalThis.document = origDoc } }
+  }
+
+  it('retains the stylesheet across effect disposal', () => {
+    const { headChildren, restore } = installFakeDocument()
     try {
-      // @ts-expect-error test stub
-      globalThis.document = fakeDocument
       const dispose = installAgyStyles()
-      expect(fakeDocument.getElementById('dsh-agy-styles')).not.toBeNull()
-      // Disposer must NOT remove the style element (Cordis fiber re-evaluation must not drop styles)
+      expect(headChildren).toHaveLength(1)
+      // The disposer is a deliberate no-op: Cordis re-evaluates effects
+      // mid-session, and removal there stripped every .agy-* style.
       dispose()
-      expect(fakeDocument.getElementById('dsh-agy-styles')).not.toBeNull()
+      expect(headChildren).toHaveLength(1)
     } finally {
-      globalThis.document = origDoc
+      restore()
+    }
+  })
+
+  it('installs once and refreshes stale content on reinstall', () => {
+    const { headChildren, restore } = installFakeDocument()
+    try {
+      installAgyStyles()
+      installAgyStyles()
+      expect(headChildren).toHaveLength(1)
+      const installed = headChildren[0]!.textContent
+      // Simulate a previous bundle's CSS surviving in the host document.
+      headChildren[0]!.textContent = 'stale'
+      installAgyStyles()
+      expect(headChildren).toHaveLength(1)
+      expect(headChildren[0]!.textContent).toBe(installed)
+    } finally {
+      restore()
     }
   })
 })
