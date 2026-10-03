@@ -181,16 +181,12 @@ describe('usage table stylesheet', () => {
   })
 
   it('sizes the master/detail split from the panel, not the viewport', () => {
-    // Regression: the collapse used `@media (max-width: 720px)`, but this
-    // section renders inside the Settings panel — ~564px of inline space on
-    // desktop (800px modal - 188px nav - 48px padding) — so the 700px
-    // breakpoint never fired and the split stacked on every desktop. The
-    // breakpoint must stay a container query BELOW that panel width and ABOVE
-    // what the columns demand (210 + 260 + 12 gap = 482px): 490px today. If
-    // this ever fails because the host changed the modal, re-measure the real
-    // inline size instead of loosening the regex.
+    // Pins the constraint recorded on .agy-split in src/client/styles.ts: a
+    // CONTAINER query (the former viewport @media never fired inside the
+    // ~564px panel) whose breakpoint stays ABOVE the panel width — at the
+    // panel the split stacks by measurement; re-measure before moving it.
     expect(css).toMatch(/\.agy-split-wrap\s*\{[^}]*container-type:\s*inline-size/)
-    expect(css).toMatch(/@container\s*\(min-width:\s*(?:4\d\d|500)px\)/)
+    expect(css).toMatch(/@container\s*\(min-width:\s*700px\)/)
     expect(css).not.toMatch(/@media[^{]*\{\s*\.agy-split/)
   })
 
