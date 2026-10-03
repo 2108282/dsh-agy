@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
 import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText, truncateIdentity } from '../src/client/index.ts'
+import { installAgyStyles } from '../src/client/styles.ts'
 import { en, zh } from '../src/client/locales.ts'
 import { zeroCounters } from '../src/usage-types.ts'
 import type { AccountView, ModelView } from '../src/rpc-contract.ts'
@@ -181,12 +182,11 @@ describe('usage table stylesheet', () => {
 
   it('sizes the master/detail split from the panel, not the viewport', () => {
     // Regression: the collapse used `@media (max-width: 720px)`, but this
-    // section renders inside a ~600px Settings panel, so the query never fired
-    // and the 320px master column squeezed the detail to ~270px on every
-    // desktop. The breakpoint must be a CONTAINER query — the measured
-    // constraint is the panel's inline size.
+    // section renders inside a ~612px Settings panel (800px modal - 188px nav),
+    // so a 700px breakpoint never fired (available width is ~554px).
+    // The breakpoint must be a container query <= 500px (e.g. 480px) to trigger two columns on desktop.
     expect(css).toMatch(/\.agy-split-wrap\s*\{[^}]*container-type:\s*inline-size/)
-    expect(css).toMatch(/@container\s*\(min-width:[^)]*\)/)
+    expect(css).toMatch(/@container\s*\(min-width:\s*(?:4\d\d|500)px\)/)
     expect(css).not.toMatch(/@media[^{]*\{\s*\.agy-split/)
   })
 
@@ -415,5 +415,31 @@ describe('resolveSelectedAccountIndex', () => {
     const accountsNoActive = [view(0, false), view(1, false)]
     expect(resolveSelectedAccountIndex(accountsNoActive, 5)).toBe(1)
     expect(resolveSelectedAccountIndex(accountsNoActive, -1)).toBe(0)
+  })
+})
+
+describe('installAgyStyles', () => {
+  it('installs stylesheet once and retains it across effect disposal', () => {
+    const headChildren: Array<{ id: string, textContent: string }> = []
+    const fakeHead = {
+      appendChild: (el: { id: string, textContent: string }) => { headChildren.push(el) },
+    }
+    const fakeDocument = {
+      head: fakeHead,
+      getElementById: (id: string) => headChildren.find((el) => el.id === id) ?? null,
+      createElement: (_tag: string) => ({ id: '', textContent: '', remove: () => {} }),
+    }
+    const origDoc = globalThis.document
+    try {
+      // @ts-expect-error test stub
+      globalThis.document = fakeDocument
+      const dispose = installAgyStyles()
+      expect(fakeDocument.getElementById('dsh-agy-styles')).not.toBeNull()
+      // Disposer must NOT remove the style element (Cordis fiber re-evaluation must not drop styles)
+      dispose()
+      expect(fakeDocument.getElementById('dsh-agy-styles')).not.toBeNull()
+    } finally {
+      globalThis.document = origDoc
+    }
   })
 })
