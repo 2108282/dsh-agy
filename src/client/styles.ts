@@ -108,22 +108,16 @@ const CSS = `
   background: var(--dsw-alias-bg-layer-2, #f4f5f7);
 }
 /* Master/detail: the account list beside the selected account's detail, so a
- * row and the panel it opens stay in view together.
- *
- * The collapse MUST be a CONTAINER query, not a viewport one. The former
- * @media (max-width: 720px) never fired inside the Settings panel, so the
- * split stayed two-column on every desktop and a fixed 300px master column
- * squeezed the detail to ~280px: the account email truncated to "a1…" and the
- * latency value wrapped onto three lines (the reported "panel feels too
- * narrow"). The measured constraint is the PANEL's width — ~564px of inline
- * space on desktop (800px modal - 188px nav - 48px padding) — so the query
- * must follow it. The first breakpoint (700px) overcorrected: it never fired
- * either, so the split stacked everywhere and the opened detail fell below
- * the fold — the regression the split exists to prevent. Two columns are safe
- * at the real width because the master column now yields — minmax(210px, …),
- * ≈240px here — and .agy-rowitem wraps its action cluster instead of
- * squeezing the email. The breakpoint must ALSO stay above what the columns
- * demand (210 + 260 + 12 gap = 482px), or the grid overflows at the trigger.
+ * row and the panel it opens stay in view together — but only when the
+ * container can host both columns comfortably. The Settings panel gives the
+ * wrap ~564px of inline space on desktop (800px modal - 188px nav - 48px
+ * padding), so at the panel the split STACKS into one full-width column:
+ * 564px cannot host two comfortable columns, and a forced 300px master
+ * truncated every email to "a1…" while squeezing the detail to ~280px (the
+ * original "panel feels too narrow" report). The breakpoint therefore sits
+ * ABOVE the panel width and must stay there; if the host's modal geometry
+ * changes, re-measure before moving it. The query is a CONTAINER one because
+ * the former viewport @media (max-width: 720px) never fired inside the panel.
  *
  * The containment lives on a dedicated wrapper, NOT on .agy-root:
  * container-type: inline-size applies layout containment, which makes the
@@ -133,8 +127,8 @@ const CSS = `
  */
 .agy-split-wrap { container-type: inline-size; }
 .agy-split { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
-@container (min-width: 490px) {
-  .agy-split { grid-template-columns: minmax(210px, 1fr) minmax(260px, 1.4fr); }
+@container (min-width: 700px) {
+  .agy-split { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); }
 }
 /* Cap the master list so a large pool cannot push the detail it opens below the
    fold — the reason the split exists at all. Scoped to the split: the Models tab
