@@ -25,19 +25,21 @@
 const STYLE_ID = 'dsh-agy-styles'
 
 const CSS = `
-.agy-root { display: flex; flex-direction: column; gap: 12px; font: var(--dsw-font-xs-13); }
-.agy-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.agy-root { display: flex; flex-direction: column; gap: 12px; font: var(--dsw-font-xs-13); max-width: 100%; min-width: 0; box-sizing: border-box; }
+.agy-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; flex-wrap: wrap; }
 .agy-title { font: var(--dsw-font-base-strong-16); color: var(--dsw-alias-label-primary, #1f2329); }
 .agy-sub { margin-top: 3px; font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary, #8f959e); }
 
 .agy-tabs {
   display: flex; align-items: flex-end; gap: 22px; margin-top: 2px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2, #eef0f3);
+  max-width: 100%; overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap;
 }
+.agy-tabs::-webkit-scrollbar { display: none; }
 .agy-tab {
   position: relative; border: 0; padding: 7px 1px 9px; background: transparent;
   color: var(--dsw-alias-label-tertiary, #8f959e);
-  font: var(--dsw-font-xs-13); cursor: pointer;
+  font: var(--dsw-font-xs-13); cursor: pointer; flex: none; white-space: nowrap;
 }
 .agy-tab:hover, .agy-tab[data-active="true"] { color: var(--dsw-alias-label-primary, #1f2329); }
 /* Active tab is an underline rule, matching the Plugins settings section's own
@@ -81,21 +83,24 @@ const CSS = `
   border-radius: 12px;
   background: var(--dsw-alias-bg-layer-3, #fff);
   overflow: hidden;
+  min-width: 0;
+  box-sizing: border-box;
 }
 .agy-card-head {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 10px 12px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l1, rgba(0,0,0,.04));
   background: var(--dsw-alias-bg-layer-2, #f9fafb);
+  min-width: 0;
 }
-.agy-card-title { font: var(--dsw-font-xs-strong-13); color: var(--dsw-alias-label-primary, #1f2329); }
-.agy-card-body { padding: 6px 12px 8px; }
+.agy-card-title { font: var(--dsw-font-xs-strong-13); color: var(--dsw-alias-label-primary, #1f2329); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agy-card-body { padding: 6px 12px 8px; min-width: 0; box-sizing: border-box; }
 
 /* ── Rows inside a card ────────────────────────────────────────────────────
    Follows DSH's own list-row convention (ui-sidebar .panelRow): a 12px-radius
    rounded rect inset 2px from the card edge and transparent at rest. A
    full-bleed rectangle reads as a slab and fights the card's own radius. */
-.agy-rows { display: flex; flex-direction: column; gap: 2px; }
+.agy-rows { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 /* The live line: one status strip above the rows, present ONLY while upstream
    requests are in flight — an idle pool renders no strip, so quiet stays quiet.
    The pulsing dot is the host StateDot primitive ('ongoing'), so the animation
@@ -125,28 +130,27 @@ const CSS = `
  * Tooltip (used by the thinking-budget fields) positions its bubble with
  * position: fixed. Scoping it here keeps that behaviour intact.
  */
-.agy-split-wrap { container-type: inline-size; }
-.agy-split { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
+.agy-split-wrap { container-type: inline-size; max-width: 100%; min-width: 0; }
+.agy-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; min-width: 0; }
 @container (min-width: 700px) {
   .agy-split { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); }
 }
 /* Cap the master list so a large pool cannot push the detail it opens below the
    fold — the reason the split exists at all. Scoped to the split: the Models tab
    shares .agy-rows for its own long list and must keep growing freely. */
-.agy-split .agy-rows { max-height: 300px; overflow-y: auto; }
+.agy-split .agy-rows { max-height: 190px; overflow-y: auto; }
 .agy-rowitem {
-  /* Flex-wrap, NOT the former grid-template-columns: minmax(0,1fr) auto.
-     A grid's 1fr may shrink to zero, so the identity column yielded all its
-     width to the action cluster: at the 300px master column the row's ~167px of
-     state badge + Verify/Delete left ~45px for the email (which needs ~177px),
-     truncating every address to "a1…" even though the row had room to grow
-     downward. With a flex BASIS the actions wrap to a second line instead of
-     squeezing the name, and margin-left: auto keeps them right-aligned on the
-     same line whenever they do fit. */
-  display: flex; flex-wrap: wrap;
-  align-items: center; gap: 4px 12px;
-  margin: 0 2px; padding: 10px 8px; box-sizing: border-box;
-  min-height: 36px; border-radius: 12px; background: transparent;
+  display: flex;
+  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin: 0 2px;
+  padding: 10px 8px;
+  box-sizing: border-box;
+  min-height: auto;
+  border-radius: 12px;
+  background: transparent;
 }
 .agy-rowitem[data-clickable="true"] { cursor: pointer; }
 .agy-rowitem[data-clickable="true"]:hover {
@@ -159,8 +163,20 @@ const CSS = `
   outline: 2px solid var(--dsw-alias-label-primary, #1f2329);
   outline-offset: -2px;
 }
-.agy-rowmain { min-width: 0; flex: 1 1 160px; display: flex; flex-direction: column; gap: 3px; }
-.agy-rowtitle { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.agy-rowmain {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.agy-rowtitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  min-width: 0;
+}
 .agy-rowname {
   font: var(--dsw-font-xs-strong-13); color: var(--dsw-alias-label-primary, #1f2329);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -169,13 +185,37 @@ const CSS = `
   font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary, #8f959e);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* margin-left: auto right-aligns the cluster while it shares a line with the
-   identity, and becomes inert once flex-wrap moves it to its own line. */
-.agy-rowactions { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
+/* Actions cluster: clean second row with full width, never gets pushed off screen */
+.agy-rowactions, .agy-rowbtns {
+  display: flex !important;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+  margin-left: 0;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
 .agy-state { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 
-.agy-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.agy-actions > :first-child:not(button) { flex: 1; min-width: 150px; }
+.agy-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.agy-actions > button,
+.agy-actions > [class*="button"] {
+  flex: 1 1 calc(50% - 6px);
+  min-width: 90px;
+  justify-content: center;
+  white-space: nowrap;
+}
+.agy-actions > :first-child:not(button) {
+  flex: 1 1 100%;
+  min-width: 100%;
+}
 .agy-detail { display: flex; flex-direction: column; gap: 12px; }
 
 /* ── Metric strip ────────────────────────────────────────────────────────── */
@@ -389,6 +429,38 @@ const CSS = `
   color: var(--dsw-alias-label-primary, #1f2329); background: var(--dsw-alias-bg-layer-1, #fff);
   border: 0.5px solid var(--dsw-alias-border-l2, #eef0f3); border-radius: 8px; }
 .agy-textarea:focus { border-color: var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6); }
+
+/* ── Mobile responsiveness (<= 768px) ─────────────────────────────────── */
+@media (max-width: 768px) {
+  .agy-head { gap: 8px; flex-wrap: wrap; }
+  .agy-tabs { gap: 16px; margin-top: 0; }
+  .agy-split .agy-rows { max-height: 180px; overflow-y: auto; }
+  .agy-actions > button,
+  .agy-actions > [class*="button"] {
+    flex: 1 1 calc(50% - 6px) !important;
+    min-width: 90px !important;
+  }
+  .agy-defs {
+    grid-template-columns: 80px minmax(0, 1fr) !important;
+  }
+  .agy-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+  .agy-compose-row {
+    grid-template-columns: 56px minmax(0, 1fr) 48px 36px !important;
+    gap: 6px !important;
+  }
+  .agy-thinking-row {
+    grid-template-columns: 60px minmax(0, 1fr) !important;
+    gap: 8px !important;
+  }
+  .agy-thinking-chips {
+    grid-column: 1 / -1 !important;
+    margin-top: 4px !important;
+    flex-wrap: wrap !important;
+  }
+}
 `
 
 /** Install the stylesheet once (idempotent across plugin reloads): a second

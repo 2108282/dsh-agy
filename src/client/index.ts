@@ -855,8 +855,9 @@ function AccountsTab(props: {
   // this component's hook count between renders, desyncing React and throwing
   // React error #310 (white-screen).
   useEffect(() => {
+    if (selected === null) return
     selectedRef.current?.scrollIntoView?.({ block: 'nearest' })
-  }, [index])
+  }, [index, selected])
 
   if (accounts.length === 0) {
     return card(t('colAccount'), h('div', { className: 'agy-empty' }, t('emptyAccounts')))
@@ -898,7 +899,7 @@ function AccountsTab(props: {
         account.usage === null || account.usage.lastUsedAt === null
           ? null
           : ` · ${t('lastActive', { ago: agoText(new Date(account.usage.lastUsedAt).toISOString(), t, now) })}`)),
-  h('div', { className: 'agy-rowactions' },
+  h('div', { className: 'agy-rowactions agy-rowbtns' },
     stateBadge(account.state, account.state === 'cooling'
       ? `${t('coolingUntil')} ${clockTime(account.cooldownUntil, props.lang)}`
       : account.state === 'verification-required'
