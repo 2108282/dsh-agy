@@ -119,6 +119,78 @@ export function clearExpiredState(account: ManagedAccount, now = Date.now()): vo
     // it behind would let a stale timestamp pair with a future cooldown.
     account.cooldownSetAt = undefined
   }
+  // Self-healing: if an account is flagged quota-exhausted but its measured quota
+  // proves healthy remaining headroom across all windows, clear the false-positive cooldown.
+  if (account.cooldownReason === 'quota-exhausted' && hasHealthyCachedQuota(account, now)) {
+    account.coolingDownUntil = undefined
+    account.cooldownReason = undefined
+    account.cooldownSetAt = undefined
+  }
+}
+
+/**
+ * Whether an account's cached quota (cachedLimits or cachedQuota) proves
+ * that the account has healthy remaining headroom, meaning a quota-exhausted
+ * label is almost certainly a false positive from a transient 429.
+ */
+export function hasHealthyCachedQuota(account: ManagedAccount, now = Date.now()): boolean {
+  if (account.cachedLimits?.groups && account.cachedLimits.groups.length > 0) {
+    let checkedWindows = 0
+    let hasDrainedWindow = false
+
+    for (const group of account.cachedLimits.groups) {
+      for (const w of group.windows) {
+        const resetAt = w.resetTime ? Date.parse(w.resetTime) : NaN
+        const isLive = Number.isNaN(resetAt) || resetAt > now
+        if (!isLive) continue
+
+        const wKind = w.window?.toLowerCase()
+        if (wKind === '5h' && typeof w.remainingFraction === 'number') {
+          checkedWindows++
+          if (w.remainingFraction < SOFT_QUOTA_THRESHOLD) {
+            hasDrainedWindow = true
+          }
+        } else if (wKind === 'weekly' && typeof w.remainingFraction === 'number') {
+          checkedWindows++
+          if (w.remainingFraction <= WEEKLY_QUOTA_THRESHOLD) {
+            hasDrainedWindow = true
+          }
+        }
+      }
+    }
+    if (checkedWindows > 0 && !hasDrainedWindow) return true
+  }
+
+  if (account.cachedQuota && Object.keys(account.cachedQuota).length > 0) {
+    let checkedFamilies = 0
+    let hasDrainedFamily = false
+
+    for (const q of Object.values(account.cachedQuota)) {
+      if (typeof q.remainingFraction === 'number') {
+        const resetAt = q.resetTime ? Date.parse(q.resetTime) : NaN
+        const isLive = Number.isNaN(resetAt) || resetAt > now
+        if (isLive) {
+          checkedFamilies++
+          if (q.remainingFraction < SOFT_QUOTA_THRESHOLD) {
+            hasDrainedFamily = true
+          }
+        }
+      }
+      if (typeof q.weeklyFraction === 'number') {
+        const resetAt = q.weeklyResetTime ? Date.parse(q.weeklyResetTime) : NaN
+        const isLive = Number.isNaN(resetAt) || resetAt > now
+        if (isLive) {
+          checkedFamilies++
+          if (q.weeklyFraction <= WEEKLY_QUOTA_THRESHOLD) {
+            hasDrainedFamily = true
+          }
+        }
+      }
+    }
+    if (checkedFamilies > 0 && !hasDrainedFamily) return true
+  }
+
+  return false
 }
 
 /** 24h cooldown for a fully exhausted daily quota (single-account: stop hitting the wall). */
@@ -172,9 +244,16 @@ export function decideRotation(
         return { action: 'retry', backoffMs: Math.min(retryAfterMs ?? backoffMs, 3000) }
       }
       if (category === 'quota_exhausted') {
+        const resetMs = parseFutureResetMs(resetTime, now)
+        // Guard against false-positive quota exhaustion from transient upstream 429s:
+        // if no future reset time was given by the server and recent measured quota shows
+        // healthy headroom, treat as transient rate limit (rotate to next account, no 24h lockout).
+        if (resetMs === undefined && hasHealthyCachedQuota(account, now)) {
+          const cooldownMs = retryAfterMs ?? RATE_LIMIT_COOLDOWN_MS
+          return { action: 'rotate', backoffMs: Math.max(cooldownMs, 1000) }
+        }
         // Daily/plan quota gone: cool until the real reset when the backend
         // reported one (capped at 24h), else the fixed daily window.
-        const resetMs = parseFutureResetMs(resetTime, now)
         const cooldownMs = resetMs !== undefined
           ? Math.min(resetMs - now, FULL_QUOTA_COOLDOWN_MS)
           : FULL_QUOTA_COOLDOWN_MS
