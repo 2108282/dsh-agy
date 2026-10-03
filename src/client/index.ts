@@ -711,6 +711,56 @@ export function resolveSelectedAccountIndex(
   return activePos >= 0 ? activePos : 0
 }
 
+function PreferencesCard(props: {
+  rpc: AgyRpcClient
+  t: T
+  onBadgePrefChange?: (enabled: boolean) => void
+}): ReactNode {
+  const { rpc, t, onBadgePrefChange } = props
+  const [badgeEnabled, setBadgeEnabled] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    void rpc.call('ui.prefs.get', {}).then((prefs) => {
+      if (active) {
+        setBadgeEnabled(prefs?.conversationBadge === true)
+        setLoading(false)
+      }
+    }).catch(() => {
+      if (active) setLoading(false)
+    })
+    return () => { active = false }
+  }, [rpc])
+
+  const toggleBadge = useCallback(async (checked: boolean) => {
+    setSaving(true)
+    setBadgeEnabled(checked)
+    try {
+      const res = await rpc.call('ui.prefs.set', { conversationBadge: checked })
+      setBadgeEnabled(res.conversationBadge)
+      onBadgePrefChange?.(res.conversationBadge)
+    } catch {
+      setBadgeEnabled(!checked)
+    } finally {
+      setSaving(false)
+    }
+  }, [rpc, onBadgePrefChange])
+
+  return card(t('preferencesTitle'),
+    h('div', { className: 'agy-pref-row' },
+      h('div', { className: 'agy-pref-info' },
+        h('div', { className: 'agy-pref-name' }, t('prefConversationBadge')),
+        h('div', { className: 'agy-pref-desc' }, t('prefConversationBadgeDesc'))),
+      h(Switch, {
+        label: t('prefConversationBadge'),
+        checked: badgeEnabled,
+        disabled: loading || saving,
+        onChange: (checked: boolean) => void toggleBadge(checked),
+      })))
+}
+
 function AccountsTab(props: {
   accounts: AccountView[]
   busy: boolean
@@ -722,6 +772,7 @@ function AccountsTab(props: {
   /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
   lang?: string
   t: T
+  onBadgePrefChange?: (enabled: boolean) => void
 }): ReactNode {
   const { accounts, busy, handlers, t } = props
   const [selected, setSelected] = useState<number | null>(null)
@@ -853,7 +904,8 @@ function AccountsTab(props: {
           })),
     // The "what just happened" list, under the split: it is pool-level
     // activity, not one account's, and the split owns the full height.
-    h(RecentCard, { rpc: props.rpc, t })))
+    h(RecentCard, { rpc: props.rpc, t }),
+    h(PreferencesCard, { rpc: props.rpc, t, onBadgePrefChange: props.onBadgePrefChange })))
 }
 
 /**
@@ -1689,7 +1741,12 @@ function CredentialsTab(props: {
 // ─── root ────────────────────────────────────────────────────────────────────
 
 /** The Settings section body. */
-export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): ReactNode {
+export function AgySettings(props: {
+  rpc: AgyRpcClient
+  t: T
+  lang?: string
+  onBadgePrefChange?: (enabled: boolean) => void
+}): ReactNode {
   const { rpc, t } = props
   useEffect(() => {
     installAgyStyles()
@@ -2097,7 +2154,7 @@ export function AgySettings(props: { rpc: AgyRpcClient, t: T, lang?: string }): 
     }, label, count === undefined ? null : h('span', { className: 'agy-count' }, String(count)))
 
   const body = tab === 'accounts'
-    ? h(AccountsTab, { accounts, busy, busyNow: poolBusy, handlers, lang: props.lang, rpc, t })
+    ? h(AccountsTab, { accounts, busy, busyNow: poolBusy, handlers, lang: props.lang, rpc, t, onBadgePrefChange: props.onBadgePrefChange })
     : tab === 'models'
       ? modelError === undefined
         ? h(ModelsTab, {
@@ -2270,22 +2327,49 @@ export function apply(ctx: ClientContext): void {
   // `getLocale`: undefined then degrades to the browser default, which is the
   // pre-`lang` behaviour, not a crash.
   const lang = ctx.locale.getLocale?.().active
+  let badgeDisposer: (() => void) | null = null
+
+  const registerBadge = (): void => {
+    if (badgeDisposer !== null) return
+    badgeDisposer = ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+      name: 'conversation.session.header.actions',
+      id: 'agy-quota-badge',
+      order: 8,
+      label: () => t('title'),
+    }, () => h(AgyQuotaBadge, { rpc, t })))
+  }
+
+  const unregisterBadge = (): void => {
+    if (badgeDisposer !== null) {
+      badgeDisposer()
+      badgeDisposer = null
+    }
+  }
+
+  // Opt-in: only register when user preference has enabled the badge
+  void rpc.call('ui.prefs.get', {}).then((prefs) => {
+    if (prefs?.conversationBadge) {
+      registerBadge()
+    }
+  }).catch(() => {})
+
+  const onBadgePrefChange = (enabled: boolean): void => {
+    if (enabled) {
+      registerBadge()
+    } else {
+      unregisterBadge()
+    }
+  }
+
   ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'agy',
     order: 30,
     locale: NS,
     label: () => t('title'),
-  }, () => h(AgySettings, { rpc, t, lang }))), 'dsh-agy: Settings section')
-// The badge is a SECOND registration on the same services, not a second
-  // entrypoint: it needs the slot registry it already injects, and the same RPC
-  // client. Its own slot is the session header, so it renders outside Settings
-  // and must not depend on that panel ever being opened.
-  ctx.effect(() => ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
-    name: 'conversation.session.header.actions',
-    id: 'agy-quota-badge',
-    order: 8,
-    label: () => t('title'),
-  }, () => h(AgyQuotaBadge, { rpc, t }))), 'dsh-agy: quota badge')
+  }, () => h(AgySettings, { rpc, t, lang, onBadgePrefChange }))), 'dsh-agy: Settings section')
 
+  ctx.effect(() => () => {
+    unregisterBadge()
+  }, 'dsh-agy: quota badge cleanup')
 }

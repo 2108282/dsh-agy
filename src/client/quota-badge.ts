@@ -36,9 +36,9 @@ import type { AccountView, AgyRpcClient } from '../rpc-contract.ts'
 import type { QuotaWindow } from '../types.ts'
 
 /**
- * How often the badge re-reads the pool (2 minutes).
+ * Minimum throttle between automated re-fetches (2 minutes).
  */
-const REFRESH_INTERVAL_MS = 120_000
+const AUTO_REFRESH_THROTTLE_MS = 120_000
 
 /**
  * Grace period before hover close (250ms).
@@ -46,71 +46,18 @@ const REFRESH_INTERVAL_MS = 120_000
 const HOVER_CLOSE_DELAY_MS = 250
 
 /**
+ * Mobile layout breakpoint (aligned with styles.ts media query).
+ */
+export const MOBILE_BREAKPOINT_PX = 640
+
+/**
  * Quota bar and percentage color for a window.
  * Strictly unified with upstream Settings panel via quotaColor(percent / 100).
  * Thresholds: >70% success green, 30%-70% warning amber, <30% error red.
  */
-function quotaColorForWindow(_window: string, percent: number | null): string {
-  if (percent === null) return 'var(--dsw-alias-label-tertiary, #64748b)'
+function quotaColorForWindow(percent: number | null): string {
+  if (percent === null) return 'var(--dsw-alias-label-tertiary, #8f959e)'
   return quotaColor(percent / 100)
-}
-
-function groupTag(title: string): string {
-  if (/gemini/i.test(title)) return 'Google'
-  if (/3p|claude|gpt|anthropic|openai/i.test(title)) return 'Claude + GPT'
-  return 'Antigravity'
-}
-
-/**
- * Format window reset time using i18n dictionary keys:
- * - 5h window: e.g. "3h 15m" / "45m"
- * - daily/weekly window: full date + countdown: "MM/DD HH:mm (6d 2h later)" / "(3d later)" / "(45m later)"
- */
-function formatWindowReset(window: string, resetTime: string | null | undefined, t: QuotaTranslate, now: number = Date.now()): string | null {
-  if (!resetTime) return null
-  const resetDate = new Date(resetTime)
-  const diffMs = resetDate.getTime() - now
-
-  if (diffMs <= 0) {
-    return t('quotaResetPassed')
-  }
-
-  const diffMins = Math.floor(diffMs / (60 * 1000))
-  const diffHours = Math.floor(diffMins / 60)
-  const diffDays = Math.floor(diffHours / 24)
-
-  if (window === '5h') {
-    if (diffHours > 0) {
-      const remainingMins = diffMins % 60
-      return t('badgeReset5hHoursMins', { hours: diffHours, mins: remainingMins })
-    }
-    return t('badgeReset5hMins', { mins: Math.max(1, diffMins) })
-  }
-
-  let countdown = ''
-  if (diffDays > 0) {
-    const remainingHours = diffHours % 24
-    countdown = remainingHours > 0
-      ? t('badgeCountdownDaysHours', { days: diffDays, hours: remainingHours })
-      : t('badgeCountdownDays', { days: diffDays })
-  } else if (diffHours > 0) {
-    countdown = t('badgeCountdownHours', { hours: diffHours })
-  } else {
-    countdown = t('badgeCountdownMins', { mins: Math.max(1, diffMins) })
-  }
-
-  const month = resetDate.getMonth() + 1
-  const day = resetDate.getDate()
-  const hours = resetDate.getHours().toString().padStart(2, '0')
-  const minutes = resetDate.getMinutes().toString().padStart(2, '0')
-  const timeStr = `${hours}:${minutes}`
-
-  return t('badgeResetFullDate', {
-    month,
-    day,
-    time: timeStr,
-    countdown,
-  })
 }
 
 interface EnrichedWindow {
@@ -125,7 +72,6 @@ interface EnrichedWindow {
 interface EnrichedCard {
   key: string
   title: string
-  badgeTag: string
   windows: EnrichedWindow[]
 }
 
@@ -140,7 +86,6 @@ function renderWindow(
     {
       key: window.bucketId,
       className: 'agy-ui-limit-row',
-      style: index > 0 ? { marginTop: '5px' } : undefined,
     },
     h(
       'div',
@@ -191,6 +136,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const [isPinned, setIsPinned] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
   const [now, setNow] = useState(() => Date.now())
+  const [error, setError] = useState<string | null>(null)
 
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -201,7 +147,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   useEffect(() => {
     installAgyStyles()
     const checkMobile = () => {
-      setIsMobile(typeof window !== 'undefined' && window.innerWidth <= 640)
+      setIsMobile(typeof window !== 'undefined' && window.innerWidth <= MOBILE_BREAKPOINT_PX)
     }
     checkMobile()
     window.addEventListener('resize', checkMobile)
@@ -210,7 +156,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
 
   const load = useCallback(async (isManual: boolean = false) => {
     const currentNow = Date.now()
-    if (!isManual && lastFetchTimeRef.current > 0 && currentNow - lastFetchTimeRef.current < 120_000 - 1_000) {
+    if (!isManual && lastFetchTimeRef.current > 0 && currentNow - lastFetchTimeRef.current < AUTO_REFRESH_THROTTLE_MS - 1_000) {
       return
     }
     lastFetchTimeRef.current = currentNow
@@ -220,6 +166,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     try {
       const listed = await rpc.call('account.list', {})
       setAccounts(listed.accounts)
+      setError(null)
 
       const probe = shouldProbeLimits({ force: isManual, failedAt: failedAtRef.current, now: Date.now() })
       if (probe !== 'off') {
@@ -234,7 +181,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         failedAtRef.current = limits.measured === 0 && limits.failed > 0 ? Date.now() : null
       }
     } catch (err) {
-      console.warn('[dsh-agy] quota refresh failed:', err)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
       setNow(Date.now())
@@ -246,16 +193,12 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
 
   useEffect(() => {
     void load(false)
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'hidden') void load(false)
-    }, REFRESH_INTERVAL_MS)
     const onWake = (): void => {
       if (document.visibilityState !== 'hidden') void load(false)
     }
     window.addEventListener('focus', onWake)
     document.addEventListener('visibilitychange', onWake)
     return () => {
-      window.clearInterval(timer)
       window.removeEventListener('focus', onWake)
       document.removeEventListener('visibilitychange', onWake)
       if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
@@ -333,41 +276,24 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const dotState = rawDot === 'done' ? 'active' : rawDot === 'warning' ? 'cooling' : 'disabled'
   const badgeQuota = pickBadgeQuota(accounts, now)
   const badgeWindow = badgeQuota?.window && badgeQuota.window !== '5h' ? `${windowLabel(badgeQuota.window, t)} ` : ''
-  const displayText = badgeQuota !== null ? `AGY · ${badgeWindow}${badgeQuota.percent}%` : `AGY ✦ ${accountCount}`
-
-  // Map limits groups to get real window type & raw resetTime
-  const rawWindowMap = new Map<string, QuotaWindow>()
-  if (activeAccount?.limits) {
-    for (const group of activeAccount.limits) {
-      for (const w of group.windows) {
-        rawWindowMap.set(`${group.name}:${w.window}`, w)
-      }
-    }
-  }
+  const displayText = badgeQuota !== null
+    ? (badgeWindow !== ''
+        ? t('badgeWindowQuotaFormat', { window: badgeWindow, percent: badgeQuota.percent })
+        : t('badgeQuotaFormat', { percent: badgeQuota.percent }))
+    : t('badgeCountFormat', { count: accountCount })
 
   const rawCards = buildQuotaCards(activeAccount, t, now)
   const cards: EnrichedCard[] = rawCards.map((rc) => ({
     key: rc.key,
     title: rc.title,
-    badgeTag: groupTag(rc.title),
-    windows: rc.windows.map((w) => {
-      const windowType = w.bucketId === '5h' || w.bucketId === 'weekly' || w.bucketId === 'daily' || w.bucketId === 'monthly'
-        ? w.bucketId
-        : (w.bucketId.includes('week') ? 'weekly' : '5h')
-      const matchedLimit = rawWindowMap.get(`${rc.title}:${windowType}`)
-      const exactReset = matchedLimit?.resetTime
-        ? formatWindowReset(windowType, matchedLimit.resetTime, t, now)
-        : w.reset
-
-      return {
-        bucketId: w.bucketId,
-        label: w.label,
-        percent: w.percent,
-        color: quotaColorForWindow(windowType, w.percent),
-        reset: exactReset,
-        stale: w.stale,
-      }
-    }),
+    windows: rc.windows.map((w) => ({
+      bucketId: w.bucketId,
+      label: w.label,
+      percent: w.percent,
+      color: quotaColorForWindow(w.percent),
+      reset: w.reset,
+      stale: w.stale,
+    })),
   }))
   const limitsAge = activeAccount?.limitsUpdatedAt
     ? agoText(new Date(activeAccount.limitsUpdatedAt).toISOString(), t, now)
@@ -391,7 +317,6 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
                 top: `${anchored.top}px`,
                 left: `${anchored.left}px`,
                 visibility: 'visible' as const,
-                zIndex: 999999,
               })
         : undefined,
       onMouseEnter: handleMouseEnterPopover,
@@ -503,7 +428,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         : h(
             'div',
             { className: 'agy-ui-account-card' },
-            h('div', { className: 'agy-ui-account-email', style: { color: 'var(--dsw-alias-label-tertiary, #94a3b8)' } }, t('badgeNoAccount')),
+            h('div', { className: 'agy-ui-account-email', style: { color: 'var(--dsw-alias-label-tertiary, #8f959e)' } }, error ?? t('badgeNoAccount')),
           ),
 
       activeAccount?.verificationRequired && activeAccount?.verificationUrl
@@ -533,19 +458,14 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
           h(
             'div',
             { className: 'agy-ui-quota-header' },
-            h(
-              'div',
-              { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
-              h('span', { className: 'agy-ui-model-name' }, card.title),
-              h(Tag, { tone: 'outline', className: 'agy-ui-model-tag' }, card.badgeTag),
-            ),
+            h('span', { className: 'agy-ui-model-name' }, card.title),
           ),
           ...card.windows.map((w, idx) => renderWindow(w, idx, t)),
         ),
       ),
 
       cards.length === 0
-        ? h('div', { className: 'agy-ui-window-note', style: { padding: '8px 0' } }, t('badgeNoQuotaData'))
+        ? h('div', { className: 'agy-ui-window-note' }, t('badgeNoQuotaData'))
         : null,
 
       limitsAge ? h('div', { className: 'agy-ui-limit-age' }, t('badgeMeasuredAt', { time: limitsAge })) : null,

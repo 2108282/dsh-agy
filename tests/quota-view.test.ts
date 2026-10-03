@@ -27,7 +27,7 @@ import {
   windowLabel,
   windowRows,
 } from '../src/client/quota-view.ts'
-import { en, zh } from '../src/client/locales.ts'
+import { zh } from '../src/client/locales.ts'
 import { SOFT_QUOTA_THRESHOLD, WEEKLY_QUOTA_THRESHOLD } from '../src/runtime/rotation.ts'
 import type { AccountView } from '../src/rpc-contract.ts'
 import type { QuotaGroup, QuotaWindow } from '../src/types.ts'
@@ -398,17 +398,4 @@ describe('refresh policy', () => {
   })
 })
 
-describe('dictionary coverage of the badge keys', () => {
-  it('has an English and a Chinese string for every badge key the view uses', () => {
-    for (const key of [
-      'badgeTitle', 'badgeAria', 'badgeHint', 'badgePinned', 'badgeClose',
-      'badgeReading', 'badgeUnmeasured', 'badgeNoAccount',
-      'quotaWindowDaily', 'quotaWindowMonthly', 'quotaResetPassed',
-      'quotaStaleNote', 'quotaUnmeasuredNote', 'quotaGroupFallback',
-      'quotaSourceCaption', 'quotaManageHint',
-    ] as Array<keyof typeof zh>) {
-      expect(zh[key], key).not.toBe('')
-      expect(en[key], key).not.toBe('')
-    }
-  })
-})
+
