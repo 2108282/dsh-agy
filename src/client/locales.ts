@@ -49,7 +49,6 @@ export const zh = {
   colResult: '结果',
   colDuration: '耗时',
   recentTitle: '最近请求',
-  recentHelp: '本进程内存中的最近 200 条（含轮换事件），不落盘、不跨进程合并。',
   recentEmpty: '暂无最近记录',
   recentOk: '成功',
   // The row's count is ALL-TIME, while the Usage tab defaults to "today" — the
@@ -259,7 +258,6 @@ export const en: Record<AgyLocaleKey, string> = {
   colResult: 'Result',
   colDuration: 'Duration',
   recentTitle: 'Recent requests',
-  recentHelp: 'Last 200 records in this process\'s memory (rotation events included); never persisted, never merged across processes.',
   recentEmpty: 'No recent activity',
   recentOk: 'ok',
   // All-time, while the Usage tab defaults to "today" — see the zh note.

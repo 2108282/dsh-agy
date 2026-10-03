@@ -1495,7 +1495,6 @@ function RecentCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
     recent === null ? null : h('span', { className: 'agy-disclosure-meta' }, String(recent.length))),
     open === false ? null : h('div', { className: 'agy-disclosure-body' },
       error === undefined ? null : h('div', { className: 'agy-error' }, error),
-      hint(t('recentHelp')),
       recent === null
         ? h('div', { className: 'agy-empty' }, t('loading'))
         : recent.length === 0
