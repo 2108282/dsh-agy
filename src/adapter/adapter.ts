@@ -41,7 +41,7 @@ import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
 import type { AgyResolvedImage } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
-import { parseAgySse } from './parse.ts'
+import { parseAgySse, UnmappedFinishReasonError } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
 
 export type { AgyAccountSession }
@@ -626,10 +626,17 @@ export class AgyAdapter extends LlmAdapter {
       if (error instanceof DOMException && error.name === 'AbortError') {
         throw new LlmError('agy stream aborted', 'ABORTED', { cause: error })
       }
-      await this.options.reportFailure('network-error', session)
+      // An unmapped finishReason (SAFETY, MALFORMED_FUNCTION_CALL, ...) is a
+      // CONTENT-level verdict: the request reached a healthy account and the
+      // upstream chose to stop the response. Reporting network-error would
+      // cool and rotate the account for a wall the next request may never
+      // hit; request-error is a no-op at account level. DSH sees a terminal
+      // UPSTREAM error either way (below).
+      const unmappedFinish = error instanceof UnmappedFinishReasonError
+      await this.options.reportFailure(unmappedFinish ? 'request-error' : 'network-error', session)
       // A stream that died mid-body may already have delivered billable
       // content, so the attempt is recorded even though no usage chunk arrived.
-      this.recordUsage(session, options.model, { ok: false, reason: 'network-error' }, startedAt)
+      this.recordUsage(session, options.model, { ok: false, reason: unmappedFinish ? 'request-error' : 'network-error' }, startedAt)
       // Deliberately UPSTREAM (terminal), not TRANSPORT: content may already
       // have been emitted, and DSH's retry policy honours TRANSPORT, so retrying
       // here would replay a partially-delivered turn. The account-level report

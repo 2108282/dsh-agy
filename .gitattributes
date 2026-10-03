@@ -1,0 +1,7 @@
+# Normalize all text to LF in the repository; keep platform conversion off the
+# files whose bytes are load-bearing. Without this, a Windows checkout converts
+# bin/dsh-agy.js to CRLF (runner autocrlf), and pnpm >= 11.28 refuses to pack a
+# shebang carrying \r (ERR_PNPM_BIN_CRLF) — the file is also broken for Unix
+# consumers if a CRLF copy ever reaches a tarball.
+* text=auto
+bin/** text eol=lf

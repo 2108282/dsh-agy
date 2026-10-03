@@ -3,7 +3,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { AGY_BEHAVIOR_INSTRUCTION, AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AGY_PUBLIC_MODELS, formatTieredModelName } from '../src/adapter/catalog.ts'
@@ -55,23 +55,6 @@ describe('translate', () => {
     expect(body.requestType).toBe('agent')
     expect(body.request.contents).toEqual([{ role: 'user', parts: [{ text: 'hello' }] }])
     expect(body.request.sessionId).toBe('s1')
-  })
-
-  it('appends behavior instruction when appendBehaviorInstruction is enabled', () => {
-    const withoutSystem = toAgyRequestBody(generateOptions(), { appendBehaviorInstruction: true })
-    expect(withoutSystem.request.systemInstruction?.parts[0]?.text).toContain('【Antigravity 协作交互规范】')
-
-    const withSystem = toAgyRequestBody(generateOptions({ system: 'You are an assistant.' }), {
-      appendBehaviorInstruction: true,
-    })
-    expect(withSystem.request.systemInstruction?.parts[0]?.text).toBe(
-      `You are an assistant.\n\n${AGY_BEHAVIOR_INSTRUCTION}`,
-    )
-
-    const disabled = toAgyRequestBody(generateOptions({ system: 'You are an assistant.' }), {
-      appendBehaviorInstruction: false,
-    })
-    expect(disabled.request.systemInstruction?.parts[0]?.text).toBe('You are an assistant.')
   })
 
   it('translates user image blocks into inlineData parts from resolved bytes', () => {
@@ -666,6 +649,17 @@ function sseStream(lines: string[]): ReadableStream<Uint8Array> {
   })
 }
 
+function sseStreamRaw(text: string): ReadableStream<Uint8Array> {
+  // Like sseStream but takes raw wire bytes: lets a test end the stream
+  // WITHOUT a trailing newline (the EOF-residual path).
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text))
+      controller.close()
+    },
+  })
+}
+
 async function collect(chunks: AsyncIterable<Awaited<ReturnType<typeof parseAgySse>>>) {
   const out: unknown[] = []
   for await (const chunk of chunks) out.push(chunk)
@@ -794,47 +788,117 @@ describe('parseAgySse', () => {
     }).rejects.toThrow(/quota/)
   })
 
-  it('throws when stream terminates prematurely without [DONE] or finishReason', async () => {
+  it('throws on a bare JSON error line without the data: prefix', async () => {
+    // Upstream drops its error vocabulary as a bare JSON line right before
+    // terminating the stream; the non-data skip used to swallow it silently
+    // and the turn ended looking complete (issue #85).
     await expect(async () => {
       const chunks = parseAgySse(sseStream([
-        'data: [{"candidates":[{"content":{"parts":[{"text":"half answer"}]}}]}]',
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"继续"}]}}]}}',
+        '{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}',
       ]))
       for await (const _ of chunks) void _
-    }).rejects.toThrow(/terminated prematurely/)
+    }).rejects.toThrow(/agy stream error \(500\): Internal error encountered\./)
   })
 
-  it('throws on raw bare JSON error without data: prefix', async () => {
+  it('still delivers the text emitted before a bare JSON error', async () => {
+    const chunks: unknown[] = []
     await expect(async () => {
-      const chunks = parseAgySse(sseStream([
-        'data: [{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}]',
-        '{"error":{"code":500,"status":"INTERNAL","message":"Internal error encountered."}}',
-      ]))
+      for await (const chunk of parseAgySse(sseStream([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"继续"}]}}]}}',
+        '{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}',
+      ]))) chunks.push(chunk)
+    }).rejects.toThrow(/Internal error/)
+    expect(chunks.some((c) => (c as { type: string }).type === 'text-delta')).toBe(true)
+  })
+
+  it('processes a final line that arrives without a trailing newline', async () => {
+    // Content, usage, and finishReason riding the unterminated final line used
+    // to be dropped wholesale at EOF. Its finishReason also completes the
+    // stream: the completeness guard needs the residual processed.
+    const chunks = await collect(parseAgySse(sseStreamRaw(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1}}}')))
+    expect(chunks.some((c) => (c as { type: string }).type === 'text-delta')).toBe(true)
+    expect(chunks.some((c) => (c as { type: string }).type === 'usage')).toBe(true)
+    expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('treats a bare JSON error in the final unterminated line as a failure', async () => {
+    await expect(async () => {
+      const chunks = parseAgySse(sseStreamRaw(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"看 8"}]}}]}}\n{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}'))
       for await (const _ of chunks) void _
-    }).rejects.toThrow(/Internal error encountered/)
+    }).rejects.toThrow(/Internal error encountered\./)
   })
 
-  it('throws when upstream stops candidate due to SAFETY or policy block', async () => {
+  it('counts a bare data: [DONE] final line toward completion', async () => {
+    const chunks = await collect(parseAgySse(sseStreamRaw(
+      'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]\ndata: [DONE]')))
+    expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('fails a stream that closes cleanly without [DONE] or finishReason', async () => {
+    // A proxy or LB closing the connection mid-body used to yield the default
+    // `stop`: the truncated turn looked completed — no error, no retry
+    // (issue #85).
+    await expect(async () => {
+      const chunks = parseAgySse(sseStreamRaw(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"继续"}]}}]}}\ndata: {"response":{"candidates":[{"content":{"parts":[{"text":"看"}]}}]}}'))
+      for await (const _ of chunks) void _
+    }).rejects.toThrow(/terminated prematurely without \[DONE\] or finishReason/)
+  })
+
+  it('completes a stream that ends with [DONE] but no finishReason', async () => {
+    // Either completion signal alone suffices.
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
+      'data: [DONE]',
+    ])))
+    expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('completes the measured live shape: finishReason terminates, no [DONE]', async () => {
+    // MEASURED on daily-cloudcode-pa (2026-10-03, probe, 3/3): real streams
+    // send NO `data: [DONE]` — the final data chunk carries the candidate
+    // finishReason. Pinning this stops the completeness guard from ever being
+    // tightened into requiring [DONE], which would fail every live stream.
+    const chunks = await collect(parseAgySse(sseStreamRaw(
+      'data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "OK"}]}}]},'
+      + '"usageMetadata": {"promptTokenCount": 9}}\n'
+      + 'data: {"response": {"candidates": [{"content": {"role": "model","parts": []},"finishReason": "STOP"}],"usageMetadata": {"promptTokenCount": 9,"candidatesTokenCount": 1,"totalTokenCount": 10}}}')))
+    expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(chunks.some((c) => (c as { type: string }).type === 'usage')).toBe(true)
+  })
+
+  it('fails a stream blocked by an unmapped finishReason instead of stopping', async () => {
+    // SAFETY used to fall through the default branch: the blocked turn looked
+    // like a normal completion.
     await expect(async () => {
       const chunks = parseAgySse(sseStream([
-        'data: [{"candidates":[{"content":{"parts":[{"text":"sensitive"}]},"finishReason":"SAFETY"}]}]',
+        'data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"SAFETY"}]}]',
         'data: [DONE]',
       ]))
       for await (const _ of chunks) void _
-    }).rejects.toThrow(/blocked by upstream policy: SAFETY/)
+    }).rejects.toThrow(/unrecognized finishReason: SAFETY/)
   })
 
-  it('throws on residual trailing bare JSON error without trailing newline', async () => {
-    const rawError = '{"error":{"code":503,"status":"UNAVAILABLE","message":"Backend unavailable"}}'
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(rawError))
-        controller.close()
-      },
-    })
+  it('fails on MALFORMED_FUNCTION_CALL like any other unmapped finishReason', async () => {
     await expect(async () => {
-      const chunks = parseAgySse(stream)
+      const chunks = parseAgySse(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+        'data: [DONE]',
+      ]))
       for await (const _ of chunks) void _
-    }).rejects.toThrow(/Backend unavailable/)
+    }).rejects.toThrow(/MALFORMED_FUNCTION_CALL/)
+  })
+
+  it('grants FINISH_REASON_UNSPECIFIED a normal stop', async () => {
+    // Explicit but information-free: treated like the absent field.
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"FINISH_REASON_UNSPECIFIED"}]}]',
+      'data: [DONE]',
+    ])))
+    expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
 })
 
@@ -1423,6 +1487,41 @@ describe('AgyAdapter', () => {
     for await (const chunk of adapter.stream(generateOptions())) chunks.push(chunk)
     expect(chunks.some((c) => (c as { type: string }).type === 'text-delta')).toBe(true)
     expect(failures).toEqual([])
+  })
+
+  it('surfaces a premature stream death as terminal UPSTREAM and absorbs it at the account level', async () => {
+    // Deliberately NOT TRANSPORT: content may already have been delivered and
+    // DSH retries TRANSPORT, which would replay a partially-delivered turn.
+    // The account-level network-error report absorbs the transient case.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStreamRaw(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"半截"}]}}]}}'), { status: 200 })))
+    const failures: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+    expect(failures).toEqual(['network-error'])
+  })
+
+  it('does not cool the account for a policy-blocked stream', async () => {
+    // SAFETY is a content-level verdict: request-error (no-op) at account
+    // level, terminal UPSTREAM for DSH.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"SAFETY"}]}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+    const failures: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+    expect(failures).toEqual(['request-error'])
   })
 
   it('fails image requests with UNSUPPORTED_CONTENT and no fetch when the attachment service is absent', async () => {
