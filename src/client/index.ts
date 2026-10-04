@@ -27,7 +27,7 @@ import {
   Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState, TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
-import { installAgyStyles } from './styles.ts'
+import { aliasVar, installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
@@ -720,6 +720,12 @@ function PreferencesCard(props: {
   const [badgeEnabled, setBadgeEnabled] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const errorTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  useEffect(() => () => {
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -737,28 +743,38 @@ function PreferencesCard(props: {
   const toggleBadge = useCallback(async (checked: boolean) => {
     setSaving(true)
     setBadgeEnabled(checked)
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
     try {
       const res = await rpc.call('ui.prefs.set', { conversationBadge: checked })
       setBadgeEnabled(res.conversationBadge)
+      setSaveError(null)
       onBadgePrefChange?.(res.conversationBadge)
-    } catch {
+    } catch (err) {
+      // A bounced switch with no verdict reads as a flicker: surface the
+      // one-shot failure like the section's other action errors.
       setBadgeEnabled(!checked)
+      setSaveError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
     } finally {
       setSaving(false)
     }
-  }, [rpc, onBadgePrefChange])
+  }, [rpc, t, onBadgePrefChange])
+
+  const row = h('div', { className: 'agy-pref-row' },
+    h('div', { className: 'agy-pref-info' },
+      h('div', { className: 'agy-pref-name' }, t('prefConversationBadge')),
+      h('div', { className: 'agy-pref-desc' }, t('prefConversationBadgeDesc'))),
+    h(Switch, {
+      label: t('prefConversationBadge'),
+      checked: badgeEnabled,
+      disabled: loading || saving,
+      onChange: (checked: boolean) => void toggleBadge(checked),
+    }))
 
   return card(t('preferencesTitle'),
-    h('div', { className: 'agy-pref-row' },
-      h('div', { className: 'agy-pref-info' },
-        h('div', { className: 'agy-pref-name' }, t('prefConversationBadge')),
-        h('div', { className: 'agy-pref-desc' }, t('prefConversationBadgeDesc'))),
-      h(Switch, {
-        label: t('prefConversationBadge'),
-        checked: badgeEnabled,
-        disabled: loading || saving,
-        onChange: (checked: boolean) => void toggleBadge(checked),
-      })))
+    saveError === null
+      ? row
+      : [row, h('div', { className: 'agy-error' }, saveError)])
 }
 
 function AccountsTab(props: {
@@ -1542,9 +1558,9 @@ function numHeader(index: number, label: string): ReactNode {
 function tokenComposition(counters: UsageCounters, t: T): ReactNode {
   const total = totalTokens(counters)
   const rows: Array<{ id: string, labelKey: AgyLocaleKey, value: number, tone: string }> = [
-    { id: 'cacheRead', labelKey: 'kpiCacheRead', value: counters.cacheRead, tone: 'var(--dsw-alias-brand-primary-new-colorprimary-new-color, #4176e6)' },
+    { id: 'cacheRead', labelKey: 'kpiCacheRead', value: counters.cacheRead, tone: aliasVar('brand-primary') },
     { id: 'missed', labelKey: 'kpiInputMissedLabel', value: counters.input, tone: 'var(--dsw-static-neutral-bluish-700, #8b8f96)' },
-    { id: 'output', labelKey: 'kpiOutput', value: counters.output, tone: 'var(--dsw-alias-state-success-primary, #22c55e)' },
+    { id: 'output', labelKey: 'kpiOutput', value: counters.output, tone: aliasVar('state-success-primary') },
   ]
   return h('div', { className: 'agy-compose' }, ...rows.map((row) => {
     const share = total > 0 ? (row.value / total) * 100 : 0

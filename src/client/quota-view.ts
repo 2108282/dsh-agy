@@ -24,6 +24,7 @@ import { QUOTA_WINDOWS, type QuotaGroup, type QuotaWindow } from '../types.ts'
 import { SOFT_QUOTA_THRESHOLD, WEEKLY_QUOTA_THRESHOLD, parseFutureResetMs } from '../runtime/rotation.ts'
 import type { AccountView } from '../rpc-contract.ts'
 import type { AgyLocaleKey } from './locales.ts'
+import { aliasVar } from './styles.ts'
 
 /**
  * This section's translator, taken structurally.
@@ -200,9 +201,9 @@ export function toPercent(fraction: number | null | undefined): number | null {
  * private palette does not follow the host's light/dark switch.
  */
 export function quotaColor(fraction: number): string {
-  if (fraction > 0.7) return 'var(--dsw-alias-state-success-primary, #22c55e)'
-  if (fraction >= 0.3) return 'var(--dsw-alias-state-warn-primary, #f59e0b)'
-  return 'var(--dsw-alias-state-error-primary, #ec1313)'
+  if (fraction > 0.7) return aliasVar('state-success-primary')
+  if (fraction >= 0.3) return aliasVar('state-warn-primary')
+  return aliasVar('state-error-primary')
 }
 
 /**

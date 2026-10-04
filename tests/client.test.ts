@@ -1,12 +1,37 @@
 import { readdirSync, readFileSync } from 'node:fs'
-import { expect, it, describe } from 'vitest'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { expect, it, describe, vi } from 'vitest'
 import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText, truncateIdentity } from '../src/client/index.ts'
 import { AgyQuotaBadge } from '../src/client/quota-badge.ts'
-import { installAgyStyles } from '../src/client/styles.ts'
+import { h } from '../src/client/element.ts'
+import { installAgyStyles, AGY_STYLES_CSS, ALIAS_FALLBACKS } from '../src/client/styles.ts'
 import { en, zh } from '../src/client/locales.ts'
+import type { QuotaTranslate } from '../src/client/quota-view.ts'
 import { zeroCounters } from '../src/usage-types.ts'
-import type { AccountView, ModelView } from '../src/rpc-contract.ts'
+import type { AccountView, AgyRpcClient, ModelView } from '../src/rpc-contract.ts'
 import type { UsageCounters } from '../src/usage-types.ts'
+
+// The primitives catalog is a frozen module table the HOST shares at runtime
+// (dsh.client.external); the npm package carries no renderable implementation,
+// so any render test stubs it at the module boundary. The stubs pass children
+// through so the snapshot shows the badge's own tree; the primitives' own DOM
+// is the host's business. Type-only exports (StateDotState, TagTone) need no
+// stub.
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => {
+  const passthrough = () => function Primitive({ children }: { children?: unknown }) {
+    return children ?? null
+  }
+  return {
+    Button: passthrough(),
+    Input: passthrough(),
+    Pill: passthrough(),
+    StateDot: passthrough(),
+    Switch: passthrough(),
+    Tag: passthrough(),
+    useAnchoredPosition: () => ({ top: 0, left: 0 }),
+    useDismissOnOutsidePointer: () => undefined,
+  }
+})
 
 /**
  * The browser half's TypeScript sources.
@@ -268,9 +293,9 @@ describe('usage table stylesheet', () => {
     // repeatedly. Only the body matters — the delimiters and the surrounding
     // TypeScript (other template literals in this file) legitimately contain
     // backticks, so counting the whole file would be meaningless.
-    const start = css.indexOf('const CSS = `') + 'const CSS = `'.length
+    const start = css.indexOf('export const AGY_STYLES_CSS = `') + 'export const AGY_STYLES_CSS = `'.length
     const end = css.indexOf('`', start)
-    expect(start, 'the CSS template literal must exist').toBeGreaterThan('const CSS = `'.length)
+    expect(start, 'the CSS template literal must exist').toBeGreaterThan('export const AGY_STYLES_CSS = `'.length)
     expect(css.slice(start, end), 'no backtick may appear inside the CSS body').not.toContain('`')
   })
 
@@ -571,4 +596,54 @@ describe('installAgyStyles', () => {
   })
 
 
+})
+
+describe('dsw alias fallback table', () => {
+  const tableVar = /var\(--dsw-alias-([a-z0-9-]+), (#[0-9a-fA-F]+|rgba\([0-9., ]+\))\)/g
+
+  it('answers every alias with exactly the table fallback, everywhere', () => {
+    const seen = new Map<string, string>()
+    for (const [, name, fallback] of AGY_STYLES_CSS.matchAll(tableVar)) {
+      const expected = (ALIAS_FALLBACKS as Record<string, string>)[name]
+      expect(expected, `--dsw-alias-${name} is missing from ALIAS_FALLBACKS`).toBeDefined()
+      expect(
+        seen.has(name) && seen.get(name) !== fallback,
+        `--dsw-alias-${name} carries a second fallback (${fallback}; table says ${seen.get(name)})`,
+      ).toBe(false)
+      expect(fallback, `--dsw-alias-${name} drifts from the table`).toBe(expected)
+      seen.set(name, fallback)
+    }
+    expect(seen.size).toBe(Object.keys(ALIAS_FALLBACKS).length)
+  })
+
+  it('keeps the helper the only alias literal and the renamed-forever token dead', () => {
+    for (const { name, source } of clientFiles()) {
+      if (name === 'styles.ts') {
+        const occurrences = source.split('var(--dsw-alias-').length - 1
+        expect(occurrences, 'styles.ts must hold exactly the aliasVar helper literal').toBe(1)
+      } else {
+        expect(source, `${name} inlines a raw alias var()`).not.toContain('var(--dsw-alias-')
+      }
+    }
+    expect(AGY_STYLES_CSS).not.toContain('new-colorprimary')
+  })
+})
+
+describe('quota badge snapshot render', () => {
+  it('renders the closed badge in node, with no RPC and no DOM', () => {
+    // Effects do not run in static markup, so the render must not need the
+    // fetch paths: an rpc that throws pins "snapshot implies zero network".
+    const failingRpc = {
+      call: async () => { throw new Error('snapshot render must not fetch') },
+    } as unknown as AgyRpcClient
+    // The real zh dictionary with placeholder substitution, so the snapshot
+    // carries the copy a user would see, not bare key names.
+    const t = ((key: string, params?: Record<string, unknown>) => {
+      let text = (zh as Record<string, string>)[key] ?? key
+      for (const [k, v] of Object.entries(params ?? {})) text = text.replaceAll(`{${k}}`, String(v))
+      return text
+    }) as unknown as QuotaTranslate
+    const html = renderToStaticMarkup(h(AgyQuotaBadge, { rpc: failingRpc, t }))
+    expect(html).toMatchSnapshot()
+  })
 })
