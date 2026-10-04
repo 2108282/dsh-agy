@@ -335,7 +335,12 @@ function messageToContent(
     }
   }
 
-  if (parts.length === 0) return null
+  if (parts.length === 0) {
+    if (message.role === 'assistant') {
+      return { role: 'model', parts: [{ text: "ok" }] }
+    }
+    return null
+  }
   const role = message.role === 'assistant' ? 'model' : 'user'
   return { role, parts }
 }
@@ -469,6 +474,7 @@ export function toAgyRequestBody(
   let contents = conversationMessages(messages)
     .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude))
     .filter((c): c is AgyContent => c !== null)
+  contents = coalesceContents(contents)
   if (claude) {
     contents = stripTrailingModelTurn(contents)
   }
@@ -561,4 +567,17 @@ export function toAgyRequestBody(
       ...(context.sessionId ? { sessionId: context.sessionId } : {}),
     },
   }
+}
+
+export function coalesceContents(contents: AgyContent[]): AgyContent[] {
+  const coalesced: AgyContent[] = []
+  for (const content of contents) {
+    const last = coalesced[coalesced.length - 1]
+    if (last && last.role === content.role) {
+      last.parts.push(...content.parts)
+    } else {
+      coalesced.push({ role: content.role, parts: [...content.parts] })
+    }
+  }
+  return coalesced
 }
