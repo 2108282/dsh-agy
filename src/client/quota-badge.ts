@@ -19,7 +19,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { h } from './element.ts'
-import { installAgyStyles } from './styles.ts'
+import { aliasVar, installAgyStyles } from './styles.ts'
 import {
   agoText,
   buildQuotaCards,
@@ -41,6 +41,14 @@ import type { QuotaWindow } from '../types.ts'
 const AUTO_REFRESH_THROTTLE_MS = 120_000
 
 /**
+ * Render-tick cadence for the countdown and staleness figures. Pure state
+ * recompute from already-fetched data — deliberately ZERO RPC: the fetch paths
+ * are mount, window wake (throttled above) and the popover's refresh button,
+ * and without this tick the countdown text would freeze between fetches.
+ */
+const RENDER_TICK_MS = 60_000
+
+/**
  * Grace period before hover close (250ms).
  */
 const HOVER_CLOSE_DELAY_MS = 250
@@ -56,7 +64,7 @@ export const MOBILE_BREAKPOINT_PX = 640
  * Thresholds: >70% success green, 30%-70% warning amber, <30% error red.
  */
 function quotaColorForWindow(percent: number | null): string {
-  if (percent === null) return 'var(--dsw-alias-label-tertiary, #8f959e)'
+  if (percent === null) return aliasVar('label-tertiary')
   return quotaColor(percent / 100)
 }
 
@@ -193,12 +201,14 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
 
   useEffect(() => {
     void load(false)
+    const tick = window.setInterval(() => setNow(Date.now()), RENDER_TICK_MS)
     const onWake = (): void => {
       if (document.visibilityState !== 'hidden') void load(false)
     }
     window.addEventListener('focus', onWake)
     document.addEventListener('visibilitychange', onWake)
     return () => {
+      window.clearInterval(tick)
       window.removeEventListener('focus', onWake)
       document.removeEventListener('visibilitychange', onWake)
       if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
@@ -428,7 +438,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         : h(
             'div',
             { className: 'agy-ui-account-card' },
-            h('div', { className: 'agy-ui-account-email', style: { color: 'var(--dsw-alias-label-tertiary, #8f959e)' } }, error ?? t('badgeNoAccount')),
+            h('div', { className: 'agy-ui-account-email', style: { color: aliasVar('label-tertiary') } }, error ?? t('badgeNoAccount')),
           ),
 
       activeAccount?.verificationRequired && activeAccount?.verificationUrl
