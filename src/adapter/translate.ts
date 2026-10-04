@@ -341,6 +341,62 @@ function messageToContent(
 }
 
 /**
+ * Whether a part makes its turn a tool-result turn (`functionResponse` family).
+ * Every other part kind — text, media, thought, functionCall — belongs to the
+ * ordinary-content family.
+ */
+function isFrPart(part: AgyPart): boolean {
+  return 'functionResponse' in part
+}
+
+/**
+ * Merge adjacent same-role contents into single turns, functionResponse-family
+ * aware.
+ *
+ * The harness emits a fragmented per-step vocabulary — prompt, runtime-context
+ * snapshot, and injected `<system-reminder>` messages as separate `user`
+ * messages, one message per tool result — and its own first-party serializer
+ * coalesces adjacent same-role messages at the wire boundary. Forwarding the
+ * fragments 1:1 instead opened every request with a run of `user` turns that
+ * all belong to one logical prompt, and sent parallel tool results as separate
+ * one-`functionResponse` turns where the official Gemini tooling groups them
+ * into a single user turn.
+ *
+ * Family rule: a turn carrying `functionResponse` parts never merges with (or
+ * receives) other part kinds, so a mixed content is segmented in part order.
+ * The harness's serializer instead re-sorts tool results to the front of one
+ * merged message, but the Gemini-family validator is measured to reject a user
+ * content mixing `functionResponse` with text (400; langchainjs#11445, on the
+ * model family), and this channel's tolerance for the mixed shape is
+ * unmeasured. Separate adjacent turns keep every part while keeping each turn
+ * unmixed; parts are never reordered.
+ *
+ * Known boundary loss (pinned in tests): a model turn whose parts all drop
+ * (thoughts-only turn replayed on the Claude path) is filtered to null before
+ * this point, so the user turns around it fuse into one content. A text
+ * placeholder would fabricate a model utterance, and the acceptance of a
+ * structural empty turn (`parts: []`) is unmeasured here — so the fusion
+ * stands (issue #93).
+ */
+export function coalesceContents(contents: AgyContent[]): AgyContent[] {
+  const result: AgyContent[] = []
+  let lastFamily: boolean | undefined
+  for (const content of contents) {
+    for (const part of content.parts) {
+      const family = isFrPart(part)
+      const last = result[result.length - 1]
+      if (last && lastFamily === family && last.role === content.role) {
+        last.parts.push(part)
+      } else {
+        result.push({ role: content.role, parts: [part] })
+        lastFamily = family
+      }
+    }
+  }
+  return result
+}
+
+/**
  * Builtin Gemini tools must not shadow functionDeclarations names (upstream
  * treats them as native tools; verified by OmniRoute's GEMINI_BUILTIN_TOOL_NAMES).
  */
@@ -459,9 +515,11 @@ export function toAgyRequestBody(
   const images = context.images ?? new Map<string, AgyResolvedImage>()
   const multimodalFiles = supportsMultimodalFiles(options.model) ? context.multimodalFiles : undefined
   const claude = isClaudeModel(options.model)
-  let contents = conversationMessages(messages)
-    .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude))
-    .filter((c): c is AgyContent => c !== null)
+  let contents = coalesceContents(
+    conversationMessages(messages)
+      .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude))
+      .filter((c): c is AgyContent => c !== null),
+  )
   if (claude) {
     contents = stripTrailingModelTurn(contents)
   }
