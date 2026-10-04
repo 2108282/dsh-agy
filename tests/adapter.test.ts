@@ -6,7 +6,7 @@ import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
-import { AGY_PUBLIC_MODELS, formatTieredModelName } from '../src/adapter/catalog.ts'
+import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId } from '../src/adapter/catalog.ts'
 import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
@@ -860,14 +860,54 @@ describe('parseAgySse', () => {
   it('completes the measured live shape: finishReason terminates, no [DONE]', async () => {
     // MEASURED on daily-cloudcode-pa (2026-10-03, probe, 3/3): real streams
     // send NO `data: [DONE]` — the final data chunk carries the candidate
-    // finishReason. Pinning this stops the completeness guard from ever being
+    // finishReason plus the routine zero-length `{thoughtSignature, text: ""}`
+    // terminator part, which must not fabricate an empty text block
+    // (issue #77). Pinning this stops the completeness guard from ever being
     // tightened into requiring [DONE], which would fail every live stream.
     const chunks = await collect(parseAgySse(sseStreamRaw(
       'data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "OK"}]}}]},'
       + '"usageMetadata": {"promptTokenCount": 9}}\n'
-      + 'data: {"response": {"candidates": [{"content": {"role": "model","parts": []},"finishReason": "STOP"}],"usageMetadata": {"promptTokenCount": 9,"candidatesTokenCount": 1,"totalTokenCount": 10}}}')))
+      + 'data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thoughtSignature": "sig","text": ""}]},"finishReason": "STOP"}],"usageMetadata": {"promptTokenCount": 9,"candidatesTokenCount": 1,"totalTokenCount": 10}}}')))
+    const text = chunks.filter((c) => (c as { type: string }).type === 'text-delta').map((c) => (c as { text: string }).text).join('')
+    expect(text).toBe('OK')
     expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
     expect(chunks.some((c) => (c as { type: string }).type === 'usage')).toBe(true)
+  })
+
+  it('does not fabricate an empty text block after a functionCall', async () => {
+    // The daily endpoint ends tool-call turns with a trailing zero-length
+    // text part (often carrying a sibling thoughtSignature). Emitting it
+    // fabricated an empty content block into the session log — poison for
+    // stricter downstream serializers (issue #77).
+    const captured: Array<[string, string]> = []
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-1","functionCall":{"id":"c1","name":"bash","args":{"cmd":"ls"}}}]}}]}]',
+      'data: [{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-2","text":""}]},"finishReason":"STOP"}]}]',
+    ]), { onToolSignature: (id, sig) => captured.push([id, sig]) }))
+    expect(chunks.filter((c) => (c as { type: string }).type === 'text-delta')).toHaveLength(0)
+    const ends = chunks.filter((c) => (c as { type: string }).type === 'block-end')
+    expect(ends).toHaveLength(1)
+    expect(ends[0]).toMatchObject({ block: { type: 'tool-call', id: 'c1' } })
+    // signatures on text parts are ignored by design; only functionCall parts are captured
+    expect(captured).toEqual([['c1', 'sig-1']])
+  })
+
+  it('keeps one text block across a zero-length part', async () => {
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"text":"Hel"},{"text":""},{"text":"lo"}]}}]}]',
+      'data: [{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}]',
+    ])))
+    expect(chunks.filter((c) => (c as { type: string }).type === 'block-start')).toHaveLength(1)
+    const text = chunks.filter((c) => (c as { type: string }).type === 'text-delta').map((c) => (c as { text: string }).text).join('')
+    expect(text).toBe('Hello')
+  })
+
+  it('does not fabricate a reasoning block from a zero-length thought part', async () => {
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":""}]}}]}]',
+      'data: [{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}]',
+    ])))
+    expect(chunks.filter((c) => (c as { type: string }).type === 'block-start')).toHaveLength(0)
   })
 
   it('fails a stream blocked by an unmapped finishReason instead of stopping', async () => {
@@ -943,6 +983,23 @@ describe('models', () => {
       audioTranscriptionModelIds: ['models/proactive-observer-v10'],
     })
     expect(merged.map((m) => m.id)).toEqual(['gemini-3.6-flash-high'])
+  })
+
+  it('treats a chat_ session id as non-chat even when no role list names it', () => {
+    // The role list is the primary signal, but it is optional in the payload:
+    // an account that omits `tabModelIds` must still not get a raw session id in
+    // the picker. Same rule the tab_ prefix already applied.
+    expect(isChatCallableModelId('chat_20706')).toBe(false)
+    expect(isChatCallableModelId('chat_23310')).toBe(false)
+    expect(isChatCallableModelId('tab_flash_lite_preview')).toBe(false)
+    // A chat-prefixed id that is NOT the session shape stays callable: the rule
+    // is the digits suffix, not the word.
+    expect(isChatCallableModelId('chat-flash')).toBe(true)
+    expect(isChatCallableModelId('gemini-3.8-flash-tiered')).toBe(true)
+
+    expect(mergeModelCatalog({
+      models: { 'gemini-3.6-flash-high': {}, 'chat_20706': {} },
+    }).map((m) => m.id)).toEqual(['gemini-3.6-flash-high'])
   })
 
   it('hides a deprecated id only when its replacement is present, chat-callable and visible', () => {
