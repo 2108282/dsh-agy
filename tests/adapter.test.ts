@@ -207,6 +207,107 @@ describe('translate', () => {
     ])
   })
 
+  // The harness emits a fragmented per-step vocabulary (prompt + runtime-context
+  // snapshot + injected reminders as separate `user` messages, one message per
+  // tool result) and its own first-party serializer coalesces adjacent
+  // same-role messages at the wire boundary. Forwarding 1:1 instead put runs of
+  // `user` turns belonging to one logical prompt on the wire (issue #93).
+  it('coalesces adjacent user turns (prompt + injected context) into one', () => {
+    const messages = [
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: '帮我总结这个文件' }] },
+      { id: 'u2', role: 'user', content: [{ type: 'text', text: 'Current runtime context. …' }] },
+      { id: 'u3', role: 'user', content: [{ type: 'text', text: '<system-reminder>skill catalog</system-reminder>' }] },
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }), {})
+    expect(body.request.contents).toEqual([
+      {
+        role: 'user',
+        parts: [
+          { text: '帮我总结这个文件' },
+          { text: 'Current runtime context. …' },
+          { text: '<system-reminder>skill catalog</system-reminder>' },
+        ],
+      },
+    ])
+  })
+
+  // Parallel tool results must group into one functionResponse turn — the shape
+  // the official Gemini tooling produces and its own a2a-server enforces.
+  it('groups parallel tool results into a single functionResponse turn', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call-a', name: 'read', arguments: '{}' },
+        { type: 'tool-call', id: 'call-b', name: 'read', arguments: '{}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call-a', content: [{ type: 'text', text: 'a' }] },
+      { id: 't2', role: 'tool', toolCallId: 'call-b', content: [{ type: 'text', text: 'b' }] },
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }), {})
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-a', name: 'read', response: { result: 'a', is_error: false } } },
+      { functionResponse: { id: 'call-b', name: 'read', response: { result: 'b', is_error: false } } },
+    ])
+  })
+
+  // A functionResponse turn never merges with (or receives) text parts: the
+  // Gemini-family validator rejects a user content mixing functionResponse with
+  // text (measured 400 on the model family), so the two families stay in
+  // separate adjacent turns. The following text turns still coalesce together.
+  it('keeps a functionResponse turn unmixed from the following text turns', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [{ type: 'tool-call', id: 'call-a', name: 'read', arguments: '{}' }] },
+      { id: 't1', role: 'tool', toolCallId: 'call-a', content: [{ type: 'text', text: 'body' }] },
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: 'next question' }] },
+      { id: 'u2', role: 'user', content: [{ type: 'text', text: 'Current runtime context. …' }] },
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }), {})
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-a', name: 'read', response: { result: 'body', is_error: false } } },
+    ])
+    expect(body.request.contents[2]!.parts).toEqual([{ text: 'next question' }, { text: 'Current runtime context. …' }])
+  })
+
+  // A 0.1.5 user message can carry tool-result and text blocks in one message;
+  // it is segmented in part order so neither turn ends up mixed.
+  it('segments a mixed tool-result + text user message into family runs', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [{ type: 'tool-call', id: 'call-1', name: 'read', arguments: '{}' }] },
+      { id: 'b', role: 'user', content: [
+        { type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'body' }] },
+        { type: 'text', text: 'and also this' },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages }), {})
+    expect(body.request.contents).toEqual([
+      { role: 'model', parts: [{ thoughtSignature: 'skip_thought_signature_validator', functionCall: { id: 'call-1', name: 'read', args: {} } }] },
+      { role: 'user', parts: [{ functionResponse: { id: 'call-1', name: 'read', response: { result: 'body', is_error: false } } }] },
+      { role: 'user', parts: [{ text: 'and also this' }] },
+    ])
+  })
+
+  // A model turn whose parts all drop (a thoughts-only turn replayed on the
+  // Claude path) is filtered to null, so the user turns around it fuse into
+  // one. A placeholder turn would fabricate model content and a structural
+  // empty turn is unmeasured on this channel — pinned as known behavior,
+  // not an accident (issue #93).
+  it('fuses the user runs around a model turn that projects to nothing', () => {
+    const messages = [
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: 'question one' }] },
+      { id: 'u2', role: 'user', content: [{ type: 'text', text: 'Current runtime context. …' }] },
+      { id: 'a1', role: 'assistant', content: [{ type: 'reasoning', text: 'a gemini thought' }] },
+      { id: 'u3', role: 'user', content: [{ type: 'text', text: 'question two' }] },
+    ]
+    const body = toAgyRequestBody(generateOptions({ model: 'claude-opus-4-6-thinking', messages }), {})
+    expect(body.request.contents).toEqual([
+      {
+        role: 'user',
+        parts: [{ text: 'question one' }, { text: 'Current runtime context. …' }, { text: 'question two' }],
+      },
+    ])
+  })
+
   /**
    * On BOTH supported lines a loop-built request carries the system prompt as a
    * leading `system`-role message and leaves `options.system` undefined. Sending
