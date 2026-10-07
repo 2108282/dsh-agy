@@ -127,6 +127,30 @@ describe('classifyHttpError', () => {
     expect(banned.kind).toBe('auth-failure')
   })
 
+  it('treats location or license restrictions as transient, not as dead credentials', () => {
+    // Autopush endpoint or regional gating answers 403 for consumer accounts;
+    // this must never permanently disable healthy credentials.
+    const locationError = classifyHttpError(
+      403,
+      new Headers(),
+      JSON.stringify({
+        error: {
+          code: 403,
+          message: 'Your current account is not eligible for Gemini Code Assist for individuals because it is not currently available in your location.',
+          status: 'PERMISSION_DENIED',
+        },
+      }),
+    )
+    expect(locationError.kind).toBe('transient')
+
+    const noLicense = classifyHttpError(
+      403,
+      new Headers(),
+      '{"error":{"code":403,"message":"No license found for this user."}}',
+    )
+    expect(noLicense.kind).toBe('transient')
+  })
+
   it('extracts the appeal link from either RPC metadata field, or textually', () => {
     expect(extractVerificationUrl(JSON.stringify({
       error: { details: [{ metadata: { appeal_url: 'https://appeal.example/x' } }] },

@@ -106,7 +106,11 @@ export async function fetchAgyFirstOk(
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
       if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
-      lastSkipped = response
+      // Retain a real rate-limit response (429) over downstream license walls
+      // (e.g. 403 from sandbox/autopush) so genuine quota exhaustion is not masked.
+      if (!lastSkipped || response.status === 429 || lastSkipped.status !== 429) {
+        lastSkipped = response
+      }
     } catch (error) {
       lastNetworkError = error
       // Fail-closed only while an explicit per-account proxy is in effect: the

@@ -41,6 +41,25 @@ const VERIFICATION_PHRASES = [
   'verification_required',
 ] as const
 
+/** Phrases indicating regional, eligibility, or endpoint licensing gating rather than dead credentials. */
+const LOCATION_OR_LICENSE_PHRASES = [
+  'not currently available in your location',
+  'not available in your location',
+  'not eligible',
+  'no license',
+  'license',
+] as const
+
+/**
+ * Whether a 403 body indicates regional or endpoint licensing gating rather
+ * than a dead credential (e.g. consumer accounts falling through to autopush).
+ */
+export function isLocationOrLicenseError(bodyText: string | undefined): boolean {
+  if (!bodyText) return false
+  const text = bodyText.toLowerCase()
+  return LOCATION_OR_LICENSE_PHRASES.some((phrase) => text.includes(phrase))
+}
+
 /** Whether a 403 body asks the account owner to verify rather than meaning dead credentials. */
 export function isVerificationRequired(bodyText: string | undefined): boolean {
   if (!bodyText) return false
@@ -210,18 +229,24 @@ export function classifyHttpError(
         message: bodyText ? bodyText.slice(0, 200) : undefined,
       }
     }
-    // Google also reports quota walls as 403 RESOURCE_EXHAUSTED, and the
-    // endpoint fallback chain ends on hosts answering 403 for "no license"
-    // (not bad auth). Only treat a 403 as auth-failure when the body carries
-    // no quota wording — a false revoke permanently disables the account.
+    // Google also reports quota walls as 403 RESOURCE_EXHAUSTED, and rate limit
+    // walls with rate-limit phrasing. Only treat a 403 as auth-failure when the
+    // body carries no quota or rate-limit wording.
     const category = classifyRateLimit(bodyText, undefined)
-    if (category === 'quota_exhausted') {
+    if (category === 'quota_exhausted' || category === 'rate_limited' || category === 'soft_rate_limit') {
       return {
         kind: 'rate-limit',
         rateLimitCategory: category,
         status,
         message: bodyText ? bodyText.slice(0, 200) : undefined,
       }
+    }
+    // Regional, eligibility, licensing, or endpoint restrictions (e.g. consumer
+    // accounts falling through to autopush or unsupported locations) indicate
+    // endpoint/regional gating, NOT dead credentials (AGENTS.md). Collapsing them
+    // into auth-failure permanently disabled healthy accounts.
+    if (isLocationOrLicenseError(bodyText)) {
+      return { kind: 'transient', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
     }
     return { kind: 'auth-failure', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
   }
