@@ -106,10 +106,13 @@ export async function fetchAgyFirstOk(
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
       if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
-      // Retain a real rate-limit response (429) over downstream license walls
-      // (e.g. 403 from sandbox/autopush) so genuine quota exhaustion is not masked.
-      if (!lastSkipped || response.status === 429 || lastSkipped.status !== 429) {
-        lastSkipped = response
+      // Autopush (sandbox) 403 indicates consumer accounts have no license on the sandbox
+      // (AGENTS.md). It must never mask an earlier rate-limit (429) or primary network errors.
+      const isSandbox403 = response.status === 403 && baseEndpoint.includes('sandbox')
+      if (!isSandbox403) {
+        if (!lastSkipped || response.status === 429 || lastSkipped.status !== 429) {
+          lastSkipped = response
+        }
       }
     } catch (error) {
       lastNetworkError = error

@@ -295,9 +295,6 @@ const SESSION_ACCUMULATION_PHRASES = [
   'exceeds the maximum number of tokens',
   'input token count exceeds',
   'token count exceeds the maximum',
-  'request contains an invalid argument',
-  'invalid_argument',
-  'invalid argument',
 ] as const
 
 /**

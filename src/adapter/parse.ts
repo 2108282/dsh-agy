@@ -149,13 +149,21 @@ export interface ParseAgySseOptions {
    * for replay on the next turn (see signature-cache.ts).
    */
   onToolSignature?(toolCallId: string, signature: string): void
+  /**
+   * Maximum idle time in milliseconds allowed between streaming chunks before
+   * judging the underlying connection stalled/disconnected. Defaults to 100000ms (100s).
+   */
+  stallTimeoutMs?: number
 }
+
+const DEFAULT_STALL_TIMEOUT_MS = Number(process.env.DSH_AGY_STALL_TIMEOUT_MS) || 100_000
 
 export async function* parseAgySse(
   body: ReadableStream<Uint8Array>,
   options: ParseAgySseOptions = {},
 ): AsyncGenerator<StreamChunk> {
   const { signal } = options
+  const stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -333,7 +341,22 @@ export async function* parseAgySse(
       if (signal?.aborted) {
         throw new DOMException('aborted', 'AbortError')
       }
-      const { done, value } = await reader.read()
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        if (stallTimeoutMs > 0) {
+          timeoutId = setTimeout(() => {
+            reader.cancel().catch(() => {})
+            reject(new Error(`agy stream stalled: no data received for ${Math.round(stallTimeoutMs / 1000)}s (connection lost)`))
+          }, stallTimeoutMs)
+        }
+      })
+      let readResult: ReadableStreamReadResult<Uint8Array>
+      try {
+        readResult = await (stallTimeoutMs > 0 ? Promise.race([reader.read(), timeoutPromise]) : reader.read())
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId)
+      }
+      const { done, value } = readResult
       if (done) break
       buffer += decoder.decode(value, { stream: true })
       let newlineIndex: number

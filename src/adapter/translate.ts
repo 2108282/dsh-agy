@@ -392,12 +392,17 @@ function isFrPart(part: AgyPart): boolean {
  */
 export function coalesceContents(contents: AgyContent[]): AgyContent[] {
   const result: AgyContent[] = []
+  let lastFamily: boolean | undefined
   for (const content of contents) {
-    const last = result[result.length - 1]
-    if (last && last.role === content.role) {
-      last.parts.push(...content.parts)
-    } else {
-      result.push({ role: content.role, parts: [...content.parts] })
+    for (const part of content.parts) {
+      const family = isFrPart(part)
+      const last = result[result.length - 1]
+      if (last && lastFamily === family && last.role === content.role) {
+        last.parts.push(part)
+      } else {
+        result.push({ role: content.role, parts: [part] })
+        lastFamily = family
+      }
     }
   }
   return result
