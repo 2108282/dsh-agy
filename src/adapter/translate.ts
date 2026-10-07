@@ -158,16 +158,28 @@ function sanitizeToolSchema(schema: unknown): unknown {
 }
 
 /** Collect tool-call names by id so tool results can name their function. */
-function buildToolNameIndex(messages: readonly AgyMessageView[]): Map<string, string> {
-  const index = new Map<string, string>()
+function buildToolNameIndex(messages: readonly AgyMessageView[]): Map<string, string[]> {
+  const index = new Map<string, string[]>()
   for (const message of messages) {
     for (const block of message.content) {
       if (block.type === 'tool-call') {
-        index.set(block.id, block.name)
+        const list = index.get(block.id)
+        if (list) {
+          list.push(block.name)
+        } else {
+          index.set(block.id, [block.name])
+        }
       }
     }
   }
   return index
+}
+
+function resolveToolName(toolNames: Map<string, string[]>, toolCallId: string): string {
+  const list = toolNames.get(toolCallId)
+  if (!list || list.length === 0) return toolCallId
+  if (list.length === 1) return list[0]!
+  return list.shift()!
 }
 
 /**
@@ -181,9 +193,9 @@ function toolResultPart(
   toolCallId: string,
   isError: boolean,
   content: readonly AgyBlockView[],
-  toolNames: Map<string, string>,
+  toolNames: Map<string, string[]>,
 ): AgyPart {
-  const name = toolNames.get(toolCallId) ?? toolCallId
+  const name = resolveToolName(toolNames, toolCallId)
   const text = content
     .filter((block): block is Extract<AgyBlockView, { type: 'text' }> => block.type === 'text')
     .map((block) => block.text)
@@ -203,7 +215,7 @@ function toolResultPart(
 
 function blockToParts(
   block: AgyBlockView,
-  toolNames: Map<string, string>,
+  toolNames: Map<string, string[]>,
   images: Map<string, AgyResolvedImage>,
   /** Claude path: replayed thought blocks are rejected outright (see below). */
   dropThoughts = false,
@@ -290,7 +302,7 @@ function blockToParts(
 
 function messageToContent(
   message: AgyMessageView,
-  toolNames: Map<string, string>,
+  toolNames: Map<string, string[]>,
   images: Map<string, AgyResolvedImage>,
   multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>,
   messageIndex?: number,
@@ -380,17 +392,12 @@ function isFrPart(part: AgyPart): boolean {
  */
 export function coalesceContents(contents: AgyContent[]): AgyContent[] {
   const result: AgyContent[] = []
-  let lastFamily: boolean | undefined
   for (const content of contents) {
-    for (const part of content.parts) {
-      const family = isFrPart(part)
-      const last = result[result.length - 1]
-      if (last && lastFamily === family && last.role === content.role) {
-        last.parts.push(part)
-      } else {
-        result.push({ role: content.role, parts: [part] })
-        lastFamily = family
-      }
+    const last = result[result.length - 1]
+    if (last && last.role === content.role) {
+      last.parts.push(...content.parts)
+    } else {
+      result.push({ role: content.role, parts: [...content.parts] })
     }
   }
   return result
@@ -406,7 +413,7 @@ export const AGY_BEHAVIOR_INSTRUCTION = `【Antigravity 协作交互规范】
 1. 角色定位：你和用户是资深工作搭档
  交流时注意协作沟通节奏（拒绝机械回答）,同步技术思路，获得阶段性线索时向用户反馈关键发现，实现一边与用户对话沟通、一边高效推进任务的协作体验。
 2. 思考与推理（Thinking）：你的思考过程（thought / reasoning）强制使用中文，请一律使用中文进行深度思考和问题拆解。
-3. 边对话边执行（Crucial）：在执行任何工具操作（如 bash、edit、write 等）之前，必须先用简短自然的一两句话（中文）向用户说明准备做什么，排查什么、发现的问题或接下来计划执行的操作，然后再调用工具。切勿在没有向用户说明的情况下默默连续调用工具！
+3. 边对话边执行（Crucial）：在执行任何工具操作（如 bash、edit、write 等）之前，必须先用简短自然的一两句话（中文）向用户说明上一步完成情况，然后准备做什么，排查什么、发现的问题或接下来计划执行的操作，然后再调用工具。切勿在没有向用户说明的情况下默默连续调用工具！
 4. 持续思考：在收到工具执行结果后，若需要进一步分析或多步排查，请继续进行思考并向用户简述发现，再调用下一个工具。
 5. 对话语言：与用户的所有对话交互一律使用中文。`
 /** Level-thinking: single id + selectable low/medium/high via thinkingLevel (catalog thinking:'level'). */
