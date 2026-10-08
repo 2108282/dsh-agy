@@ -442,8 +442,6 @@ export class AgyAdapter extends LlmAdapter {
     // session id degrades to the per-account value rather than inventing a
     // conversation.
     const conversationAccount = ledgerAccountKey(session)
-    /** Wall-clock origin for this attempt's latency figures. */
-    const startedAt = Date.now()
     // Streaming dispatch: the account proxy MUST carry the generation request
     // (it carried only the control-plane calls before, so a proxied account
     // silently generated from the host's real IP), and the streaming
@@ -460,8 +458,11 @@ export class AgyAdapter extends LlmAdapter {
      * names a fresh upstream session and recovers the conversation. This is not
      * an account fault, so it does not go through `reportFailure`: the account
      * stays healthy and only the derived id changes.
+     *
+     * `attemptStartedAt` is the clock of the outer attempt that owns this send,
+     * so a transport failure is billed to that attempt rather than to the call.
      */
-    const sendAttempt = async (): Promise<{ response: Response; bodyText?: string }> => {
+    const sendAttempt = async (attemptStartedAt: number): Promise<{ response: Response; bodyText?: string }> => {
       for (let attempt = 0; ; attempt++) {
         const generation = conversationKey !== undefined && conversationAccount !== undefined
           ? currentSessionGeneration(conversationAccount, conversationKey)
@@ -504,7 +505,7 @@ export class AgyAdapter extends LlmAdapter {
           await this.options.reportFailure(classified.kind, session)
           // A transport failure consumed no tokens, but it is a real attempt
           // against this account's quota — record the request, not the usage.
-          this.recordUsage(session, options.model, { ok: false, reason: 'network-error' }, startedAt)
+          this.recordUsage(session, options.model, { ok: false, reason: 'network-error' }, attemptStartedAt)
           throw new LlmError(classified.message ?? 'agy fetch failed', 'TRANSPORT', { cause: error })
         }
         if (response.ok) return { response }
@@ -527,12 +528,19 @@ export class AgyAdapter extends LlmAdapter {
      * `MALFORMED_FUNCTION_CALL` before any user-facing text chunks have been
      * yielded to DSH. Gemini models occasionally glitch on tool-call JSON syntax;
      * re-sampling cleanly recovers the turn without crashing the conversation.
+     *
+     * This deliberately generalises the `sendAttempt` accumulation-wall resend
+     * into the stream path: the invariant that one DSH call is one provider
+     * attempt now has this second, documented exception (see AGENTS.md, "the
+     * adapter does not silent-retry"). Both exceptions share the same shape —
+     * the account is healthy and the request was accepted — and neither goes
+     * through `reportFailure`, so the pool sees nothing.
      */
     const MAX_MALFORMED_RETRIES = 3
 
     for (let malformedAttempt = 0; ; malformedAttempt++) {
       const attemptStartedAt = Date.now()
-      const { response, bodyText } = await sendAttempt()
+      const { response, bodyText } = await sendAttempt(attemptStartedAt)
 
       if (!response.ok) {
         const classified = classifyHttpError(response.status, response.headers, bodyText)
@@ -619,20 +627,53 @@ export class AgyAdapter extends LlmAdapter {
       }
 
       // Buffer stream chunks while reasoning or tool calls accumulate. If
-      // `text-delta` arrives, flush the buffer and stream directly to preserve
+      // `text-delta` arrives, commit the buffer and stream directly to preserve
       // real-time token streaming for user-facing responses. If
-      // `MALFORMED_FUNCTION_CALL` arrives before any text deltas were yielded,
+      // `MALFORMED_FUNCTION_CALL` arrives before any text deltas were committed,
       // the buffer is discarded and the attempt is cleanly retried.
+      //
+      // Cost, deliberately accepted: until the first `text-delta` this also holds
+      // `reasoning-delta`, so a tool-call-only turn (reasoning + functionCall, no
+      // text) delivers its thinking only at stream end. That is the price of
+      // being able to discard the attempt at all — flushing reasoning would make
+      // a thinking model's tool-call turn unretryable, which is the one case this
+      // loop exists to recover.
       const bufferedChunks: StreamChunk[] = []
+      /**
+       * Thought signatures observed during this attempt, held back with the
+       * chunks that carried them. `onToolSignature` fires as soon as the parser
+       * sees a signature, i.e. BEFORE the attempt is known to be keepable, so
+       * caching eagerly would let a discarded attempt write the process-global
+       * signature cache (keyed by `toolCallId` — and issue #99 records those ids
+       * colliding across distant turns, which would poison the very retry it
+       * triggered).
+       */
+      const pendingSignatures: Array<readonly [string, string]> = []
       let yieldedDirect = false
       let usage: { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined
       let ttftMs: number | undefined
+
+      /**
+       * Commit the attempt: persist the signatures that arrived with the held
+       * chunks, then hand those chunks to the consumer. Only ever called at a
+       * commit point — the retry path never calls it, so a discarded attempt
+       * leaves no trace.
+       */
+      const drainBuffer = (): StreamChunk[] => {
+        for (const [toolCallId, signature] of pendingSignatures) {
+          setThoughtSignature(toolCallId, signature)
+        }
+        pendingSignatures.length = 0
+        const drained = bufferedChunks.slice()
+        bufferedChunks.length = 0
+        return drained
+      }
 
       try {
         for await (const chunk of parseAgySse(response.body, {
           signal: options.signal,
           onToolSignature: (toolCallId, signature) => {
-            setThoughtSignature(toolCallId, signature)
+            pendingSignatures.push([toolCallId, signature])
           },
         })) {
           if (chunk.type === 'usage') {
@@ -651,17 +692,16 @@ export class AgyAdapter extends LlmAdapter {
             yield chunk
           } else if (chunk.type === 'text-delta') {
             yieldedDirect = true
-            for (const buffered of bufferedChunks) yield buffered
-            bufferedChunks.length = 0
+            for (const buffered of drainBuffer()) yield buffered
             yield chunk
           } else {
             bufferedChunks.push(chunk)
           }
         }
 
-        // Flush remaining buffered chunks (tool-call or completed reasoning turns).
-        for (const buffered of bufferedChunks) yield buffered
-        bufferedChunks.length = 0
+        // Commit whatever the turn left buffered (a tool-call or completed
+        // reasoning turn never emits a text-delta, so it ends up here).
+        for (const buffered of drainBuffer()) yield buffered
 
         await this.options.markSuccess?.(session)
         this.recordUsage(session, options.model, { ok: true, usage, ttftMs }, attemptStartedAt)
@@ -673,11 +713,27 @@ export class AgyAdapter extends LlmAdapter {
 
         // MALFORMED_FUNCTION_CALL is a transient model syntax fluke during tool calling.
         // If no text chunks were committed to DSH, discard the buffered chunks, record
-        // this attempt's usage, and retry with exponential backoff.
+        // this attempt's usage, and retry after a short linear wait. Across at most
+        // 3 retries the whole schedule is 1.2s, so the shape buys nothing here;
+        // what matters is that the first re-sample is not immediate.
         const isMalformed = error instanceof UnmappedFinishReasonError && error.reason === 'MALFORMED_FUNCTION_CALL'
         if (isMalformed && !yieldedDirect && malformedAttempt < MAX_MALFORMED_RETRIES) {
           this.recordUsage(session, options.model, { ok: false, reason: 'request-error' }, attemptStartedAt)
-          await sleepWithSignal(200 * (malformedAttempt + 1), options.signal)
+          // Abort-aware, and converted here rather than in a shared helper: a
+          // `catch` block never catches exceptions thrown by its own body, so
+          // awaiting the sleep inside this handler would let an abort landing in
+          // the backoff escape the generator as a raw `DOMException`. Every other
+          // abort path in this adapter reports the typed `ABORTED` code, which is
+          // what DSH's retry policy reads, so dropping it here would give the
+          // same cancellation two different shapes.
+          try {
+            await sleepWithSignal(200 * (malformedAttempt + 1), options.signal)
+          } catch (sleepError) {
+            if (sleepError instanceof DOMException && sleepError.name === 'AbortError') {
+              throw new LlmError('agy stream aborted', 'ABORTED', { cause: sleepError })
+            }
+            throw sleepError
+          }
           continue
         }
 

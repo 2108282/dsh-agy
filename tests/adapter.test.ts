@@ -9,6 +9,7 @@ import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalo
 import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId } from '../src/adapter/catalog.ts'
 import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
+import { getThoughtSignature } from '../src/runtime/signature-cache.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 function textMessage(role: Message['role'], text: string): Message {
   return { id: `m-${Math.random()}`, role, content: [{ type: 'text', text }] } as Message
@@ -1880,25 +1881,177 @@ describe('AgyAdapter', () => {
     expect(records.every((r) => (r as { ok: boolean }).ok === false)).toBe(true)
   })
 
-  it('streams text-delta directly to consumer without waiting for stream completion', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
-      'data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}]}]',
-      'data: [{"candidates":[{"content":{"parts":[{"text":"hello world"}]},"finishReason":"STOP"}]}]',
-      'data: [DONE]',
-    ]), { status: 200 })))
+  it('flushes buffered reasoning the moment a text-delta arrives, without waiting for the stream to end', async () => {
+    // A body that emits only when this test tells it to. Holding the stream open
+    // is what makes "real-time" falsifiable: a buffer flushed at stream end
+    // cannot deliver anything until the stream ends.
+    const encoder = new TextEncoder()
+    let push!: (line: string) => void
+    let close!: () => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        close = () => controller.close()
+        streamReady()
+      },
+    }), { status: 200 })))
 
     const adapter = new AgyAdapter({
       getSession: async () => session(),
       reportFailure: async () => {},
     })
 
+    const iterator = adapter.stream(generateOptions())[Symbol.asyncIterator]()
+    // Start the generator — it is lazy, so nothing runs until the first pull —
+    // then wait for the response body to exist before feeding it.
+    const firstPull = iterator.next()
+    await ready
+
+    // Reasoning first. The adapter must hold it: a turn that later ends malformed
+    // has to stay discardable, which is impossible once its reasoning is out.
+    push('data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}]}]')
+    // Text. The moment this lands, the held reasoning is delivered ahead of it.
+    push('data: [{"candidates":[{"content":{"parts":[{"text":"hello world"}]}}]}]')
+
+    const seen: string[] = []
+    const first = await firstPull
+    if (first.done !== true) seen.push(first.value.type)
+    while (!seen.includes('text-delta')) {
+      const next = await iterator.next()
+      if (next.done === true) break
+      seen.push(next.value.type)
+    }
+
+    // Nothing was closed, so every chunk above arrived WITHOUT waiting for stream
+    // completion, and the reasoning was delivered ahead of the text that
+    // triggered its flush.
+    expect(seen).toContain('reasoning-delta')
+    expect(seen.indexOf('reasoning-delta')).toBeLessThan(seen.indexOf('text-delta'))
+
+    // Terminate the stream properly, then drain. Closing without a finishReason
+    // would trip the completeness guard (issue #85) and mask this test's point.
+    push('data: [{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}]')
+    push('data: [DONE]')
+    close()
+    while ((await iterator.next()).done !== true) { /* drain */ }
+  })
+
+  it('delivers a tool-call-only turn that never emits a text-delta', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":{"command":"ls"}}}]},"finishReason":"STOP"}]}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+
     const chunks: StreamChunk[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
     for await (const chunk of adapter.stream(generateOptions())) {
       chunks.push(chunk)
     }
 
-    const textDelta = chunks.find((c) => c.type === 'text-delta') as { type: string; text?: string } | undefined
-    expect(textDelta?.text).toBe('hello world')
+    // A turn with no text at all never flips `yieldedDirect`, so it is delivered
+    // by the end-of-stream commit. Were that commit dropped, the buffer — and
+    // with it the only tool call in the turn — would vanish silently.
+    const toolCallDelta = chunks.find((c) => c.type === 'tool-call-delta') as { type: string; name?: string } | undefined
+    expect(toolCallDelta?.name).toBe('bash')
+  })
+
+  it('does not retry a malformed turn once a text-delta has been committed to the consumer', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}]',
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    // Re-sampling now would replay a turn the consumer has already seen, so the
+    // fail-safe fallthrough must fire with ZERO retries.
+    expect(callCount).toBe(1)
+  })
+
+  it('persists the thought signature of a recovered attempt but never of a discarded one', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      if (callCount === 1) {
+        // A malformed call that still carries a signature. The attempt is thrown
+        // away, so this signature must never reach the cache.
+        return new Response(sseStream([
+          'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-doomed","name":"bash","args":"{bad"},"thoughtSignature":"sig-doomed"}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+          'data: [DONE]',
+        ]), { status: 200 })
+      }
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-kept","name":"bash","args":{"command":"ls"}},"thoughtSignature":"sig-kept"}]},"finishReason":"STOP"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(callCount).toBe(2)
+    // The recovered attempt is committed, so its signature is cached...
+    expect(getThoughtSignature('call-kept')).toBe('sig-kept')
+    // ...while the discarded one is not. Caching it would let a malformed attempt
+    // write the process-global cache keyed by a toolCallId — and issue #99 records
+    // those ids colliding across distant turns, which would poison the retry.
+    expect(getThoughtSignature('call-doomed')).toBeNull()
+  })
+
+  it('reports an abort landing in the retry backoff as the typed ABORTED error', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const controller = new AbortController()
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    vi.useFakeTimers()
+    try {
+      const iterator = adapter.stream(generateOptions({ signal: controller.signal }))[Symbol.asyncIterator]()
+      const pending = iterator.next()
+      // Walk attempt 1 through to the backoff wait.
+      for (let i = 0; i < 50 && callCount === 0; i++) await vi.advanceTimersByTimeAsync(1)
+      // Attach the assertion BEFORE aborting. Awaiting the abort even one turn
+      // later leaves the rejection momentarily unobserved, which surfaces as an
+      // unhandled rejection rather than as this test's failure.
+      const verdict = expect(pending).rejects.toMatchObject({ code: 'ABORTED' })
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(200)
+      await verdict
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(callCount).toBe(1)
   })
 
   it('fails image requests with UNSUPPORTED_CONTENT and no fetch when the attachment service is absent', async () => {
