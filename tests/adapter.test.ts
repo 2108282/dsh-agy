@@ -373,17 +373,16 @@ describe('translate', () => {
     ])
   })
 
-  // The disambiguation must not change an unresolvable result: an id nothing
-  // recorded, and an id whose queue is already drained, both fall back to the
-  // raw id exactly as the old single-valued lookup did.
-  it('falls back to the raw id when a functionResponse resolves to no call', () => {
+  // Nothing ever recorded this id, so the caller's `?? toolCallId` fallback
+  // answers exactly as it did before the index became a queue. This is the ONLY
+  // case that reaches the raw id: an id is not a function name, so it is a
+  // guaranteed 400 and must stay the last resort.
+  it('falls back to the raw id when nothing recorded the id', () => {
     const messages = [
       { id: 'a', role: 'assistant', content: [
         { type: 'tool-call', id: 'call-1', name: 'read', arguments: '{}' },
       ]},
       { id: 't1', role: 'tool', toolCallId: 'call-orphan', content: [{ type: 'text', text: 'unmatched' }] },
-      { id: 't2', role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'first' }] },
-      { id: 't3', role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'second' }] },
     ]
     const body = toAgyRequestBody(
       generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
@@ -391,8 +390,34 @@ describe('translate', () => {
     )
     expect(body.request.contents[1]!.parts).toEqual([
       { functionResponse: { id: 'call-orphan', name: 'call-orphan', response: { result: 'unmatched', is_error: false } } },
-      { functionResponse: { id: 'call-1', name: 'read', response: { result: 'first', is_error: false } } },
-      { functionResponse: { id: 'call-1', name: 'call-1', response: { result: 'second', is_error: false } } },
+    ])
+  })
+
+  // More results than calls under one id — a call dropped from the history while
+  // its result survived. The queue is drained, so nothing is left to pair: the
+  // last name recorded for the id is a guess that is right whenever the repeated
+  // calls were the same tool, where the raw id would be wrong every time. Pinned
+  // with two DIFFERENT names so the choice of "last" over "first" is deliberate
+  // and a later change to it has to be intentional.
+  it('answers a drained id with the last name recorded for it', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call-x', name: 'read', arguments: '{}' },
+        { type: 'tool-call', id: 'call-x', name: 'write', arguments: '{}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'read body' }] },
+      { id: 't2', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'write body' }] },
+      { id: 't3', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'orphan body' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-x', name: 'read', response: { result: 'read body', is_error: false } } },
+      { functionResponse: { id: 'call-x', name: 'write', response: { result: 'write body', is_error: false } } },
+      { functionResponse: { id: 'call-x', name: 'write', response: { result: 'orphan body', is_error: false } } },
     ])
   })
 
