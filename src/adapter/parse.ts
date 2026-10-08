@@ -151,12 +151,12 @@ export interface ParseAgySseOptions {
   onToolSignature?(toolCallId: string, signature: string): void
   /**
    * Maximum idle time in milliseconds allowed between streaming chunks before
-   * judging the underlying connection stalled/disconnected. Defaults to 100000ms (100s).
+   * judging the underlying connection stalled/disconnected. Defaults to 180000ms (180s).
    */
   stallTimeoutMs?: number
 }
 
-const DEFAULT_STALL_TIMEOUT_MS = Number(process.env.DSH_AGY_STALL_TIMEOUT_MS) || 100_000
+const DEFAULT_STALL_TIMEOUT_MS = Number(process.env.DSH_AGY_STALL_TIMEOUT_MS) || 180_000
 
 export async function* parseAgySse(
   body: ReadableStream<Uint8Array>,
@@ -173,6 +173,8 @@ export async function* parseAgySse(
   let sawFinishReason = false
   let sawUsage = false
   let lastUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number } | null = null
+  let isStalled = false
+  let stallError: Error | null = null
 
   interface OpenBlock {
     kind: 'text' | 'reasoning' | 'tool-call'
@@ -345,16 +347,24 @@ export async function* parseAgySse(
       const timeoutPromise = new Promise<never>((_, reject) => {
         if (stallTimeoutMs > 0) {
           timeoutId = setTimeout(() => {
+            isStalled = true
+            stallError = new Error(`agy stream stalled: no data received for ${Math.round(stallTimeoutMs / 1000)}s (connection lost)`)
             reader.cancel().catch(() => {})
-            reject(new Error(`agy stream stalled: no data received for ${Math.round(stallTimeoutMs / 1000)}s (connection lost)`))
+            reject(stallError)
           }, stallTimeoutMs)
         }
       })
       let readResult: ReadableStreamReadResult<Uint8Array>
       try {
         readResult = await (stallTimeoutMs > 0 ? Promise.race([reader.read(), timeoutPromise]) : reader.read())
+      } catch (err) {
+        if (isStalled && stallError) throw stallError
+        throw err
       } finally {
         if (timeoutId !== undefined) clearTimeout(timeoutId)
+      }
+      if (isStalled && stallError) {
+        throw stallError
       }
       const { done, value } = readResult
       if (done) break
@@ -374,6 +384,9 @@ export async function* parseAgySse(
       const line = buffer
       buffer = ''
       for (const chunk of handleLine(line)) yield chunk
+    }
+    if (isStalled && stallError) {
+      throw stallError
     }
     // Completeness guard: a CLEAN close carrying neither `[DONE]` nor any
     // `finishReason` is a cut-short stream, not a completed turn — yielding
