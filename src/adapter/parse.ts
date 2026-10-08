@@ -258,6 +258,30 @@ export async function* parseAgySse(
       const message = payload.error.message ?? payload.error.status ?? 'upstream error'
       throw new Error(`agy stream error (${payload.error.code ?? 'unknown'}): ${message}`)
     }
+    if (payload.usageMetadata) {
+      // The upstream sends usageMetadata on EVERY SSE event (cumulative).
+      // Do NOT close the block here: closing per event would split one
+      // continuous text stream into a block per chunk (frontend renders
+      // block boundaries as line breaks). Stash the last (full) totals
+      // and emit one usage chunk at stream end.
+      //
+      // Stashed BEFORE the candidates loop below, because that loop is where an
+      // unmapped `finishReason` throws: the totals ride on the same event that
+      // ends the stream, and `drainLine` can only flush a stash that exists.
+      sawUsage = true
+      // DSH TokenUsage buckets are DISJOINT: inputTokens must be the
+      // uncached portion only; cache reads are reported separately.
+      // Reporting the full promptTokenCount here double-counts cached
+      // tokens in the stats line's cache-hit percentage (it divides by
+      // uncached + cacheRead + cacheWrite).
+      const promptTokens = payload.usageMetadata.promptTokenCount ?? 0
+      const cachedTokens = payload.usageMetadata.cachedContentTokenCount ?? 0
+      lastUsage = {
+        inputTokens: Math.max(0, promptTokens - cachedTokens),
+        outputTokens: payload.usageMetadata.candidatesTokenCount ?? 0,
+        cacheReadTokens: cachedTokens,
+      }
+    }
     for (const candidate of payload.candidates ?? []) {
       if (candidate.finishReason) {
         sawFinishReason = true
@@ -315,27 +339,29 @@ export async function* parseAgySse(
         }
       }
     }
-    if (payload.usageMetadata) {
-      // The upstream sends usageMetadata on EVERY SSE event (cumulative).
-      // Do NOT close the block here: closing per event would split one
-      // continuous text stream into a block per chunk (frontend renders
-      // block boundaries as line breaks). Stash the last (full) totals
-      // and emit one usage chunk at stream end.
-      sawUsage = true
-      // DSH TokenUsage buckets are DISJOINT: inputTokens must be the
-      // uncached portion only; cache reads are reported separately.
-      // Reporting the full promptTokenCount here double-counts cached
-      // tokens in the stats line's cache-hit percentage (it divides by
-      // uncached + cacheRead + cacheWrite).
-      const promptTokens = payload.usageMetadata.promptTokenCount ?? 0
-      const cachedTokens = payload.usageMetadata.cachedContentTokenCount ?? 0
-      lastUsage = {
-        inputTokens: Math.max(0, promptTokens - cachedTokens),
-        outputTokens: payload.usageMetadata.candidatesTokenCount ?? 0,
-        cacheReadTokens: cachedTokens,
-      }
-    }
     return out
+  }
+
+  /**
+   * Yield one line's chunks, but flush the stashed usage first if the line
+   * aborts the stream.
+   *
+   * An unmapped `finishReason` throws from inside `handleLine`, i.e. BEFORE the
+   * usageMetadata stash on that same line AND before the end-of-stream usage
+   * chunk below. Without this the caller sees no usage at all for an attempt
+   * that the upstream really did bill — and the adapter's `MALFORMED_FUNCTION_CALL`
+   * re-sample discards exactly such an attempt, so its tokens would silently
+   * never reach the ledger (AGENTS.md: the ledger accumulates per attempt).
+   */
+  const drainLine = function* (line: string): Generator<StreamChunk> {
+    try {
+      yield* handleLine(line)
+    } catch (error) {
+      if (error instanceof UnmappedFinishReasonError && lastUsage !== null) {
+        yield { type: 'usage', usage: lastUsage }
+      }
+      throw error
+    }
   }
 
   try {
@@ -373,7 +399,7 @@ export async function* parseAgySse(
       while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newlineIndex)
         buffer = buffer.slice(newlineIndex + 1)
-        for (const chunk of handleLine(line)) yield chunk
+        for (const chunk of drainLine(line)) yield chunk
       }
     }
     // Flush the decoder and process a final line that arrived without its
@@ -383,7 +409,7 @@ export async function* parseAgySse(
     if (buffer.trim() !== '') {
       const line = buffer
       buffer = ''
-      for (const chunk of handleLine(line)) yield chunk
+      for (const chunk of drainLine(line)) yield chunk
     }
     if (isStalled && stallError) {
       throw stallError

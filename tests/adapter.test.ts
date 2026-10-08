@@ -9,6 +9,7 @@ import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalo
 import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId } from '../src/adapter/catalog.ts'
 import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
+import { getThoughtSignature } from '../src/runtime/signature-cache.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 function textMessage(role: Message['role'], text: string): Message {
   return { id: `m-${Math.random()}`, role, content: [{ type: 'text', text }] } as Message
@@ -284,6 +285,140 @@ describe('translate', () => {
       { role: 'model', parts: [{ thoughtSignature: 'skip_thought_signature_validator', functionCall: { id: 'call-1', name: 'read', args: {} } }] },
       { role: 'user', parts: [{ functionResponse: { id: 'call-1', name: 'read', response: { result: 'body', is_error: false } } }] },
       { role: 'user', parts: [{ text: 'and also this' }] },
+    ])
+  })
+
+  // A tool-call id is NOT unique across a conversation: `parse.ts` falls back
+  // to `String(blockIndex)` when the upstream omits `functionCall.id` and that
+  // counter restarts at 0 for every stream, so distant turns routinely answer
+  // the same id. A single-valued name index resolved every one of them to the
+  // LAST call recorded under that id, and Google validates `name` against the
+  // call the response answers — the whole history was rejected with 400
+  // `INVALID_ARGUMENT` and every retry replayed the same broken history
+  // (issue #99). Measured pin, on the 0.2.0 vocabulary: turn 12's `job_output`
+  // result must not ride turn 23's `bash` name.
+  it('resolves a repeated tool-call id to each result\'s own call (0.2.0 tool-role)', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call_200990', name: 'job_output', arguments: '{"job":"b-1"}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call_200990', content: [{ type: 'text', text: 'job output' }] },
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: 'keep going' }] },
+      { id: 'a2', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call_200990', name: 'bash', arguments: '{"cmd":"ls"}' },
+      ]},
+      { id: 't2', role: 'tool', toolCallId: 'call_200990', content: [{ type: 'text', text: 'ls output' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user', 'user', 'model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call_200990', name: 'job_output', response: { result: 'job output', is_error: false } } },
+    ])
+    expect(body.request.contents[2]!.parts).toEqual([{ text: 'keep going' }])
+    expect(body.request.contents[4]!.parts).toEqual([
+      { functionResponse: { id: 'call_200990', name: 'bash', response: { result: 'ls output', is_error: false } } },
+    ])
+  })
+
+  // Same collision, 0.1.5 vocabulary: the result rides a `tool-result` content
+  // block inside a user message. The wire shape must not depend on which
+  // dsh-llm line produced the conversation, so the resolution cannot either.
+  it('resolves a repeated tool-call id to each result\'s own call (0.1.5 tool-result block)', () => {
+    const messages = [
+      { id: 'a', role: 'assistant' as const, content: [
+        { type: 'tool-call' as const, id: 'call_200990', name: 'job_output', arguments: '{"job":"b-1"}' },
+      ]},
+      { id: 'b', role: 'user' as const, content: [
+        { type: 'tool-result' as const, toolCallId: 'call_200990', content: [{ type: 'text' as const, text: 'job output' }] },
+      ]},
+      { id: 'a2', role: 'assistant' as const, content: [
+        { type: 'tool-call' as const, id: 'call_200990', name: 'bash', arguments: '{"cmd":"ls"}' },
+      ]},
+      { id: 'b2', role: 'user' as const, content: [
+        { type: 'tool-result' as const, toolCallId: 'call_200990', content: [{ type: 'text' as const, text: 'ls output' }] },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages }), {})
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user', 'model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call_200990', name: 'job_output', response: { result: 'job output', is_error: false } } },
+    ])
+    expect(body.request.contents[3]!.parts).toEqual([
+      { functionResponse: { id: 'call_200990', name: 'bash', response: { result: 'ls output', is_error: false } } },
+    ])
+  })
+
+  // Two parallel calls sharing ONE id inside the same assistant turn: the
+  // results arrive in the same order as the calls, so the queue must be
+  // consumed in document order rather than pinned to either name.
+  it('resolves two calls sharing one id within one assistant turn in order', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call-x', name: 'read', arguments: '{"path":"a"}' },
+        { type: 'tool-call', id: 'call-x', name: 'write', arguments: '{"path":"b"}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'read body' }] },
+      { id: 't2', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'write body' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-x', name: 'read', response: { result: 'read body', is_error: false } } },
+      { functionResponse: { id: 'call-x', name: 'write', response: { result: 'write body', is_error: false } } },
+    ])
+  })
+
+  // Nothing ever recorded this id, so the caller's `?? toolCallId` fallback
+  // answers exactly as it did before the index became a queue. This is the ONLY
+  // case that reaches the raw id: an id is not a function name, so it is a
+  // guaranteed 400 and must stay the last resort.
+  it('falls back to the raw id when nothing recorded the id', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call-1', name: 'read', arguments: '{}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call-orphan', content: [{ type: 'text', text: 'unmatched' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-orphan', name: 'call-orphan', response: { result: 'unmatched', is_error: false } } },
+    ])
+  })
+
+  // More results than calls under one id — a call dropped from the history while
+  // its result survived. The queue is drained, so nothing is left to pair: the
+  // last name recorded for the id is a guess that is right whenever the repeated
+  // calls were the same tool, where the raw id would be wrong every time. Pinned
+  // with two DIFFERENT names so the choice of "last" over "first" is deliberate
+  // and a later change to it has to be intentional.
+  it('answers a drained id with the last name recorded for it', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call-x', name: 'read', arguments: '{}' },
+        { type: 'tool-call', id: 'call-x', name: 'write', arguments: '{}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'read body' }] },
+      { id: 't2', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'write body' }] },
+      { id: 't3', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'orphan body' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-x', name: 'read', response: { result: 'read body', is_error: false } } },
+      { functionResponse: { id: 'call-x', name: 'write', response: { result: 'write body', is_error: false } } },
+      { functionResponse: { id: 'call-x', name: 'write', response: { result: 'orphan body', is_error: false } } },
     ])
   })
 
@@ -1680,6 +1815,377 @@ describe('AgyAdapter', () => {
       for await (const _ of adapter.stream(generateOptions())) void _
     }).rejects.toMatchObject({ code: 'UPSTREAM' })
     expect(failures).toEqual(['request-error'])
+  })
+
+  it('retries a stream ending in MALFORMED_FUNCTION_CALL and yields the recovered attempt', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      if (callCount === 1) {
+        return new Response(sseStream([
+          'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":"{bad"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+          'data: [DONE]',
+        ]), { status: 200 })
+      }
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":{"command":"ls"}}}]},"finishReason":"STOP"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const records: unknown[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { records.push(record) },
+    })
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream(generateOptions())) {
+      chunks.push(chunk)
+    }
+
+    expect(callCount).toBe(2)
+    const toolCallDelta = chunks.find((c) => c.type === 'tool-call-delta') as { type: string; name?: string } | undefined
+    expect(toolCallDelta?.name).toBe('bash')
+    expect(records).toHaveLength(2)
+    expect(records[0]).toMatchObject({ ok: false, reason: 'request-error' })
+    expect(records[1]).toMatchObject({ ok: true })
+  })
+
+  it('retries up to 3 times on persistent MALFORMED_FUNCTION_CALL before failing with UPSTREAM', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      // Every attempt is billed on its own, INCLUDING the terminal one: the
+      // upstream reports usage on the very event that ends the stream, so a
+      // fixture without it cannot catch the terminal path dropping the tokens.
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":42,"candidatesTokenCount":9}}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const failures: string[] = []
+    const records: Array<{ ok: boolean; usage?: { input: number; output: number } }> = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+      recordUsage: (record) => { records.push(record as never) },
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    expect(callCount).toBe(4)
+    expect(failures).toEqual(['request-error'])
+    expect(records).toHaveLength(4)
+    expect(records.every((r) => r.ok === false)).toBe(true)
+    // All four attempts consumed quota, so all four must be billed — the last
+    // one is the terminal failure, which used to drop its usage.
+    for (const record of records) {
+      expect(record).toMatchObject({ usage: { input: 42, output: 9 } })
+    }
+  })
+
+  it('flushes buffered reasoning the moment a text-delta arrives, without waiting for the stream to end', async () => {
+    // A body that emits only when this test tells it to. Holding the stream open
+    // is what makes "real-time" falsifiable: a buffer flushed at stream end
+    // cannot deliver anything until the stream ends.
+    const encoder = new TextEncoder()
+    let push!: (line: string) => void
+    let close!: () => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        close = () => controller.close()
+        streamReady()
+      },
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    const iterator = adapter.stream(generateOptions())[Symbol.asyncIterator]()
+    // Start the generator — it is lazy, so nothing runs until the first pull —
+    // then wait for the response body to exist before feeding it.
+    const firstPull = iterator.next()
+    await ready
+
+    // Reasoning first. The adapter must hold it: a turn that later ends malformed
+    // has to stay discardable, which is impossible once its reasoning is out.
+    push('data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}]}]')
+    // Text. The moment this lands, the held reasoning is delivered ahead of it.
+    push('data: [{"candidates":[{"content":{"parts":[{"text":"hello world"}]}}]}]')
+
+    const seen: string[] = []
+    const first = await firstPull
+    if (first.done !== true) seen.push(first.value.type)
+    while (!seen.includes('text-delta')) {
+      const next = await iterator.next()
+      if (next.done === true) break
+      seen.push(next.value.type)
+    }
+
+    // Nothing was closed, so every chunk above arrived WITHOUT waiting for stream
+    // completion, and the reasoning was delivered ahead of the text that
+    // triggered its flush.
+    expect(seen).toContain('reasoning-delta')
+    expect(seen.indexOf('reasoning-delta')).toBeLessThan(seen.indexOf('text-delta'))
+
+    // Terminate the stream properly, then drain. Closing without a finishReason
+    // would trip the completeness guard (issue #85) and mask this test's point.
+    push('data: [{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}]')
+    push('data: [DONE]')
+    close()
+    while ((await iterator.next()).done !== true) { /* drain */ }
+  })
+
+  it('delivers a tool-call-only turn that never emits a text-delta', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":{"command":"ls"}}}]},"finishReason":"STOP"}]}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+
+    const chunks: StreamChunk[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const chunk of adapter.stream(generateOptions())) {
+      chunks.push(chunk)
+    }
+
+    // A turn with no text at all never flips `yieldedDirect`, so it is delivered
+    // by the end-of-stream commit. Were that commit dropped, the buffer — and
+    // with it the only tool call in the turn — would vanish silently.
+    const toolCallDelta = chunks.find((c) => c.type === 'tool-call-delta') as { type: string; name?: string } | undefined
+    expect(toolCallDelta?.name).toBe('bash')
+  })
+
+  it('does not retry a malformed turn once a text-delta has been committed to the consumer', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}]',
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    // Re-sampling now would replay a turn the consumer has already seen, so the
+    // fail-safe fallthrough must fire with ZERO retries.
+    expect(callCount).toBe(1)
+  })
+
+  it('persists the thought signature of a recovered attempt but never of a discarded one', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      if (callCount === 1) {
+        // A malformed call that still carries a signature. The attempt is thrown
+        // away, so this signature must never reach the cache.
+        //
+        // The parts and the finishReason must sit on SEPARATE SSE events: the
+        // parser evaluates `candidate.finishReason` before the parts loop, so a
+        // single candidate carrying both throws before `onToolSignature` ever
+        // runs — which would make the discarded half of this assertion vacuous.
+        return new Response(sseStream([
+          'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-doomed","name":"bash","args":"{bad"},"thoughtSignature":"sig-doomed"}]}}]}]',
+          'data: [{"candidates":[{"content":{"parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+          'data: [DONE]',
+        ]), { status: 200 })
+      }
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-kept","name":"bash","args":{"command":"ls"}},"thoughtSignature":"sig-kept"}]},"finishReason":"STOP"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(callCount).toBe(2)
+    // The recovered attempt is committed, so its signature is cached...
+    expect(getThoughtSignature('call-kept')).toBe('sig-kept')
+    // ...while the discarded one is not. Caching it would let a malformed attempt
+    // write the process-global cache keyed by a toolCallId — and issue #99 records
+    // those ids colliding across distant turns, which would poison the retry.
+    expect(getThoughtSignature('call-doomed')).toBeNull()
+  })
+
+  it('bills a discarded attempt for the tokens it spent', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      if (callCount === 1) {
+        // The upstream reports usage on EVERY event (cumulative), including the
+        // one that ends the stream malformed. Those tokens were really spent, so
+        // the ledger must see them even though the attempt itself is thrown
+        // away — whether the totals arrived on an earlier line or on the very
+        // line that carries the unmapped finishReason.
+        return new Response(sseStream([
+          'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":{"command":"ls"}}}]}}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}]',
+          'data: [{"candidates":[{"content":{"parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}]',
+          'data: [DONE]',
+        ]), { status: 200 })
+      }
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const records: Array<{ ok: boolean; usage?: { input: number; output: number } }> = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { records.push(record as never) },
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(callCount).toBe(2)
+    // Each attempt is billed on its own: a re-sample rebuilt the body and made
+    // its own upstream request, so it consumed its own quota. Dropping the
+    // discarded attempt's usage is the silent-ledger regression in miniature.
+    expect(records).toHaveLength(2)
+    expect(records[0]).toMatchObject({ ok: false, reason: 'request-error', usage: { input: 10, output: 5 } })
+    expect(records[1]).toMatchObject({ ok: true, usage: { input: 10, output: 5 } })
+  })
+
+  it('commits a signature that arrives after the hand-off, so a mid-body death keeps it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      // Text first: this is the hand-off point.
+      'data: [{"candidates":[{"content":{"parts":[{"text":"sure, running that"}]}}]}]',
+      // Then a tool call carrying a signature — a shape that can only arrive
+      // after the buffer has already been handed off.
+      'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-late","name":"bash","args":{"command":"ls"}},"thoughtSignature":"sig-late"}]}}]}]',
+      // ...and the stream dies here with neither [DONE] nor a finishReason.
+    ]), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    // The tool call WAS delivered, so its signature must be cached. Anchoring
+    // the commit at stream end would drop it here and silently degrade the next
+    // round to the `skip_thought_signature_validator` sentinel.
+    expect(getThoughtSignature('call-late')).toBe('sig-late')
+  })
+
+  it('cancels the abandoned body of every discarded attempt', async () => {
+    let cancels = 0
+    // A body that delivers the malformed finishReason in its first chunk and
+    // still has unread bytes after it: the only way those bytes stop mattering
+    // is something cancelling the stream.
+    const malformed = 'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]\n'
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(malformed))
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n'.repeat(50)))
+        controller.close()
+      },
+      cancel() { cancels++ },
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    // The streaming dispatcher runs with `bodyTimeout: 0` so a reasoning pause
+    // survives, which means nothing else reclaims these connections: one per
+    // attempt, all four of them.
+    expect(cancels).toBe(4)
+  })
+
+  it('bills the terminal attempt too when content was already committed', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      // Text first, so the turn commits: this attempt can no longer be retried.
+      'data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}]',
+      // Then a content-level verdict carrying usage on the very same event.
+      'data: [{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":42,"candidatesTokenCount":9}}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+
+    const records: Array<{ ok: boolean; reason?: string; usage?: { input: number; output: number } }> = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { records.push(record as never) },
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    // The tokens were spent on a turn the consumer already saw, so they must be
+    // billed even though the attempt ends terminally with no retry.
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ ok: false, reason: 'request-error', usage: { input: 42, output: 9 } })
+  })
+
+  it('reports an abort landing in the retry backoff as the typed ABORTED error', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const controller = new AbortController()
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    vi.useFakeTimers()
+    try {
+      const iterator = adapter.stream(generateOptions({ signal: controller.signal }))[Symbol.asyncIterator]()
+      const pending = iterator.next()
+      // Walk attempt 1 through to the backoff wait.
+      for (let i = 0; i < 50 && callCount === 0; i++) await vi.advanceTimersByTimeAsync(1)
+      // Attach the assertion BEFORE aborting. Awaiting the abort even one turn
+      // later leaves the rejection momentarily unobserved, which surfaces as an
+      // unhandled rejection rather than as this test's failure.
+      const verdict = expect(pending).rejects.toMatchObject({ code: 'ABORTED' })
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(200)
+      await verdict
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(callCount).toBe(1)
   })
 
   it('fails image requests with UNSUPPORTED_CONTENT and no fetch when the attachment service is absent', async () => {

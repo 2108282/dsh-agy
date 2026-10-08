@@ -157,29 +157,77 @@ function sanitizeToolSchema(schema: unknown): unknown {
   return result
 }
 
-/** Collect tool-call names by id so tool results can name their function. */
-function buildToolNameIndex(messages: readonly AgyMessageView[]): Map<string, string[]> {
-  const index = new Map<string, string[]>()
+/**
+ * Every name a tool-call id was ever seen with, in document order, plus how
+ * many of them have already been answered.
+ *
+ * A tool-call id is NOT unique across a conversation: `parse.ts` falls back to
+ * `String(blockIndex)` when the upstream omits `functionCall.id` and that block
+ * counter restarts at 0 for every stream, so two distant turns routinely answer
+ * the same id (issue #99). A single `Map<string, string>` therefore had to
+ * declare a winner with last-write-wins, and an earlier turn's result was
+ * emitted with a LATER turn's tool name — which Google rejects with 400
+ * `INVALID_ARGUMENT`, permanently, because retrying replays the same history.
+ *
+ * The cursor rather than a `shift()`: consuming from the front of a shared array
+ * would destroy the record the drained fallback below needs.
+ */
+interface ToolNameIndexEntry {
+  readonly names: readonly string[]
+  /** How many of `names` have been handed to a result already. */
+  cursor: number
+}
+
+type ToolNameIndex = Map<string, ToolNameIndexEntry>
+
+/**
+ * Collect tool-call names by id so tool results can name their function.
+ *
+ * Names are PUSHED rather than set, so a repeated id keeps every occurrence in
+ * document order; resolution consumes them FIFO (see {@link resolveToolName}).
+ */
+function buildToolNameIndex(messages: readonly AgyMessageView[]): ToolNameIndex {
+  const index: ToolNameIndex = new Map()
   for (const message of messages) {
     for (const block of message.content) {
       if (block.type === 'tool-call') {
-        const list = index.get(block.id)
-        if (list) {
-          list.push(block.name)
-        } else {
-          index.set(block.id, [block.name])
-        }
+        const entry = index.get(block.id)
+        if (entry) (entry.names as string[]).push(block.name)
+        else index.set(block.id, { names: [block.name], cursor: 0 })
       }
     }
   }
   return index
 }
 
-function resolveToolName(toolNames: Map<string, string[]>, toolCallId: string): string {
-  const list = toolNames.get(toolCallId)
-  if (!list || list.length === 0) return toolCallId
-  if (list.length === 1) return list[0]!
-  return list.shift()!
+/**
+ * The name one `functionResponse` must carry, or undefined when the id answers
+ * no recorded call (the caller then falls back to the raw id, as it always did).
+ *
+ * FIFO per id: the calls recorded under an id are consumed in the order the
+ * results arrive in, so each result meets its OWN call even when the id
+ * repeats. Distinct ids never interact — the two cases a single-valued index
+ * conflated (a repeated id across distant turns, and two calls sharing one id
+ * inside one assistant turn) are handled by the same queue.
+ *
+ * Drained (more results than calls — a call dropped from the history while its
+ * result survived) is the one case with nothing left to pair: guessing the LAST
+ * name recorded for the id beats the pre-fix behaviour in both directions. The
+ * old lookup answered every extra result with that same last name, which was
+ * right whenever the repeated calls were the same tool and wrong the moment
+ * they were not; answering with the raw id instead would be wrong EVERY time,
+ * because an id is not a function name and upstream rejects it outright. So the
+ * last name is kept, and only a never-recorded id falls through to the raw id.
+ */
+function resolveToolName(toolNames: ToolNameIndex, toolCallId: string): string | undefined {
+  const entry = toolNames.get(toolCallId)
+  if (entry === undefined) return undefined
+  if (entry.cursor < entry.names.length) {
+    const name = entry.names[entry.cursor]
+    entry.cursor += 1
+    return name
+  }
+  return entry.names[entry.names.length - 1]
 }
 
 /**
@@ -193,9 +241,9 @@ function toolResultPart(
   toolCallId: string,
   isError: boolean,
   content: readonly AgyBlockView[],
-  toolNames: Map<string, string[]>,
+  toolNames: ToolNameIndex,
 ): AgyPart {
-  const name = resolveToolName(toolNames, toolCallId)
+  const name = resolveToolName(toolNames, toolCallId) ?? toolCallId
   const text = content
     .filter((block): block is Extract<AgyBlockView, { type: 'text' }> => block.type === 'text')
     .map((block) => block.text)
@@ -215,7 +263,7 @@ function toolResultPart(
 
 function blockToParts(
   block: AgyBlockView,
-  toolNames: Map<string, string[]>,
+  toolNames: ToolNameIndex,
   images: Map<string, AgyResolvedImage>,
   /** Claude path: replayed thought blocks are rejected outright (see below). */
   dropThoughts = false,
@@ -302,7 +350,7 @@ function blockToParts(
 
 function messageToContent(
   message: AgyMessageView,
-  toolNames: Map<string, string[]>,
+  toolNames: ToolNameIndex,
   images: Map<string, AgyResolvedImage>,
   multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>,
   messageIndex?: number,
@@ -421,6 +469,7 @@ export const AGY_BEHAVIOR_INSTRUCTION = `【Antigravity 协作交互规范】
 3. 边对话边执行（Crucial）：在执行任何工具操作（如 bash、edit、write 等）之前，必须先用简短自然的一两句话（中文）向用户说明上一步完成情况，然后准备做什么，排查什么、发现的问题或接下来计划执行的操作，然后再调用工具。切勿在没有向用户说明的情况下默默连续调用工具！
 4. 持续思考：在收到工具执行结果后，若需要进一步分析或多步排查，请继续进行思考并向用户简述发现，再调用下一个工具。
 5. 对话语言：与用户的所有对话交互一律使用中文。`
+
 /** Level-thinking: single id + selectable low/medium/high via thinkingLevel (catalog thinking:'level'). */
 const LEVEL_THINKING_LEVELS = new Set(['low', 'medium', 'high'])
 
@@ -535,10 +584,11 @@ export function toAgyRequestBody(
   const images = context.images ?? new Map<string, AgyResolvedImage>()
   const multimodalFiles = supportsMultimodalFiles(options.model) ? context.multimodalFiles : undefined
   const claude = isClaudeModel(options.model)
-  let contents = conversationMessages(messages)
-    .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude))
-    .filter((c): c is AgyContent => c !== null)
-  contents = coalesceContents(contents)
+  let contents = coalesceContents(
+    conversationMessages(messages)
+      .map((message, index) => messageToContent(message, toolNames, images, multimodalFiles, index, claude))
+      .filter((c): c is AgyContent => c !== null),
+  )
   if (claude) {
     contents = stripTrailingModelTurn(contents)
   }
