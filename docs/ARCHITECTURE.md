@@ -62,7 +62,7 @@ Dependency direction: `oauth/` and `store/` are leaves (no internal deps); `runt
 
 - `cli/` subcommands: read store -> call oauth/runtime -> print. No "command framework"; commander drives directly.
 - `web/plugin.ts`: registers two things over different transports — the management RPC at `/api/agy` (`connection.fetch.register`, so it inherits the host's trust fence and BrowserAuth) and the OAuth callback as a plain HTTP route (Google redirects a browser to it). `web/management.ts` holds the method table; `client/` is the browser half.
-- `adapter/adapter.ts`: the `LlmAdapter` subclass only orchestrates (get token -> refresh -> translate -> stream -> classify error); translation/parsing live in the deep modules.
+- `adapter/adapter.ts`: the `LlmAdapter` subclass orchestrates (get token -> refresh -> translate -> stream -> classify error); translation/parsing live in the deep modules. Two resends are in-adapter by design — the accumulation-wall resend and the `MALFORMED_FUNCTION_CALL` re-sample — both for the case where the account is healthy and the request was accepted.
 
 ## 4. Exclusions (why not)
 

@@ -62,7 +62,7 @@
 
 - `cli/` 各子命令：读 store → 调 oauth/runtime → 打印。不做"命令框架"，commander 直接驱动。
 - `web/plugin.ts`：用两种传输注册两样东西——`/api/agy` 的管理 RPC（`connection.fetch.register`，因此继承宿主的信任栅栏与 BrowserAuth），以及作为普通 HTTP 路由的 OAuth 回调（Google 会把浏览器重定向过去）。`web/management.ts` 持有方法表；`client/` 是浏览器半边。
-- `adapter/adapter.ts`：`LlmAdapter` 子类仅做编排（取 token→刷新→翻译→流式→分类错误），翻译/解析在深模块里。
+- `adapter/adapter.ts`：`LlmAdapter` 子类做编排（取 token→刷新→翻译→流式→分类错误），翻译/解析在深模块里。两处重发按设计留在 adapter 内——累积墙重发与 `MALFORMED_FUNCTION_CALL` 重采样——两者都只在"账号健康且请求已被接受"时发生。
 
 ## 4. 排除项（为什么不做）
 
