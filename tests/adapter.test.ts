@@ -1857,18 +1857,21 @@ describe('AgyAdapter', () => {
     let callCount = 0
     vi.stubGlobal('fetch', vi.fn(async () => {
       callCount++
+      // Every attempt is billed on its own, INCLUDING the terminal one: the
+      // upstream reports usage on the very event that ends the stream, so a
+      // fixture without it cannot catch the terminal path dropping the tokens.
       return new Response(sseStream([
-        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":42,"candidatesTokenCount":9}}]',
         'data: [DONE]',
       ]), { status: 200 })
     }))
 
     const failures: string[] = []
-    const records: unknown[] = []
+    const records: Array<{ ok: boolean; usage?: { input: number; output: number } }> = []
     const adapter = new AgyAdapter({
       getSession: async () => session(),
       reportFailure: async (kind) => { failures.push(kind) },
-      recordUsage: (record) => { records.push(record) },
+      recordUsage: (record) => { records.push(record as never) },
     })
 
     await expect(async () => {
@@ -1878,7 +1881,12 @@ describe('AgyAdapter', () => {
     expect(callCount).toBe(4)
     expect(failures).toEqual(['request-error'])
     expect(records).toHaveLength(4)
-    expect(records.every((r) => (r as { ok: boolean }).ok === false)).toBe(true)
+    expect(records.every((r) => r.ok === false)).toBe(true)
+    // All four attempts consumed quota, so all four must be billed — the last
+    // one is the terminal failure, which used to drop its usage.
+    for (const record of records) {
+      expect(record).toMatchObject({ usage: { input: 42, output: 9 } })
+    }
   })
 
   it('flushes buffered reasoning the moment a text-delta arrives, without waiting for the stream to end', async () => {
@@ -1992,8 +2000,14 @@ describe('AgyAdapter', () => {
       if (callCount === 1) {
         // A malformed call that still carries a signature. The attempt is thrown
         // away, so this signature must never reach the cache.
+        //
+        // The parts and the finishReason must sit on SEPARATE SSE events: the
+        // parser evaluates `candidate.finishReason` before the parts loop, so a
+        // single candidate carrying both throws before `onToolSignature` ever
+        // runs — which would make the discarded half of this assertion vacuous.
         return new Response(sseStream([
-          'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-doomed","name":"bash","args":"{bad"},"thoughtSignature":"sig-doomed"}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+          'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-doomed","name":"bash","args":"{bad"},"thoughtSignature":"sig-doomed"}]}}]}]',
+          'data: [{"candidates":[{"content":{"parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
           'data: [DONE]',
         ]), { status: 200 })
       }
@@ -2080,6 +2094,62 @@ describe('AgyAdapter', () => {
     // the commit at stream end would drop it here and silently degrade the next
     // round to the `skip_thought_signature_validator` sentinel.
     expect(getThoughtSignature('call-late')).toBe('sig-late')
+  })
+
+  it('cancels the abandoned body of every discarded attempt', async () => {
+    let cancels = 0
+    // A body that delivers the malformed finishReason in its first chunk and
+    // still has unread bytes after it: the only way those bytes stop mattering
+    // is something cancelling the stream.
+    const malformed = 'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]\n'
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(malformed))
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n'.repeat(50)))
+        controller.close()
+      },
+      cancel() { cancels++ },
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    // The streaming dispatcher runs with `bodyTimeout: 0` so a reasoning pause
+    // survives, which means nothing else reclaims these connections: one per
+    // attempt, all four of them.
+    expect(cancels).toBe(4)
+  })
+
+  it('bills the terminal attempt too when content was already committed', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      // Text first, so the turn commits: this attempt can no longer be retried.
+      'data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}]',
+      // Then a content-level verdict carrying usage on the very same event.
+      'data: [{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":42,"candidatesTokenCount":9}}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+
+    const records: Array<{ ok: boolean; reason?: string; usage?: { input: number; output: number } }> = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { records.push(record as never) },
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    // The tokens were spent on a turn the consumer already saw, so they must be
+    // billed even though the attempt ends terminally with no retry.
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ ok: false, reason: 'request-error', usage: { input: 42, output: 9 } })
   })
 
   it('reports an abort landing in the retry backoff as the typed ABORTED error', async () => {

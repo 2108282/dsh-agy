@@ -162,12 +162,18 @@ async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
     throw new DOMException('aborted', 'AbortError')
   }
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms)
-    if (!signal) return
+    // Both exits must detach the listener: `{ once: true }` covers the abort
+    // firing, but a timer that simply wins would otherwise leave `onAbort` on the
+    // request-scoped signal for the rest of the call.
     const onAbort = () => {
       clearTimeout(timer)
       reject(new DOMException('aborted', 'AbortError'))
     }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    if (!signal) return
     signal.addEventListener('abort', onAbort, { once: true })
   })
 }
@@ -696,8 +702,10 @@ export class AgyAdapter extends LlmAdapter {
 
           if (yieldedDirect) {
             // Past the hand-off, so this chunk leaves immediately: its signature
-            // commits here rather than at stream end.
-            commitSignatures()
+            // commits here rather than at stream end. A `functionCall` can arrive
+            // after the first `text-delta`, so a mid-body death must not cost the
+            // consumer a signature it was already delivered.
+            if (pendingSignatures.length !== 0) commitSignatures()
             yield chunk
           } else if (chunk.type === 'text-delta') {
             yieldedDirect = true
@@ -717,8 +725,8 @@ export class AgyAdapter extends LlmAdapter {
         // Commit whatever the turn left buffered (a tool-call or completed
         // reasoning turn never emits a text-delta, so it ends up here).
         if (ttftMs === undefined) ttftMs = Date.now() - attemptStartedAt
-        for (const buffered of drainBuffer()) yield buffered
         commitSignatures()
+        for (const buffered of drainBuffer()) yield buffered
 
         await this.options.markSuccess?.(session)
         this.recordUsage(session, options.model, { ok: true, usage, ttftMs }, attemptStartedAt)
@@ -740,6 +748,12 @@ export class AgyAdapter extends LlmAdapter {
           // unmapped finishReason; it stays undefined when the stream died too
           // early to report any.
           this.recordUsage(session, options.model, { ok: false, reason: 'request-error', usage }, attemptStartedAt)
+          // Abandon the body. The streaming dispatcher runs with `bodyTimeout: 0`
+          // (a reasoning pause must not be killed mid-turn), so nothing else
+          // reclaims this connection: leaving it unread can pin one per discarded
+          // attempt. `parseAgySse`'s finally has already released the reader
+          // lock, so cancelling is safe here.
+          await response.body?.cancel().catch(() => {})
           // Abort-aware, and converted here rather than in a shared helper: a
           // `catch` block never catches exceptions thrown by its own body, so
           // awaiting the sleep inside this handler would let an abort landing in
@@ -766,9 +780,13 @@ export class AgyAdapter extends LlmAdapter {
         // UPSTREAM error either way (below).
         const unmappedFinish = error instanceof UnmappedFinishReasonError
         await this.options.reportFailure(unmappedFinish ? 'request-error' : 'network-error', session)
-        // A stream that died mid-body may already have delivered billable
-        // content, so the attempt is recorded even though no usage chunk arrived.
-        this.recordUsage(session, options.model, { ok: false, reason: unmappedFinish ? 'request-error' : 'network-error' }, attemptStartedAt)
+        // `usage` is defined here exactly when the stream died with an unmapped
+        // finishReason: `parseAgySse` flushes its stashed totals before
+        // propagating that one error and no other. A mid-body socket death and
+        // the EOF completeness guard produce none, so the value is `undefined`
+        // there and passing it is a no-op — the retry path bills the same way.
+        this.recordUsage(session, options.model, { ok: false, reason: unmappedFinish ? 'request-error' : 'network-error', usage }, attemptStartedAt)
+        await response.body?.cancel().catch(() => {})
         // Deliberately UPSTREAM (terminal), not TRANSPORT: content may already
         // have been emitted, and DSH's retry policy honours TRANSPORT, so retrying
         // here would replay a partially-delivered turn. The account-level report
