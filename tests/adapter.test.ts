@@ -287,6 +287,115 @@ describe('translate', () => {
     ])
   })
 
+  // A tool-call id is NOT unique across a conversation: `parse.ts` falls back
+  // to `String(blockIndex)` when the upstream omits `functionCall.id` and that
+  // counter restarts at 0 for every stream, so distant turns routinely answer
+  // the same id. A single-valued name index resolved every one of them to the
+  // LAST call recorded under that id, and Google validates `name` against the
+  // call the response answers — the whole history was rejected with 400
+  // `INVALID_ARGUMENT` and every retry replayed the same broken history
+  // (issue #99). Measured pin, on the 0.2.0 vocabulary: turn 12's `job_output`
+  // result must not ride turn 23's `bash` name.
+  it('resolves a repeated tool-call id to each result\'s own call (0.2.0 tool-role)', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call_200990', name: 'job_output', arguments: '{"job":"b-1"}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call_200990', content: [{ type: 'text', text: 'job output' }] },
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: 'keep going' }] },
+      { id: 'a2', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call_200990', name: 'bash', arguments: '{"cmd":"ls"}' },
+      ]},
+      { id: 't2', role: 'tool', toolCallId: 'call_200990', content: [{ type: 'text', text: 'ls output' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user', 'user', 'model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call_200990', name: 'job_output', response: { result: 'job output', is_error: false } } },
+    ])
+    expect(body.request.contents[2]!.parts).toEqual([{ text: 'keep going' }])
+    expect(body.request.contents[4]!.parts).toEqual([
+      { functionResponse: { id: 'call_200990', name: 'bash', response: { result: 'ls output', is_error: false } } },
+    ])
+  })
+
+  // Same collision, 0.1.5 vocabulary: the result rides a `tool-result` content
+  // block inside a user message. The wire shape must not depend on which
+  // dsh-llm line produced the conversation, so the resolution cannot either.
+  it('resolves a repeated tool-call id to each result\'s own call (0.1.5 tool-result block)', () => {
+    const messages = [
+      { id: 'a', role: 'assistant' as const, content: [
+        { type: 'tool-call' as const, id: 'call_200990', name: 'job_output', arguments: '{"job":"b-1"}' },
+      ]},
+      { id: 'b', role: 'user' as const, content: [
+        { type: 'tool-result' as const, toolCallId: 'call_200990', content: [{ type: 'text' as const, text: 'job output' }] },
+      ]},
+      { id: 'a2', role: 'assistant' as const, content: [
+        { type: 'tool-call' as const, id: 'call_200990', name: 'bash', arguments: '{"cmd":"ls"}' },
+      ]},
+      { id: 'b2', role: 'user' as const, content: [
+        { type: 'tool-result' as const, toolCallId: 'call_200990', content: [{ type: 'text' as const, text: 'ls output' }] },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages }), {})
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user', 'model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call_200990', name: 'job_output', response: { result: 'job output', is_error: false } } },
+    ])
+    expect(body.request.contents[3]!.parts).toEqual([
+      { functionResponse: { id: 'call_200990', name: 'bash', response: { result: 'ls output', is_error: false } } },
+    ])
+  })
+
+  // Two parallel calls sharing ONE id inside the same assistant turn: the
+  // results arrive in the same order as the calls, so the queue must be
+  // consumed in document order rather than pinned to either name.
+  it('resolves two calls sharing one id within one assistant turn in order', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call-x', name: 'read', arguments: '{"path":"a"}' },
+        { type: 'tool-call', id: 'call-x', name: 'write', arguments: '{"path":"b"}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'read body' }] },
+      { id: 't2', role: 'tool', toolCallId: 'call-x', content: [{ type: 'text', text: 'write body' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents.map((content) => content.role)).toEqual(['model', 'user'])
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-x', name: 'read', response: { result: 'read body', is_error: false } } },
+      { functionResponse: { id: 'call-x', name: 'write', response: { result: 'write body', is_error: false } } },
+    ])
+  })
+
+  // The disambiguation must not change an unresolvable result: an id nothing
+  // recorded, and an id whose queue is already drained, both fall back to the
+  // raw id exactly as the old single-valued lookup did.
+  it('falls back to the raw id when a functionResponse resolves to no call', () => {
+    const messages = [
+      { id: 'a', role: 'assistant', content: [
+        { type: 'tool-call', id: 'call-1', name: 'read', arguments: '{}' },
+      ]},
+      { id: 't1', role: 'tool', toolCallId: 'call-orphan', content: [{ type: 'text', text: 'unmatched' }] },
+      { id: 't2', role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'first' }] },
+      { id: 't3', role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'second' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.contents[1]!.parts).toEqual([
+      { functionResponse: { id: 'call-orphan', name: 'call-orphan', response: { result: 'unmatched', is_error: false } } },
+      { functionResponse: { id: 'call-1', name: 'read', response: { result: 'first', is_error: false } } },
+      { functionResponse: { id: 'call-1', name: 'call-1', response: { result: 'second', is_error: false } } },
+    ])
+  })
+
   // A model turn whose parts all drop (a thoughts-only turn replayed on the
   // Claude path) is filtered to null, so the user turns around it fuse into
   // one. A placeholder turn would fabricate model content and a structural

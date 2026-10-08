@@ -157,17 +157,53 @@ function sanitizeToolSchema(schema: unknown): unknown {
   return result
 }
 
-/** Collect tool-call names by id so tool results can name their function. */
-function buildToolNameIndex(messages: readonly AgyMessageView[]): Map<string, string> {
-  const index = new Map<string, string>()
+/**
+ * Every name a tool-call id was ever seen with, in document order.
+ *
+ * A tool-call id is NOT unique across a conversation: `parse.ts` falls back to
+ * `String(blockIndex)` when the upstream omits `functionCall.id` and that block
+ * counter restarts at 0 for every stream, so two distant turns routinely answer
+ * the same id (issue #99). A single `Map<string, string>` therefore had to
+ * declare a winner with last-write-wins, and an earlier turn's result was
+ * emitted with a LATER turn's tool name — which Google rejects with 400
+ * `INVALID_ARGUMENT`, permanently, because retrying replays the same history.
+ */
+type ToolNameIndex = Map<string, string[]>
+
+/**
+ * Collect tool-call names by id so tool results can name their function.
+ *
+ * Names are PUSHED rather than set, so a repeated id keeps every occurrence in
+ * document order; resolution consumes them FIFO (see {@link resolveToolName}).
+ */
+function buildToolNameIndex(messages: readonly AgyMessageView[]): ToolNameIndex {
+  const index: ToolNameIndex = new Map()
   for (const message of messages) {
     for (const block of message.content) {
       if (block.type === 'tool-call') {
-        index.set(block.id, block.name)
+        const names = index.get(block.id)
+        if (names) names.push(block.name)
+        else index.set(block.id, [block.name])
       }
     }
   }
   return index
+}
+
+/**
+ * The name one `functionResponse` must carry, or undefined when the id answers
+ * no recorded call.
+ *
+ * FIFO per id: the calls recorded under an id are consumed in the order the
+ * results arrive in, so each result meets its OWN call even when the id
+ * repeats. Distinct ids never interact — the two cases a single-valued index
+ * conflated (a repeated id across distant turns, and two calls sharing one id
+ * inside one assistant turn) are handled by the same queue.
+ */
+function resolveToolName(toolNames: ToolNameIndex, toolCallId: string): string | undefined {
+  const names = toolNames.get(toolCallId)
+  if (names === undefined || names.length === 0) return undefined
+  return names.shift()
 }
 
 /**
@@ -181,9 +217,9 @@ function toolResultPart(
   toolCallId: string,
   isError: boolean,
   content: readonly AgyBlockView[],
-  toolNames: Map<string, string>,
+  toolNames: ToolNameIndex,
 ): AgyPart {
-  const name = toolNames.get(toolCallId) ?? toolCallId
+  const name = resolveToolName(toolNames, toolCallId) ?? toolCallId
   const text = content
     .filter((block): block is Extract<AgyBlockView, { type: 'text' }> => block.type === 'text')
     .map((block) => block.text)
@@ -203,7 +239,7 @@ function toolResultPart(
 
 function blockToParts(
   block: AgyBlockView,
-  toolNames: Map<string, string>,
+  toolNames: ToolNameIndex,
   images: Map<string, AgyResolvedImage>,
   /** Claude path: replayed thought blocks are rejected outright (see below). */
   dropThoughts = false,
@@ -290,7 +326,7 @@ function blockToParts(
 
 function messageToContent(
   message: AgyMessageView,
-  toolNames: Map<string, string>,
+  toolNames: ToolNameIndex,
   images: Map<string, AgyResolvedImage>,
   multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>,
   messageIndex?: number,
