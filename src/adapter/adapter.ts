@@ -654,16 +654,25 @@ export class AgyAdapter extends LlmAdapter {
       let ttftMs: number | undefined
 
       /**
-       * Commit the attempt: persist the signatures that arrived with the held
-       * chunks, then hand those chunks to the consumer. Only ever called at a
-       * commit point — the retry path never calls it, so a discarded attempt
-       * leaves no trace.
+       * Persist the signatures observed so far.
+       *
+       * Called at every point where the chunks that carried them have been
+       * handed off — never on the discard path, so a thrown-away attempt leaves
+       * no trace. The hand-off is the only sound anchor: a `functionCall` can
+       * arrive AFTER the first `text-delta` (text-then-tool is a common shape),
+       * so anchoring at stream end would drop the signature of an already
+       * delivered call the moment the stream dies mid-body, silently degrading
+       * the next round to the sentinel.
        */
-      const drainBuffer = (): StreamChunk[] => {
+      const commitSignatures = (): void => {
         for (const [toolCallId, signature] of pendingSignatures) {
           setThoughtSignature(toolCallId, signature)
         }
         pendingSignatures.length = 0
+      }
+
+      /** Hand the held chunks to the consumer. */
+      const drainBuffer = (): StreamChunk[] => {
         const drained = bufferedChunks.slice()
         bufferedChunks.length = 0
         return drained
@@ -683,15 +692,21 @@ export class AgyAdapter extends LlmAdapter {
               cacheRead: chunk.usage.cacheReadTokens ?? 0,
               cacheWrite: chunk.usage.cacheWriteTokens ?? 0,
             }
-          } else if (ttftMs === undefined && (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta')) {
-            // First model-authored output: the honest end of "time to first token".
-            ttftMs = Date.now() - attemptStartedAt
           }
 
           if (yieldedDirect) {
+            // Past the hand-off, so this chunk leaves immediately: its signature
+            // commits here rather than at stream end.
+            commitSignatures()
             yield chunk
           } else if (chunk.type === 'text-delta') {
             yieldedDirect = true
+            commitSignatures()
+            // TTFT is when the CONSUMER first sees output, not when the parser
+            // first produced it: a buffered turn holds every chunk until this
+            // point, so measuring at parse time would under-report the user's
+            // wait by the whole thinking period.
+            ttftMs = Date.now() - attemptStartedAt
             for (const buffered of drainBuffer()) yield buffered
             yield chunk
           } else {
@@ -701,7 +716,9 @@ export class AgyAdapter extends LlmAdapter {
 
         // Commit whatever the turn left buffered (a tool-call or completed
         // reasoning turn never emits a text-delta, so it ends up here).
+        if (ttftMs === undefined) ttftMs = Date.now() - attemptStartedAt
         for (const buffered of drainBuffer()) yield buffered
+        commitSignatures()
 
         await this.options.markSuccess?.(session)
         this.recordUsage(session, options.model, { ok: true, usage, ttftMs }, attemptStartedAt)
@@ -718,7 +735,11 @@ export class AgyAdapter extends LlmAdapter {
         // what matters is that the first re-sample is not immediate.
         const isMalformed = error instanceof UnmappedFinishReasonError && error.reason === 'MALFORMED_FUNCTION_CALL'
         if (isMalformed && !yieldedDirect && malformedAttempt < MAX_MALFORMED_RETRIES) {
-          this.recordUsage(session, options.model, { ok: false, reason: 'request-error' }, attemptStartedAt)
+          // Bill the tokens this attempt really spent. `usage` arrives because
+          // parseAgySse flushes its stashed totals before propagating an
+          // unmapped finishReason; it stays undefined when the stream died too
+          // early to report any.
+          this.recordUsage(session, options.model, { ok: false, reason: 'request-error', usage }, attemptStartedAt)
           // Abort-aware, and converted here rather than in a shared helper: a
           // `catch` block never catches exceptions thrown by its own body, so
           // awaiting the sleep inside this handler would let an abort landing in

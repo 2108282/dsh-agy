@@ -2018,6 +2018,70 @@ describe('AgyAdapter', () => {
     expect(getThoughtSignature('call-doomed')).toBeNull()
   })
 
+  it('bills a discarded attempt for the tokens it spent', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      if (callCount === 1) {
+        // The upstream reports usage on EVERY event (cumulative), including the
+        // one that ends the stream malformed. Those tokens were really spent, so
+        // the ledger must see them even though the attempt itself is thrown
+        // away — whether the totals arrived on an earlier line or on the very
+        // line that carries the unmapped finishReason.
+        return new Response(sseStream([
+          'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":{"command":"ls"}}}]}}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}]',
+          'data: [{"candidates":[{"content":{"parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}]',
+          'data: [DONE]',
+        ]), { status: 200 })
+      }
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const records: Array<{ ok: boolean; usage?: { input: number; output: number } }> = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { records.push(record as never) },
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(callCount).toBe(2)
+    // Each attempt is billed on its own: a re-sample rebuilt the body and made
+    // its own upstream request, so it consumed its own quota. Dropping the
+    // discarded attempt's usage is the silent-ledger regression in miniature.
+    expect(records).toHaveLength(2)
+    expect(records[0]).toMatchObject({ ok: false, reason: 'request-error', usage: { input: 10, output: 5 } })
+    expect(records[1]).toMatchObject({ ok: true, usage: { input: 10, output: 5 } })
+  })
+
+  it('commits a signature that arrives after the hand-off, so a mid-body death keeps it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      // Text first: this is the hand-off point.
+      'data: [{"candidates":[{"content":{"parts":[{"text":"sure, running that"}]}}]}]',
+      // Then a tool call carrying a signature — a shape that can only arrive
+      // after the buffer has already been handed off.
+      'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-late","name":"bash","args":{"command":"ls"}},"thoughtSignature":"sig-late"}]}}]}]',
+      // ...and the stream dies here with neither [DONE] nor a finishReason.
+    ]), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    // The tool call WAS delivered, so its signature must be cached. Anchoring
+    // the commit at stream end would drop it here and silently degrade the next
+    // round to the `skip_thought_signature_validator` sentinel.
+    expect(getThoughtSignature('call-late')).toBe('sig-late')
+  })
+
   it('reports an abort landing in the retry backoff as the typed ABORTED error', async () => {
     let callCount = 0
     vi.stubGlobal('fetch', vi.fn(async () => {
