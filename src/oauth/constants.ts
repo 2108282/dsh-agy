@@ -74,6 +74,20 @@ export const AGY_ENDPOINT_FALLBACKS: readonly string[] = [
 ]
 
 /**
+ * Quota summary endpoint fallback order.
+ * Unlike runtime generation (streamGenerateContent) which requires daily to avoid
+ * RESOURCE_EXHAUSTED on consumer OAuth accounts, retrieveUserQuotaSummary is open
+ * on prod and prod returns both Gemini and 3P quota groups (daily recently removed
+ * Gemini Models from its retrieveUserQuotaSummary response). Order: prod first, then daily/sandbox/autopush.
+ */
+export const AGY_QUOTA_ENDPOINT_FALLBACKS: readonly string[] = [
+  AGY_ENDPOINT_PROD,
+  AGY_ENDPOINT_DAILY,
+  AGY_ENDPOINT_DAILY_SANDBOX,
+  AGY_ENDPOINT_AUTOPUSH,
+]
+
+/**
  * Statuses that mean "this endpoint is not usable for this attempt"; skip to the
  * next one in the chain. 429/403 = rate/quota/entitlement wall, 503 = capacity
  * rejection (e.g. "No capacity available for model ..."). A 503 skipped here

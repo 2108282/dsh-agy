@@ -5,7 +5,7 @@
  */
 
 import { AgyAuthError, AgyPoolBlockedError } from './types.ts'
-import type { AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails, QuotaGroup } from './types.ts'
+import type { AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails, QuotaGroup, QuotaWindow } from './types.ts'
 import { refreshAccessToken } from './oauth/refresh.ts'
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from './oauth/auth.ts'
 import type { AccountStore } from './store/accounts.ts'
@@ -643,7 +643,31 @@ export class AgySessionManager {
         // for this account, so one cycle pays one round trip and both caches read
         // the same groups. It only carries the FETCH — this path still writes
         // `cachedLimits` and nothing else.
-        const groups = await this.probeQuotaSummary(account)
+        let groups = await this.probeQuotaSummary(account)
+        // If upstream retrieveUserQuotaSummary omitted the Gemini group and account.cachedQuota
+        // has Google quota from fetchAvailableModels, synthesize a Gemini Models group fallback.
+        if (groups.length > 0 && !groups.some((g) => /gemini|google/i.test(g.name))) {
+          const gq = account.cachedQuota?.google
+          if (gq && typeof gq.remainingFraction === 'number') {
+            const windows: QuotaWindow[] = [
+              {
+                bucketId: 'gemini-5h',
+                window: '5h',
+                remainingFraction: gq.remainingFraction,
+                resetTime: gq.resetTime ?? null,
+              },
+            ]
+            if (typeof gq.weeklyFraction === 'number') {
+              windows.push({
+                bucketId: 'gemini-weekly',
+                window: 'weekly',
+                remainingFraction: gq.weeklyFraction,
+                resetTime: gq.weeklyResetTime ?? null,
+              })
+            }
+            groups = [{ name: 'Gemini Models', windows }, ...groups]
+          }
+        }
         if (groups.length === 0) return { key, ok: false as const }
         return { key, ok: true as const, groups, updatedAt: Date.now() }
       } catch {

@@ -25,7 +25,7 @@
  * (that pair is what answers 200 here), so nothing new is impersonated.
  */
 
-import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
+import { AGY_QUOTA_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
 import { QUOTA_WINDOWS } from '../types.ts'
 import type { QuotaGroup, QuotaWindow } from '../types.ts'
@@ -134,7 +134,9 @@ export async function fetchQuotaSummary(
   fetchImpl: typeof fetch = proxiedFetch,
 ): Promise<QuotaGroup[]> {
   const body = JSON.stringify(projectId ? { project: projectId } : {})
-  for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
+  const groupMap = new Map<string, QuotaGroup>()
+
+  for (const baseEndpoint of AGY_QUOTA_ENDPOINT_FALLBACKS) {
     try {
       const response = await fetchImpl(`${baseEndpoint}${QUOTA_SUMMARY_PATH}`, {
         method: 'POST',
@@ -146,10 +148,21 @@ export async function fetchQuotaSummary(
         body,
       })
       if (!response.ok) continue
-      return parseQuotaSummary(await response.json())
+      const groups = parseQuotaSummary(await response.json())
+      for (const group of groups) {
+        if (!groupMap.has(group.name)) {
+          groupMap.set(group.name, group)
+        }
+      }
+      const hasGemini = Array.from(groupMap.keys()).some((k) => /gemini|google/i.test(k))
+      const has3p = Array.from(groupMap.keys()).some((k) => /claude|gpt|3p/i.test(k))
+      // Stop early if both major groups are populated or if Gemini was already present in groups
+      if ((hasGemini && has3p) || (hasGemini && groups.length > 0)) {
+        break
+      }
     } catch {
       // Try the next endpoint; the caller treats an empty result as "unknown".
     }
   }
-  return []
+  return Array.from(groupMap.values())
 }

@@ -36,7 +36,7 @@ import {
   generateAntigravityRequestId,
 } from '../src/runtime/identity.ts'
 import { _clearVersionCacheForTest, resolveAntigravityVersion } from '../src/runtime/version.ts'
-import { parseQuotaSummary } from '../src/adapter/quota-summary.ts'
+import { fetchQuotaSummary, parseQuotaSummary } from '../src/adapter/quota-summary.ts'
 import {
   FAMILY_UNKNOWN,
   familiesForBucketId,
@@ -1090,6 +1090,39 @@ describe('quota summary (5h / weekly windows)', () => {
       }],
     })
     expect(groups[0]!.windows.map((w) => w.bucketId)).toEqual(['ok'])
+  })
+
+  it('fetchQuotaSummary returns merged groups when an endpoint is missing Gemini', async () => {
+    // Simulates daily only returning 3p models, while prod returns Gemini models
+    const fakeFetch: typeof fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('cloudcode-pa.googleapis.com') && !url.includes('daily')) {
+        return new Response(JSON.stringify({
+          groups: [
+            {
+              displayName: 'Gemini Models',
+              buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.9 }],
+            },
+            {
+              displayName: 'Claude and GPT models',
+              buckets: [{ bucketId: '3p-5h', window: '5h', remainingFraction: 1 }],
+            },
+          ],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        groups: [
+          {
+            displayName: 'Claude and GPT models',
+            buckets: [{ bucketId: '3p-5h', window: '5h', remainingFraction: 1 }],
+          },
+        ],
+      }), { status: 200 })
+    })
+
+    const groups = await fetchQuotaSummary('test-token', undefined, fakeFetch)
+    expect(groups.map((g) => g.name)).toContain('Gemini Models')
+    expect(groups.map((g) => g.name)).toContain('Claude and GPT models')
   })
 })
 
