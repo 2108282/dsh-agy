@@ -464,6 +464,7 @@ interface AccountHandlers {
    * can be tested; an empty string means "use the account's stored proxy".
    */
   onTestProxy: (index: number, proxy: string) => void
+  onRefreshLimits?: () => void
 }
 
 /** One account's detail: identity, cumulative usage, proxy, and its actions. */
@@ -622,7 +623,10 @@ function AccountDetail(props: {
                 ? h('div', { className: 'agy-limit-burn' },
                   t('limitBurnWarn', { value: burnHorizon(hoursLeft!, t) }))
                 : null)
-          })))))
+          })))),
+    handlers.onRefreshLimits === undefined
+      ? undefined
+      : button(t('refresh'), handlers.onRefreshLimits, { size: 'sm', disabled: busy }))
 
   const usageBlock = usage === null ? null : card(
     t('usageCumulative'),
@@ -2105,9 +2109,20 @@ export function AgySettings(props: {
    * deliberately not awaited together: `refresh()` is the fast local reload,
    * while the forced probe can take seconds, and the rows should not wait on it.
    */
-  const refreshAll = useCallback(() => {
-    void refresh()
-    if (tab === 'accounts') void loadLimits(true, true)
+  const refreshAll = useCallback(async () => {
+    setBusy(true)
+    setNotice(undefined)
+    try {
+      if (tab === 'accounts') {
+        await loadLimits(true, true)
+      }
+      await refresh()
+      setError(undefined)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      if (alive.current) setBusy(false)
+    }
   }, [loadLimits, refresh, tab])
 
   /**
@@ -2291,7 +2306,12 @@ export function AgySettings(props: {
           + (result.error === undefined ? '' : `\n${result.error}`))
       })
     },
-  }), [act, copyText, models, refresh, rpc, runAction, setActionError, setNotice, t])
+    onRefreshLimits: () => {
+      void act(async () => {
+        await loadLimits(true, true)
+      })
+    },
+  }), [act, copyText, loadLimits, models, refresh, rpc, runAction, setActionError, setNotice, t])
 
   const tabButton = (id: TabId, label: string, count?: number): ReactNode =>
     h('button', {

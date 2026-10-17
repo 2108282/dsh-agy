@@ -465,12 +465,6 @@ export const LIMITS_CACHE_TTL_MS = 10 * 60 * 1000
 export function isLimitsStale(account: ManagedAccount, now = Date.now()): boolean {
   const updatedAt = account.cachedLimits?.updatedAt
   if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) return true
-  // If the cached limits returned groups but is missing Gemini models (e.g. from an older probe or an endpoint omission),
-  // consider it immediately stale so the next UI load re-probes and heals the display.
-  const groups = account.cachedLimits?.groups
-  if (Array.isArray(groups) && groups.length > 0 && !groups.some((g) => /gemini|google/i.test(g.name))) {
-    return true
-  }
   return now - updatedAt > LIMITS_CACHE_TTL_MS
 }
 
