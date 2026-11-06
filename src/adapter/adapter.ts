@@ -774,6 +774,18 @@ export class AgyAdapter extends LlmAdapter {
           )
         }
 
+        const isPremature = error instanceof Error && error.message.includes('terminated prematurely')
+        if (isPremature && !yieldedDirect) {
+          await this.options.reportFailure('network-error', session)
+          this.recordUsage(session, options.model, { ok: false, reason: 'network-error', usage }, attemptStartedAt)
+          await response.body?.cancel().catch(() => {})
+          throw new LlmError(
+            `${error.message} — connection closed before response, retrying`,
+            'TIMEOUT',
+            { cause: error },
+          )
+        }
+
         // MALFORMED_FUNCTION_CALL is a transient model syntax fluke during tool calling.
         // If no text chunks were committed to DSH, discard the buffered chunks, record
         // this attempt's usage, and retry after a short linear wait. Across at most

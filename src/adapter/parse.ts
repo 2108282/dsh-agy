@@ -210,8 +210,10 @@ async function readWithIdleTimeout(
   if (timeoutMs <= 0 && signal === undefined) return pending
   let timer: ReturnType<typeof setTimeout> | undefined
   let onAbort: (() => void) | undefined
+  let watchdogError: Error | null = null
   const watchdog = new Promise<never>((_resolve, reject) => {
     const abandon = (error: Error): void => {
+      watchdogError = error
       reject(error)
       void reader.cancel(error).catch(() => {})
     }
@@ -228,7 +230,12 @@ async function readWithIdleTimeout(
     }
   })
   try {
-    return await Promise.race([pending, watchdog])
+    const res = await Promise.race([pending, watchdog])
+    if (watchdogError) throw watchdogError
+    return res
+  } catch (err) {
+    if (watchdogError) throw watchdogError
+    throw err
   } finally {
     if (timer !== undefined) clearTimeout(timer)
     if (signal && onAbort) signal.removeEventListener('abort', onAbort)
