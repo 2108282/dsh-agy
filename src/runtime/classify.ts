@@ -258,7 +258,6 @@ export function classifyHttpError(
     if (isLocationOrLicenseError(bodyText)) {
       return { kind: "transient", status, message: bodyText ? bodyText.slice(0, 200) : undefined }
     }
-    }
     return { kind: 'auth-failure', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
   }
   if (status === 404) {

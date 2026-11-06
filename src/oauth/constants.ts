@@ -129,7 +129,6 @@ export async function fetchAgyFirstOk(
           lastSkipped = response
         }
       }
-      }
     } catch (error) {
       lastNetworkError = error
       // Fail-closed only while an explicit per-account proxy is in effect: the
