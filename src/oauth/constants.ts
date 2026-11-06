@@ -120,13 +120,15 @@ export async function fetchAgyFirstOk(
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
       if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
-      // Autopush (sandbox) 403 indicates consumer accounts have no license on the sandbox
-      // (AGENTS.md). It must never mask an earlier rate-limit (429) or primary network errors.
-      const isSandbox403 = response.status === 403 && baseEndpoint.includes('sandbox')
+      // Prefer keeping a 429 or 503 response from earlier production endpoints
+      // rather than letting the internal autopush sandbox 403 (which always fails for
+      // consumer accounts with "no license") overwrite the real rate-limit/capacity signal.
+      const isSandbox403 = response.status === 403 && (baseEndpoint === AGY_ENDPOINT_AUTOPUSH || baseEndpoint.includes('sandbox'))
       if (!isSandbox403) {
-        if (!lastSkipped || response.status === 429 || lastSkipped.status !== 429) {
+        if (!lastSkipped || response.status === 429 || response.status === 503 || (lastSkipped.status !== 429 && lastSkipped.status !== 503)) {
           lastSkipped = response
         }
+      }
       }
     } catch (error) {
       lastNetworkError = error
@@ -159,7 +161,8 @@ export async function fetchAgyFirstOk(
  * numerically is meaningless and mixing them advertises a version that does not
  * exist for the product we name.
  */
-export const AGY_VERSION_FALLBACK = '1.2.9'
+export const AGY_VERSION_FALLBACK = '2.28.2'
+export const AGY_HUB_CHANGELIST = '1003475615'
 
 /**
  * `ClientMetadata.platform` value: the proto enum NAME, as protobuf-JSON emits it.
@@ -201,7 +204,7 @@ export function currentAgyVersion(): string {
 
 /** Electron-style UA used for bootstrap calls (loadCodeAssist/onboardUser). */
 export function getAgyBootstrapUserAgent(version = currentAgyVersion()): string {
-  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${version} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`
+  return `antigravity/hub/${version} (aidev_client; os_type=darwin; arch=arm64; cl=${AGY_HUB_CHANGELIST})`
 }
 
 /**
@@ -212,7 +215,8 @@ export function getAgyBootstrapUserAgent(version = currentAgyVersion()): string 
  * official client ecosystem also polls).
  */
 export function antigravityUserAgent(version = currentAgyVersion(), platform = 'darwin/arm64'): string {
-  return `antigravity/${version} ${platform}`
+  const [osType = 'darwin', arch = 'arm64'] = platform.split('/')
+  return `antigravity/hub/${version} (aidev_client; os_type=${osType}; arch=${arch}; cl=${AGY_HUB_CHANGELIST})`
 }
 
 /**

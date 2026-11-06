@@ -241,12 +241,23 @@ export function classifyHttpError(
         message: bodyText ? bodyText.slice(0, 200) : undefined,
       }
     }
+    // An HTML response (from autopush sandbox "no license" or an intermediary gateway)
+    // is NOT an invalid account credential — Google API auth errors are structured JSON.
+    // Classifying HTML 403 as auth-failure causes false revocations of healthy accounts.
+    if (bodyText && /^\s*<(!doctype|html)/i.test(bodyText)) {
+      return {
+        kind: "transient",
+        status,
+        message: bodyText.slice(0, 200),
+      }
+    }
     // Regional, eligibility, licensing, or endpoint restrictions (e.g. consumer
     // accounts falling through to autopush or unsupported locations) indicate
     // endpoint/regional gating, NOT dead credentials (AGENTS.md). Collapsing them
     // into auth-failure permanently disabled healthy accounts.
     if (isLocationOrLicenseError(bodyText)) {
-      return { kind: 'transient', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
+      return { kind: "transient", status, message: bodyText ? bodyText.slice(0, 200) : undefined }
+    }
     }
     return { kind: 'auth-failure', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
   }

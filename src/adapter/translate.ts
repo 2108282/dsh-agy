@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
-import { catalogModel, isLevelThinkingModel } from './catalog.ts'
+import { catalogModel, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 import {
   conversationMessages,
@@ -102,6 +102,19 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
  * `["string","number"]` are rejected) and every `enum` item must be a
  * non-empty string (booleans/numbers/empty strings are rejected). Values are
  * normalized to the nearest valid form instead of being dropped wholesale.
+ *
+ * Schema SHAPE is constrained too: an `array` schema with no `items` is
+ * rejected outright — `GenerateContentRequest.tools[0].functionDeclarations
+ * [N].parameters.properties[steps].items: missing field` — because protobuf
+ * Schema has no "any item" form, so the field cannot be absent. JSON Schema
+ * itself allows it (DSH's enforced subset documents `items` as optional), and
+ * a hand-written tool parameter map drops it as easily as it writes it, so
+ * the sanitizer supplies `{"type":"string"}` for a missing `items` — the
+ * shape the register already declares by hand whenever an author spells it
+ * out (`{type:'array', items:{type:'string'}}`), and permissive in the same
+ * way a missing `items` is: the tool's own argument validation never depends
+ * on it. An `items` that EXISTS but carries no `type` is equally rejected, so
+ * a nested schema with neither `type` nor `properties` is typed `string` too.
  */
 // Exported for the contract invariant test (tests/adapter.test.ts); not part of
 // the package public API (translate.ts is an internal module).
@@ -112,6 +125,50 @@ export const AGY_SCHEMA_ALLOWLIST = new Set([
 const AGY_SCHEMA_MAP_KEYS = new Set(['properties'])
 const AGY_SCHEMA_NESTED_KEYS = new Set(['items', 'additionalProperties'])
 const AGY_SCHEMA_LIST_KEYS = new Set(['required', 'enum'])
+
+/** The item schema substituted for an `array` whose author declared no `items`. */
+const AGY_MISSING_ITEMS_SCHEMA: Record<string, unknown> = { type: 'string' }
+
+/**
+ * Give an `array` schema an `items` the protobuf parser accepts, and give a
+ * nested schema that declares neither `type` nor `properties` one it accepts
+ * (see the shape paragraph on the contract above). Purely additive: a schema
+ * that already carries either stays byte-identical.
+ *
+ * The guard is a VALUE check, not a key-presence one: `items: undefined` keeps
+ * the key on the in-memory object and still serializes to nothing, so
+ * `'items' in node` would wave it through to the exact `missing field` 400 this
+ * function exists to prevent. `null` and a non-schema scalar take the same
+ * path. A JSON-Schema tuple (`items: [a, b]`) has no wire form at all —
+ * protobuf `Schema.items` is a single message, never repeated — so it degrades
+ * to its first element rather than going up as an array.
+ */
+function ensureItemSchema(node: Record<string, unknown>): void {
+  if (node.type !== 'array') return
+  const items = node.items
+  if (Array.isArray(items)) {
+    const first = items[0]
+    node.items = first !== null && typeof first === 'object' && !Array.isArray(first)
+      ? first
+      : { ...AGY_MISSING_ITEMS_SCHEMA }
+    return
+  }
+  if (items !== null && typeof items === 'object') return
+  node.items = { ...AGY_MISSING_ITEMS_SCHEMA }
+}
+
+/**
+ * The `items` (or typed `additionalProperties`) slot must itself be typed;
+ * `{}`, `{description:'x'}` and a keywords-only union carrier all arrive here
+ * and are rejected as `missing field`. A `properties`-bearing schema is left
+ * alone — its `type` is inferred by the same rule that lets an untyped object
+ * schema through elsewhere. `additionalProperties: true|false` is a boolean
+ * and never reaches this function.
+ */
+function ensureNestedType(node: Record<string, unknown>): void {
+  if ('type' in node || 'properties' in node) return
+  node.type = 'string'
+}
 
 function sanitizeToolSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema
@@ -138,7 +195,13 @@ function sanitizeToolSchema(schema: unknown): unknown {
       continue
     }
     if (AGY_SCHEMA_NESTED_KEYS.has(key)) {
-      result[key] = sanitizeToolSchema(value)
+      const nested = sanitizeToolSchema(value)
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        const nestedRecord = nested as Record<string, unknown>
+        ensureNestedType(nestedRecord)
+        if (key === 'items') ensureItemSchema(nestedRecord)
+      }
+      result[key] = nested
       continue
     }
     if (AGY_SCHEMA_LIST_KEYS.has(key)) {
@@ -154,6 +217,7 @@ function sanitizeToolSchema(schema: unknown): unknown {
     }
     result[key] = value
   }
+  ensureItemSchema(result)
   return result
 }
 
@@ -552,6 +616,19 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
   return [{ functionDeclarations: declarations }]
 }
 
+/**
+ * Resolve the concrete upstream model ID from the requested model and effort.
+ * Discrete-variant models (Gemini 4 Argon, Claude 5.5 series) are unified in DSH
+ * with level thinking, and mapped to the matching discrete wire model on request.
+ */
+export function resolveWireModel(model: string, effort?: string): string {
+  if (isUnifiedThinkingFamily(model)) {
+    const target = effort === 'low' ? 'low' : effort === 'high' ? 'high' : 'medium'
+    return `${model}-${target}`
+  }
+  return model
+}
+
 /** Build the wrapped Antigravity request body for one call. */
 export function toAgyRequestBody(
   options: GenerateOptions,
@@ -659,13 +736,19 @@ export function toAgyRequestBody(
       if (tiered !== undefined) {
         generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
       }
-    } else if (LEVEL_THINKING_LEVELS.has(effort)) {
+    } else if (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any)) {
       // A configured number for this level takes the place of the level token:
       // both together would let the level win (see `thinkingBudgetFor`).
       const configured = context.thinkingBudgetFor?.(effort)
-      generationConfig.thinkingConfig = configured === undefined
-        ? { thinkingLevel: effort, includeThoughts: true }
-        : { thinkingBudget: configured, includeThoughts: true }
+      if (options.model === 'gemini-4-argon' || options.model === 'claude-opus-5-5' || options.model === 'claude-sonnet-5-5') {
+        if (configured !== undefined) {
+          generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
+        }
+      } else {
+        generationConfig.thinkingConfig = configured === undefined
+          ? { thinkingLevel: effort, includeThoughts: true }
+          : { thinkingBudget: configured, includeThoughts: true }
+      }
     }
   } else if (claude && options.purpose !== 'session-title') {
     // Claude thinking models are id-bound (no level selector), so their budget is
@@ -690,7 +773,7 @@ export function toAgyRequestBody(
   return {
     project: context.projectId || undefined,
     requestId: context.requestId ?? generateAntigravityRequestId(),
-    model: options.model,
+    model: resolveWireModel(options.model, effort),
     userAgent: 'antigravity',
     requestType: 'agent',
     request: {

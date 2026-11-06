@@ -18,12 +18,17 @@ export interface CatalogModel {
   toolCalling?: boolean
   /** Level-thinking: 'level' means single id + selectable low/medium/high via thinkingLevel. Omit = level bound to id. */
   thinking?: 'level'
+  /** The reasoning levels this model exposes when thinking is 'level' (default: low/medium/high). */
+  thinkingLevels?: readonly ('low' | 'medium' | 'high')[]
 }
 
 export const AGY_PUBLIC_MODELS: readonly CatalogModel[] = [
-  { id: 'gemini-3.8-flash-tiered', name: 'Gemini 3.8 Flash', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
-  { id: 'gemini-3.7-flash-tiered', name: 'Gemini 3.7 Flash', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
-  { id: 'gemini-3.6-flash-tiered', name: 'Gemini 3.6 Flash (Tiered)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
+  { id: 'gemini-4-argon', name: 'Gemini 4 Argon', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
+  { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextLength: 200000, maxOutputTokens: 64000, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
+  { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', contextLength: 200000, maxOutputTokens: 64000, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
+  { id: 'gemini-3.8-flash-tiered', name: 'Gemini 3.8 Flash', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level', thinkingLevels: ['low', 'medium', 'high'] as const },
+  { id: 'gemini-3.7-flash-tiered', name: 'Gemini 3.7 Flash', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level', thinkingLevels: ['low', 'medium', 'high'] as const },
+  { id: 'gemini-3.6-flash-tiered', name: 'Gemini 3.6 Flash (Tiered)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level', thinkingLevels: ['low', 'medium', 'high'] as const },
   { id: 'gemini-3.6-flash-high', name: 'Gemini 3.6 Flash (High)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.6-flash-medium', name: 'Gemini 3.6 Flash (Medium)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
@@ -35,14 +40,20 @@ export const AGY_PUBLIC_MODELS: readonly CatalogModel[] = [
   { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)', contextLength: 1048576, maxOutputTokens: 64000, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)', contextLength: 1048576, maxOutputTokens: 64000, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-pro-agent', name: 'Gemini 3.1 Pro (High)', contextLength: 1048576, maxOutputTokens: 65535, supportsReasoning: true, supportsVision: true, toolCalling: true },
-  { id: 'gemini-3.1-pro-low', name: 'Gemini 3.1 Pro (Low)', contextLength: 1048576, maxOutputTokens: 65535, supportsReasoning: true, supportsVision: true, toolCalling: true },
+  { id: 'gemini-3.1-pro-low', name: 'Gemini 3.1 Pro (Low)', contextLength: 1048576, maxOutputTokens: 65535, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level', thinkingLevels: ['low', 'high'] as const },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextLength: 1048576, maxOutputTokens: 65535, supportsVision: true, toolCalling: true },
   { id: 'gemini-3-flash-agent', name: 'Gemini 3.5 Flash (High)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.5-flash-low', name: 'Gemini 3.5 Flash (Medium)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.5-flash-extra-low', name: 'Gemini 3.5 Flash (Low)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
+  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', contextLength: 1048576, maxOutputTokens: 65535, supportsVision: true, toolCalling: true },
+  { id: 'gemini-3-flash', name: 'Gemini 3 Flash', contextLength: 1048576, maxOutputTokens: 65535, supportsVision: true, toolCalling: true },
   { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', contextLength: 1048576, maxOutputTokens: 65535, supportsVision: true, toolCalling: true },
   { id: 'gemini-2.5-flash-thinking', name: 'Gemini 2.5 Flash Thinking', contextLength: 1048576, maxOutputTokens: 65535, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextLength: 1048576, maxOutputTokens: 65535, supportsVision: true, toolCalling: true },
   { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', contextLength: 1048576, maxOutputTokens: 65535, supportsVision: true, toolCalling: true },
+  { id: 'gemini-4-argon-high', name: 'Gemini 4 Argon (High)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
+  { id: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
+  { id: 'gemini-4-argon-low', name: 'Gemini 4 Argon (Low)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true },
   { id: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)', contextLength: 131072, maxOutputTokens: 32768, supportsReasoning: true, toolCalling: true },
 ]
 
@@ -72,7 +83,7 @@ export function formatTieredModelName(modelId: string): string {
  * the catalog-only fallback and the role-based hiding in agreement.
  */
 export function isChatCallableModelId(modelId: string): boolean {
-  return !modelId.startsWith('tab_') && !/^chat_\d+$/.test(modelId)
+  return !modelId.startsWith('tab_') && !/^chat_\d+$/.test(modelId) && !modelId.endsWith('-disabled')
 }
 
 export function catalogModel(modelId: string): CatalogModel | undefined {
@@ -93,23 +104,95 @@ export function catalogModel(modelId: string): CatalogModel | undefined {
   return undefined
 }
 
+/** Dynamically discovered tiered models and their family ('flash', 'pro', 'flashLite', etc.). */
+const DISCOVERED_TIERED_FAMILIES = new Map<string, string>()
+
+/**
+ * Priority ranking for tiered model families.
+ *
+ * Specific feature families (flash, flashLite) take precedence over the generic 'pro'
+ * grouping when upstream redundantly lists a model under multiple categories
+ * (e.g. Google's fetchAvailableModels returns gemini-3.8-flash-tiered in both flash and pro).
+ */
+const TIERED_FAMILY_PRECEDENCE: Readonly<Record<string, number>> = Object.freeze({
+  flash: 10,
+  flashlite: 10,
+  pro: 1,
+})
+
+/**
+ * Register tiered models advertised by `fetchAvailableModels`'s `tieredModelIds`.
+ *
+ * Upstream groups tiered models by family (e.g. `{ flash: [...], pro: ['gemini-3.1-pro-low'], flashLite: [...] }`).
+ * Specificity precedence ensures high-capability families are preserved when upstream has group overlap.
+ */
+export function registerDiscoveredTieredModels(tiered?: Record<string, string[]> | null): void {
+  if (!tiered || typeof tiered !== 'object' || Array.isArray(tiered)) return
+  for (const [family, ids] of Object.entries(tiered)) {
+    if (!Array.isArray(ids)) continue
+    const lowerFamily = family.toLowerCase()
+    const newPrecedence = TIERED_FAMILY_PRECEDENCE[lowerFamily] ?? 5
+    for (const id of ids) {
+      if (typeof id === 'string' && id.length > 0) {
+        const existingFamily = DISCOVERED_TIERED_FAMILIES.get(id)
+        const existingPrecedence = existingFamily ? (TIERED_FAMILY_PRECEDENCE[existingFamily] ?? 5) : 0
+        if (newPrecedence >= existingPrecedence) {
+          DISCOVERED_TIERED_FAMILIES.set(id, lowerFamily)
+        }
+      }
+    }
+  }
+}
+
+const DISCOVERED_UNIFIED_THINKING_FAMILIES = new Set<string>()
+
+/** Register dynamically discovered unified thinking families (e.g. models with discrete -low/-medium/-high variants). */
+export function registerDiscoveredUnifiedThinkingFamily(baseId: string): void {
+  DISCOVERED_UNIFIED_THINKING_FAMILIES.add(baseId)
+}
+
+/** Check whether a model ID is a unified thinking family (known static or dynamically discovered). */
+export function isUnifiedThinkingFamily(modelId: string): boolean {
+  return (
+    modelId === 'gemini-4-argon' ||
+    modelId === 'claude-opus-5-5' ||
+    modelId === 'claude-sonnet-5-5' ||
+    DISCOVERED_UNIFIED_THINKING_FAMILIES.has(modelId)
+  )
+}
+
+/** Reset discovered tiered models (used by test suites). */
+export function resetDiscoveredTieredModels(): void {
+  DISCOVERED_TIERED_FAMILIES.clear()
+  DISCOVERED_UNIFIED_THINKING_FAMILIES.clear()
+}
+
 /**
  * Level-thinking models: a single id with selectable tiers via `thinkingLevel`.
  *
- * KNOWN GAP (tracked in issue #47, with the measurements): upstream publishes the
- * authoritative grouping as `tieredModelIds` in every `fetchAvailableModels`
- * response — `{ flashLite: [...], flash: [...], pro: ['gemini-3.1-pro-low'] }` —
- * and this rule ignores it. The `-tiered` suffix is a NAMING COINCIDENCE that
- * happens to hold for the three Flash ids, so:
- *   - upstream-tiered `gemini-3.1-pro-low` (which does accept `thinkingLevel`,
- *     measured) is treated as id-bound and never shows a tier selector;
- *   - a tiered model added under any other name is silently excluded — no log,
- *     no warning, it simply appears without tiers.
- * The fix is to consult `tieredModelIds` with this function as the offline
- * fallback, and to let the budget card render the tiers a family actually has
- * (Flash: low/medium/high; Pro: low/high only).
+ * Consults dynamically discovered `tieredModelIds` first, falling back to the catalog's
+ * explicit `thinking: 'level'` metadata, unified thinking families, and legacy `-tiered` suffix.
  */
 export function isLevelThinkingModel(modelId: string): boolean {
   if (catalogModel(modelId)?.thinking === 'level') return true
-  return typeof modelId === 'string' && modelId.endsWith('-tiered')
+  if (DISCOVERED_TIERED_FAMILIES.has(modelId)) return true
+  if (typeof modelId === 'string') {
+    if (modelId.endsWith('-tiered')) return true
+    if (isUnifiedThinkingFamily(modelId)) return true
+  }
+  return false
+}
+
+/**
+ * The reasoning levels supported by a level-thinking model.
+ *
+ * Flash family exposes low/medium/high; Pro family exposes low/high only
+ * (measured: Pro models reject medium thinking levels).
+ */
+export function levelThinkingEffortsFor(modelId: string): readonly ('low' | 'medium' | 'high')[] {
+  const cat = catalogModel(modelId)
+  if (cat?.thinkingLevels) return cat.thinkingLevels
+  const family = DISCOVERED_TIERED_FAMILIES.get(modelId)
+  if (family === 'pro') return ['low', 'high']
+  return ['low', 'medium', 'high']
 }

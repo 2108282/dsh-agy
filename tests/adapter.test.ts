@@ -3,7 +3,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, resolveWireModel, toAgyRequestBody } from '../src/adapter/translate.ts'
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   parseAgySse,
@@ -11,7 +11,7 @@ import {
   resolveStreamIdleTimeoutMs,
 } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
-import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId } from '../src/adapter/catalog.ts'
+import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId, isLevelThinkingModel, levelThinkingEffortsFor, registerDiscoveredTieredModels, resetDiscoveredTieredModels } from '../src/adapter/catalog.ts'
 import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { getThoughtSignature } from '../src/runtime/signature-cache.ts'
@@ -543,6 +543,23 @@ describe('translate', () => {
     ])
   })
 
+  it('maps unified thinking models (gemini-4-argon, claude-opus-5-5) to matching wire models based on effort', () => {
+    const lowArgon = toAgyRequestBody(generateOptions({ model: 'gemini-4-argon', reasoningEffort: 'low' }), {})
+    expect(lowArgon.model).toBe('gemini-4-argon-low')
+
+    const highArgon = toAgyRequestBody(generateOptions({ model: 'gemini-4-argon', reasoningEffort: 'high' }), {})
+    expect(highArgon.model).toBe('gemini-4-argon-high')
+
+    const medArgon = toAgyRequestBody(generateOptions({ model: 'gemini-4-argon' }), {})
+    expect(medArgon.model).toBe('gemini-4-argon-medium')
+
+    const lowOpus = toAgyRequestBody(generateOptions({ model: 'claude-opus-5-5', reasoningEffort: 'low' }), {})
+    expect(lowOpus.model).toBe('claude-opus-5-5-low')
+
+    const highOpus = toAgyRequestBody(generateOptions({ model: 'claude-opus-5-5', reasoningEffort: 'high' }), {})
+    expect(highOpus.model).toBe('claude-opus-5-5-high')
+  })
+
   it('maps system, tools, and generation config', () => {
     const body = toAgyRequestBody(
       generateOptions({
@@ -704,6 +721,28 @@ describe('translate', () => {
     for (const nested of ['items']) {
       if (nested in node) assertUpstreamContract(node[nested], `${path}.${nested}`)
     }
+    // protobuf `Schema` has no "any item" form, so an array without `items` is
+    // rejected as `properties[<name>].items: missing field` (measured against
+    // gemini-3.8-flash: `research_audit_derivation.steps`). JSON Schema itself
+    // allows the omission, so the sanitizer supplies a typed one.
+    //
+    // The VALUE, not the key: `items: undefined` keeps the key on the object
+    // and still serializes to nothing, so `'items' in node` passes while the
+    // wire carries the very 400 this guards. A tuple keeps an ARRAY there,
+    // which the `toBe(false)` at the top of this function rejects.
+    if (node.type === 'array') {
+      expect(node.items, `${path}: array without items is rejected upstream`).toBeTypeOf('object')
+    }
+    // The same "missing field" error is what a nested schema slot that
+    // declares neither `type` nor `properties` produces — those slots are the
+    // ones reached through `properties.*.items` / `.additionalProperties`.
+    const isNestedSlot = /\.(items|additionalProperties)(\.|$)/.test(path)
+    if (isNestedSlot) {
+      expect(
+        'type' in node || 'properties' in node,
+        `${path}: nested schema without type/properties is rejected upstream`,
+      ).toBe(true)
+    }
     // additionalProperties accepts a boolean (false = no extra keys) or a
     // nested schema — live-verified accepted by the Antigravity upstream.
     if ('additionalProperties' in node) {
@@ -761,6 +800,192 @@ describe('translate', () => {
       const body = toAgyRequestBody(generateOptions({ tools: [tool] }), {})
       assertUpstreamContract(body.request.tools![0].functionDeclarations[0].parameters)
     }
+  })
+
+  // Trigger: gemini-3.8-flash rejected the whole request with
+  // `GenerateContentRequest.tools[0].functionDeclarations[135].parameters
+  // .properties[steps].items: missing field.` The declaration is this
+  // register's own `research_audit_derivation` (`@suxeca/dsh-research-core`),
+  // whose parameter map declares `steps: {type:'array', required:true}` with
+  // no `items` — valid JSON Schema (DSH's enforced subset documents `items`
+  // as optional), impossible in protobuf Schema. Every shape below is copied
+  // from a LIVE registered tool schema, not invented:
+  //   research_audit_derivation.steps  — array, no items
+  //   research_audit_derivation.symbols — array, no items
+  //   research_hostile_review.claims    — array, no items
+  //   mcp__firecrawl__firecrawl_search.sources — items present, no `type`
+  //     (a keyword-only union carrier: `{anyOf:[...]}` — no `oneOf` keyword
+  //     survives the allowlist, so it reaches upstream typeless)
+  const ARRAY_ITEM_SHAPES = [{
+    name: 'research_audit_derivation',
+    description: '第一性原理推导审查',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '推导主题或命题名称' },
+        steps: {
+          type: 'array',
+          description: '推导步骤列表 [{ stepIndex, rawText, equation, classification, assumptions }]',
+        },
+        invariantObject: {
+          type: 'object',
+          description: '考察的组织对象',
+          additionalProperties: true,
+        },
+        symbols: { type: 'array', description: '符号与物理量纲列表 [{ symbol, dimension, rawUnit }]' },
+        axioms: { type: 'array', description: '显式公理起点/哈密顿量定义（Axioms/Postulates）', items: { type: 'string' } },
+      },
+      required: ['steps'],
+    },
+  }, {
+    name: 'mcp__firecrawl__firecrawl_search',
+    description: 'Search web, news, or image sources',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', minLength: 1, description: 'Query' },
+        sources: {
+          description: 'Search sources',
+          type: 'array',
+          items: {
+            anyOf: [
+              { type: 'string', enum: ['web', 'images', 'news', 'alexandria', 'exchange'] },
+              {
+                type: 'object',
+                properties: { type: { type: 'string', enum: ['web', 'images', 'news', 'alexandria', 'exchange'] } },
+                required: ['type'],
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
+      },
+      required: ['query'],
+    },
+  }]
+
+  it('gives an array without items a typed item schema (missing-field 400)', () => {
+    for (const tool of ARRAY_ITEM_SHAPES) {
+      const body = toAgyRequestBody(generateOptions({ tools: [tool] }), {})
+      const parameters = body.request.tools![0].functionDeclarations[0].parameters as {
+        properties: Record<string, Record<string, unknown>>
+      }
+      assertUpstreamContract(parameters)
+
+      const steps = parameters.properties.steps
+      if (steps) {
+        expect(steps.type).toBe('array')
+        expect(steps.items).toEqual({ type: 'string' })
+      }
+      for (const [name, child] of Object.entries(parameters.properties)) {
+        if (child.type !== 'array') continue
+        expect(child.items, `${name}: array must carry items upstream`).toBeDefined()
+        const items = child.items as Record<string, unknown>
+        // A declared `items` is preserved (never rewritten to the fallback),
+        // and it can never reach upstream typeless.
+        expect(typeof items.type, `${name}.items: must be typed upstream`).toBe('string')
+        if (name === 'sources') expect(items.type).toBe('string')
+      }
+    }
+  })
+
+  it('preserves a declared items schema byte-for-byte', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [{
+          name: 'x',
+          description: 'd',
+          parameters: {
+            type: 'object',
+            properties: {
+              steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              tags: { type: 'array', items: { type: 'string', enum: ['a', 'b'] } },
+              empty_items: { type: 'array', items: {} },
+            },
+          },
+        }],
+      }),
+      {},
+    )
+    const p = body.request.tools![0].functionDeclarations[0].parameters as {
+      properties: Record<string, Record<string, unknown>>
+    }
+    expect(p.properties.steps.items).toEqual({ type: 'object', additionalProperties: true })
+    expect(p.properties.tags.items).toEqual({ type: 'string', enum: ['a', 'b'] })
+    // An `items: {}` is typeless too, so it gets the same fallback.
+    expect(p.properties.empty_items.items).toEqual({ type: 'string' })
+  })
+
+  // Three shapes that reach the wire with no usable `items`, none of which the
+  // key-presence guard (`'items' in node`) could see: the key is there, the
+  // value is not something protobuf can parse. The first is the important one —
+  // `items: undefined` serializes to nothing, i.e. the exact
+  // `properties[<name>].items: missing field` 400 the guard exists for, and the
+  // old assertion passed it.
+  it('treats an absent, null or scalar items as missing', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [{
+          name: 'x',
+          description: 'd',
+          parameters: {
+            type: 'object',
+            properties: {
+              undefined_items: { type: 'array', items: undefined },
+              null_items: { type: 'array', items: null },
+              scalar_items: { type: 'array', items: 'string' as unknown as Record<string, unknown> },
+              absent_items: { type: 'array' },
+            },
+          },
+        }],
+      }),
+      {},
+    )
+    const p = body.request.tools![0].functionDeclarations[0].parameters as {
+      properties: Record<string, Record<string, unknown>>
+    }
+    assertUpstreamContract(p)
+    for (const name of ['undefined_items', 'null_items', 'scalar_items', 'absent_items']) {
+      expect(p.properties[name]!.items, `${name}: must reach the wire with a typed items`).toEqual({ type: 'string' })
+    }
+    // The wire form is what matters: a key that serializes away is the 400.
+    const wire = JSON.parse(JSON.stringify(p)) as { properties: Record<string, Record<string, unknown>> }
+    for (const name of ['undefined_items', 'null_items', 'scalar_items', 'absent_items']) {
+      expect(wire.properties[name]!.items, `${name}: serialized items`).toEqual({ type: 'string' })
+    }
+  })
+
+  // protobuf `Schema.items` is a single message, never repeated, so a JSON
+  // Schema tuple has no wire form and goes up as an array the parser rejects.
+  // Degrading to the first element is the same additive philosophy as the
+  // missing-`items` fallback: the alternative is a 400 for the whole request.
+  it('degrades a tuple items to its first element', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [{
+          name: 'x',
+          description: 'd',
+          parameters: {
+            type: 'object',
+            properties: {
+              pair: { type: 'array', items: [{ type: 'string' }, { type: 'number' }] },
+              empty_tuple: { type: 'array', items: [] },
+              nested_tuple: { type: 'array', items: [[{ type: 'string' }]] },
+            },
+          },
+        }],
+      }),
+      {},
+    )
+    const p = body.request.tools![0].functionDeclarations[0].parameters as {
+      properties: Record<string, Record<string, unknown>>
+    }
+    assertUpstreamContract(p)
+    expect(p.properties.pair!.items).toEqual({ type: 'string' })
+    // An empty tuple has no first element to keep, so it takes the fallback.
+    expect(p.properties.empty_tuple!.items).toEqual({ type: 'string' })
+    // A nested tuple degrades the same way, one level at a time.
+    expect(p.properties.nested_tuple!.items).toEqual({ type: 'string' })
   })
 
   it('sanitizes tool names to the upstream charset and dedupes', () => {
@@ -919,6 +1144,37 @@ describe('parseAgySse', () => {
     expect(chunks.some((c) => (c as { type: string }).type === 'usage')).toBe(true)
   })
 
+  it('surfaces the routed modelVersion via onModelVersion', async () => {
+    // The observability seam the adapter consumes: every SSE event may carry a
+    // `modelVersion`, and the parser forwards it so the adapter can store it in
+    // the ledger. It must NOT disturb the block stream (issuing nothing).
+    const versions: string[] = []
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: {"response":{"modelVersion":"gemini-3.8-flash-n","candidates":[{"content":{"parts":[{"text":"hi"}]}}]}}',
+      'data: {"response":{"modelVersion":"gemini-3.8-flash-n","candidates":[{"content":{"parts":[{"text":"!"}]}}]}}',
+      'data: [DONE]',
+    ]), { onModelVersion: (v) => versions.push(v) }))
+    expect(versions).toEqual(['gemini-3.8-flash-n', 'gemini-3.8-flash-n'])
+    expect(chunks.filter((c) => (c as { type: string }).type === 'text-delta').map((c) => (c as { text: string }).text).join('')).toBe('hi!')
+  })
+
+  it('extracts modelVersion from envelope, array, and payload positions', () => {
+    // parseSseDataLine resolves the version from the wrapped `response`, the
+    // top-level array element, or the payload itself — whichever the daily
+    // endpoint happens to place it on.
+    const wrapped = parseSseDataLine('data: {"response":{"modelVersion":"v1","candidates":[]}}')
+    expect(wrapped?.modelVersion).toBe('v1')
+    const arrayed = parseSseDataLine('data: [{"modelVersion":"v2","candidates":[]}]')
+    expect(arrayed?.modelVersion).toBe('v2')
+    const bare = parseSseDataLine('data: {"candidates":[],"modelVersion":"v3"}')
+    expect(bare?.modelVersion).toBe('v3')
+    // An empty string is not a routed version: parseAgySse only forwards a
+    // non-empty value through onModelVersion, so the parser treats it as absent.
+    const empty = parseSseDataLine('data: {"modelVersion":"","candidates":[]}')
+    expect(empty?.modelVersion).toBe('')
+    expect(empty?.modelVersion?.length).toBe(0)
+  })
+
   it('keeps one continuous text block across events (usage does not split)', async () => {
     // Antigravity sends usageMetadata on EVERY SSE event; per-event block
     // closing used to split one sentence into a block per chunk.
@@ -1003,6 +1259,18 @@ describe('parseAgySse', () => {
     // block id uses the upstream id
     const end = chunks.find((c) => (c as { type: string }).type === 'block-end')
     expect(end).toMatchObject({ block: { type: 'tool-call', id: 'fc-1' } })
+  })
+
+  it('salts short pseudo-random upstream tool call ids when disambiguation is enabled', async () => {
+    const captured: Array<[string, string]> = []
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-short","functionCall":{"id":"call_75146","name":"bash","args":{"cmd":"ls"}}}]}}]}]',
+      'data: [DONE]',
+    ]), { disambiguateToolCallIds: true, onToolSignature: (id, sig) => captured.push([id, sig]) }))
+    const end = chunks.find((c) => (c as { type: string }).type === 'block-end')
+    const toolCallBlock = (end as { block: { type: string; id: string } }).block
+    expect(toolCallBlock.id).toMatch(/^call_75146_[0-9a-z]+$/)
+    expect(captured).toEqual([[toolCallBlock.id, 'sig-short']])
   })
 
   it('replays a cached signature on the next turn instead of the sentinel', async () => {
@@ -1318,6 +1586,105 @@ describe('models', () => {
     expect(formatTieredModelName('gemini-4.0-pro-tiered')).toBe('Gemini 4.0 Pro')
   })
 
+  it('sorts models deterministically into family hierarchy (Gemini 4 -> Flash 3.x -> Flash Lite -> 2.5 Pro -> 2.5 Flash -> Claude -> GPT)', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gpt-oss-120b-medium': {},
+        'gemini-4-argon': {},
+        'claude-sonnet-4-6': {},
+        'gemini-2.5-pro': {},
+        'gemini-3.5-flash-lite': {},
+        'gemini-3.8-flash-tiered': {},
+        'claude-opus-4-6-thinking': {},
+        'gemini-2.5-flash-lite': {},
+      },
+    })
+    const ids = merged.map((m) => m.id)
+    expect(ids).toEqual([
+      'gemini-4-argon',
+      'gemini-3.8-flash-tiered',
+      'gemini-3.5-flash-lite',
+      'gemini-2.5-pro',
+      'gemini-2.5-flash-lite',
+      'claude-opus-4-6-thinking',
+      'claude-sonnet-4-6',
+      'gpt-oss-120b-medium',
+    ])
+  })
+
+  it('automatically accommodates newly published upstream models into appropriate family and rank', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gpt-oss-120b-medium': {},
+        'gemini-5-pro': {},
+        'gemini-4-argon': {},
+        'claude-opus-6-0': {},
+        'gemini-3.8-flash-tiered': {},
+        'gemini-5-flash': {},
+        'claude-sonnet-5-5': {},
+        'gemini-2.5-pro': {},
+      },
+    })
+    const ids = merged.map((m) => m.id)
+    expect(ids).toEqual([
+      'gemini-5-pro',
+      'gemini-5-flash',
+      'gemini-4-argon',
+      'gemini-3.8-flash-tiered',
+      'gemini-2.5-pro',
+      'claude-opus-6-0',
+      'claude-sonnet-5-5',
+      'gpt-oss-120b-medium',
+    ])
+  })
+
+  it('dynamically unifies unseen models with discrete split thinking variants into level models', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'claude-opus-6-0-high': {},
+        'claude-opus-6-0-medium': {},
+        'claude-opus-6-0-low': {},
+      },
+    })
+    const ids = merged.map((m) => m.id)
+    expect(ids).toEqual(['claude-opus-6-0'])
+    expect(isChatCallableModelId('claude-opus-6-0-high')).toBe(true)
+    const unified = merged.find((m) => m.id === 'claude-opus-6-0')
+    expect(unified).toBeDefined()
+    expect(isLevelThinkingModel('claude-opus-6-0')).toBe(true)
+    expect(levelThinkingEffortsFor('claude-opus-6-0')).toEqual(['low', 'medium', 'high'])
+    expect(resolveWireModel('claude-opus-6-0', 'high')).toBe('claude-opus-6-0-high')
+    expect(resolveWireModel('claude-opus-6-0', 'low')).toBe('claude-opus-6-0-low')
+    expect(resolveWireModel('claude-opus-6-0', 'medium')).toBe('claude-opus-6-0-medium')
+  })
+
+  it('filters out disabled models (e.g. gemini-4-argon-disabled)', () => {
+    expect(isChatCallableModelId('gemini-4-argon-disabled')).toBe(false)
+    expect(isChatCallableModelId('gemini-4-argon')).toBe(true)
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-4-argon-disabled': {},
+        'gemini-3.8-flash-tiered': {},
+      },
+    })
+    expect(merged.map((m) => m.id)).toEqual(['gemini-3.8-flash-tiered'])
+  })
+
+  it('rejects contradictory upstream display names (e.g. Gemini 2.5 models mislabeled as 3.5 Flash Lite)', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-2.5-flash-lite': { displayName: 'Gemini 3.5 Flash Lite' },
+        'gemini-2.5-flash': { displayName: 'Gemini 3.5 Flash Lite' },
+        'gemini-2.5-flash-thinking': { displayName: 'Gemini 3.5 Flash Lite' },
+        'gemini-3.5-flash-lite': { displayName: 'Gemini 3.5 Flash Lite' },
+      },
+    })
+    expect(merged.find((m) => m.id === 'gemini-2.5-flash-lite')?.name).toBe('Gemini 2.5 Flash Lite')
+    expect(merged.find((m) => m.id === 'gemini-2.5-flash')?.name).toBe('Gemini 2.5 Flash')
+    expect(merged.find((m) => m.id === 'gemini-2.5-flash-thinking')?.name).toBe('Gemini 2.5 Flash Thinking')
+    expect(merged.find((m) => m.id === 'gemini-3.5-flash-lite')?.name).toBe('Gemini 3.5 Flash Lite')
+  })
+
   it('merges dynamic ids with catalog metadata and filters tab models', () => {
     const merged = mergeModelCatalog({
       models: {
@@ -1337,6 +1704,35 @@ describe('models', () => {
     expect(merged.find((m) => m.id === 'gemini-3.8-flash-tiered')?.name).toBe('Gemini 3.8 Flash')
     expect(merged.find((m) => m.id === 'gemini-3.9-flash-tiered')?.name).toBe('Gemini 3.9 Flash')
     expect(merged.find((m) => m.id === 'gemini-3.9-flash-tiered')?.context?.contextWindow).toBe(1048576)
+  })
+
+  it('hides split low/medium/high models when the corresponding -tiered model is present', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash' },
+        'gemini-3.8-flash-high': { displayName: 'Gemini 3.8 Flash (High)' },
+        'gemini-3.8-flash-medium': { displayName: 'Gemini 3.8 Flash (Medium)' },
+        'gemini-3.8-flash-low': { displayName: 'Gemini 3.8 Flash (Low)' },
+        'gemini-4-argon-high': { displayName: 'Gemini 4 Argon (High)' },
+        'gemini-4-argon-medium': { displayName: 'Gemini 4 Argon (Medium)' },
+        'gemini-4-argon-low': { displayName: 'Gemini 4 Argon (Low)' },
+      },
+    })
+    const ids = merged.map((m) => m.id)
+    // 3.8 flash tiered hides its split siblings and avoids duplicate base model
+    expect(ids).toContain('gemini-3.8-flash-tiered')
+    expect(ids).not.toContain('gemini-3.8-flash')
+    expect(ids).not.toContain('gemini-3.8-flash-high')
+    expect(ids).not.toContain('gemini-3.8-flash-medium')
+    expect(ids).not.toContain('gemini-3.8-flash-low')
+    const names = merged.map((m) => m.name)
+    expect(names.filter((n) => n === 'Gemini 3.8 Flash')).toHaveLength(1)
+    // 4 argon unifies into gemini-4-argon with level thinking, hiding its split siblings
+    expect(ids).toContain('gemini-4-argon')
+    expect(ids).not.toContain('gemini-4-argon-high')
+    expect(ids).not.toContain('gemini-4-argon-medium')
+    expect(ids).not.toContain('gemini-4-argon-low')
+    expect(merged.find((m) => m.id === 'gemini-4-argon')?.context?.contextWindow).toBe(1048576)
   })
 
   it('hides ids upstream assigns to a non-chat role, including ids without a tab_ prefix', () => {
@@ -1575,10 +1971,62 @@ describe('models', () => {
     expect(dynamicTiered.defaultMaxTokens).toBe(65536)
     expect(dynamicTiered.inputModalities).toEqual(['text', 'image'])
 
+    const argon = resolveAgyModel('agy', 'gemini-4-argon')
+    expect(argon.name).toBe('Gemini 4 Argon')
+    expect(argon.reasoning).toBeDefined()
+    expect(argon.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+
+    const opus55 = resolveAgyModel('agy', 'claude-opus-5-5')
+    expect(opus55.name).toBe('Claude Opus 5.5')
+    expect(opus55.reasoning).toBeDefined()
+    expect(opus55.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+
     // legacy id-bound models and non-tiered discovered ids must not expose reasoning
     for (const id of ['gemini-3.6-flash-high', 'gemini-2.5-flash', 'brand-new-model']) {
       expect(resolveAgyModel('agy', id).reasoning).toBeUndefined()
     }
+  })
+
+  it('exposes pro family tiered reasoning with low/high efforts only (issue #47)', () => {
+    // gemini-3.1-pro-low is catalog-marked with thinking: 'level' and thinkingLevels: ['low', 'high']
+    const pro = resolveAgyModel('agy', 'gemini-3.1-pro-low')
+    expect(pro.reasoning).toBeDefined()
+    expect(pro.reasoning!.defaultEffort).toBeUndefined()
+    expect(pro.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'high'])
+
+    // Request mapping: low and high emit thinkingLevel; medium is omitted (unsupported for Pro)
+    const proLow = toAgyRequestBody(generateOptions({ model: 'gemini-3.1-pro-low', reasoningEffort: 'low' as any }), {})
+    expect(proLow.request.generationConfig).toMatchObject({ thinkingConfig: { thinkingLevel: 'low', includeThoughts: true } })
+
+    const proHigh = toAgyRequestBody(generateOptions({ model: 'gemini-3.1-pro-low', reasoningEffort: 'high' as any }), {})
+    expect(proHigh.request.generationConfig).toMatchObject({ thinkingConfig: { thinkingLevel: 'high', includeThoughts: true } })
+
+    const proMedium = toAgyRequestBody(generateOptions({ model: 'gemini-3.1-pro-low', reasoningEffort: 'medium' as any }), {})
+    expect(proMedium.request.generationConfig?.thinkingConfig).toBeUndefined()
+
+    // Dynamically discovered tiered models via tieredModelIds
+    registerDiscoveredTieredModels({
+      pro: ['gemini-custom-pro-id'],
+      flash: ['gemini-custom-flash-id'],
+    })
+    const dynamicPro = resolveAgyModel('agy', 'gemini-custom-pro-id')
+    expect(dynamicPro.reasoning).toBeDefined()
+    expect(dynamicPro.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'high'])
+
+    const dynamicFlash = resolveAgyModel('agy', 'gemini-custom-flash-id')
+    expect(dynamicFlash.reasoning).toBeDefined()
+    expect(dynamicFlash.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+
+    // Upstream sometimes redundantly puts flash models in both flash and pro groups
+    registerDiscoveredTieredModels({
+      flashLite: ['gemini-3.5-flash-lite'],
+      flash: ['gemini-3.8-flash-tiered'],
+      pro: ['gemini-3.8-flash-tiered', 'gemini-3.1-pro-low'],
+    })
+    const flashTiered = resolveAgyModel('agy', 'gemini-3.8-flash-tiered')
+    expect(flashTiered.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+    const proLowModel = resolveAgyModel('agy', 'gemini-3.1-pro-low')
+    expect(proLowModel.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'high'])
   })
 
   it('declares no default reasoning effort, so the selector keeps an adaptive option', () => {
@@ -1831,6 +2279,7 @@ describe('AgyAdapter', () => {
     vi.unstubAllGlobals()
     delete process.env.DSH_AGY_IDLE_TIMEOUT_MS
     delete process.env.AGY_IDLE_TIMEOUT_MS
+    resetDiscoveredTieredModels()
   })
 
   function session(overrides: Partial<AgyAccountSession> = {}): AgyAccountSession {
@@ -3132,6 +3581,27 @@ describe('AgyAdapter', () => {
     expect(sample.account).toBe('a@b.c')
     // Buckets stay disjoint: input is uncached only (120 total minus 20 cached).
     expect(sample.usage).toMatchObject({ input: 100, output: 7, cacheRead: 20 })
+  })
+
+  it('records the upstream-routed model version with a generation', async () => {
+    // The observability seam: parseAgySse forwards each event's `modelVersion`
+    // via onModelVersion, the adapter stores it into the ledger record as
+    // `actualModel` (distinct from the REQUESTED `model`), and the persisted
+    // recent ring later carries it (paths round-trip test).
+    const recorded: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: {"response":{"modelVersion":"gemini-3.8-flash-n","candidates":[{"content":{"parts":[{"text":"pong"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}}',
+      'data: [DONE]',
+    ]), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (sample) => { recorded.push(sample as Record<string, unknown>) },
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0]?.actualModel).toBe('gemini-3.8-flash-n')
   })
 
   it('records a failed attempt without token usage', async () => {

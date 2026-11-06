@@ -31,8 +31,8 @@ import { aliasVar, installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
-import { agoText, quotaColor, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
-import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, MultimodalView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
+import { agoText, formatQuotaReset, quotaColor, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
+import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
@@ -475,6 +475,7 @@ function AccountDetail(props: {
   /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
   lang?: string
   t: T
+  detailedQuotaReset?: boolean
 }): ReactNode {
   const { account, busy, handlers, t } = props
   const [proxyDraft, setProxyDraft] = useState('')
@@ -618,7 +619,7 @@ function AccountDetail(props: {
                 // for the value it renders.
                 h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
                 h('span', { className: 'agy-limit-reset' },
-                  window.resetTime === null ? null : untilText(window.resetTime, t, now))),
+                  window.resetTime === null ? null : formatQuotaReset(window.window, window.resetTime, t, now, props.detailedQuotaReset))),
               exhaustsFirst
                 ? h('div', { className: 'agy-limit-burn' },
                   t('limitBurnWarn', { value: burnHorizon(hoursLeft!, t) }))
@@ -715,9 +716,11 @@ function PreferencesCard(props: {
   rpc: AgyRpcClient
   t: T
   onBadgePrefChange?: (enabled: boolean) => void
+  onDetailedPrefChange?: (enabled: boolean) => void
 }): ReactNode {
-  const { rpc, t, onBadgePrefChange } = props
+  const { rpc, t, onBadgePrefChange, onDetailedPrefChange } = props
   const [badgeEnabled, setBadgeEnabled] = useState(false)
+  const [detailedReset, setDetailedReset] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -732,13 +735,15 @@ function PreferencesCard(props: {
     void rpc.call('ui.prefs.get', {}).then((prefs) => {
       if (active) {
         setBadgeEnabled(prefs?.conversationBadge === true)
+        setDetailedReset(prefs?.detailedQuotaReset === true)
+        onDetailedPrefChange?.(prefs?.detailedQuotaReset === true)
         setLoading(false)
       }
     }).catch(() => {
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [rpc])
+  }, [rpc, onDetailedPrefChange])
 
   const toggleBadge = useCallback(async (checked: boolean) => {
     setSaving(true)
@@ -749,6 +754,9 @@ function PreferencesCard(props: {
       setBadgeEnabled(res.conversationBadge)
       setSaveError(null)
       onBadgePrefChange?.(res.conversationBadge)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agy:ui-prefs-changed', { detail: res }))
+      }
     } catch (err) {
       // A bounced switch with no verdict reads as a flicker: surface the
       // one-shot failure like the section's other action errors.
@@ -760,21 +768,54 @@ function PreferencesCard(props: {
     }
   }, [rpc, t, onBadgePrefChange])
 
-  const row = h('div', { className: 'agy-pref-row' },
-    h('div', { className: 'agy-pref-info' },
-      h('div', { className: 'agy-pref-name' }, t('prefConversationBadge')),
-      h('div', { className: 'agy-pref-desc' }, t('prefConversationBadgeDesc'))),
-    h(Switch, {
-      label: t('prefConversationBadge'),
-      checked: badgeEnabled,
-      disabled: loading || saving,
-      onChange: (checked: boolean) => void toggleBadge(checked),
-    }))
+  const toggleDetailed = useCallback(async (checked: boolean) => {
+    setSaving(true)
+    setDetailedReset(checked)
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+    try {
+      const res = await rpc.call('ui.prefs.set', { detailedQuotaReset: checked })
+      setDetailedReset(res.detailedQuotaReset)
+      setSaveError(null)
+      onDetailedPrefChange?.(res.detailedQuotaReset)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agy:ui-prefs-changed', { detail: res }))
+      }
+    } catch (err) {
+      setDetailedReset(!checked)
+      setSaveError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
+    } finally {
+      setSaving(false)
+    }
+  }, [rpc, t, onDetailedPrefChange])
 
-  return card(t('preferencesTitle'),
-    saveError === null
-      ? row
-      : [row, h('div', { className: 'agy-error' }, saveError)])
+  const rows = [
+    h('div', { className: 'agy-pref-row', key: 'detailed' },
+      h('div', { className: 'agy-pref-info' },
+        h('div', { className: 'agy-pref-name' }, t('prefDetailedQuotaReset')),
+        h('div', { className: 'agy-pref-desc' }, t('prefDetailedQuotaResetDesc'))),
+      h(Switch, {
+        label: t('prefDetailedQuotaReset'),
+        checked: detailedReset,
+        disabled: loading || saving,
+        onChange: (checked: boolean) => void toggleDetailed(checked),
+      })),
+    h('div', { className: 'agy-pref-row', key: 'badge' },
+      h('div', { className: 'agy-pref-info' },
+        h('div', { className: 'agy-pref-name' }, t('prefConversationBadge')),
+        h('div', { className: 'agy-pref-desc' }, t('prefConversationBadgeDesc'))),
+      h(Switch, {
+        label: t('prefConversationBadge'),
+        checked: badgeEnabled,
+        disabled: loading || saving,
+        onChange: (checked: boolean) => void toggleBadge(checked),
+      })),
+  ]
+
+  return h('section', { className: 'agy-card' },
+    h('div', { className: 'agy-card-body' },
+      ...rows,
+      saveError === null ? null : h('div', { className: 'agy-error' }, saveError)))
 }
 
 function AccountsTab(props: {
@@ -788,7 +829,9 @@ function AccountsTab(props: {
   /** UI language for locale-sensitive date formatting ('zh' | 'en'). */
   lang?: string
   t: T
+  detailedQuotaReset?: boolean
   onBadgePrefChange?: (enabled: boolean) => void
+  onDetailedPrefChange?: (enabled: boolean) => void
 }): ReactNode {
   const { accounts, busy, handlers, t } = props
   const [selected, setSelected] = useState<number | null>(null)
@@ -916,11 +959,17 @@ function AccountsTab(props: {
             },
             lang: props.lang,
             t,
+            detailedQuotaReset: props.detailedQuotaReset,
           })),
     // The "what just happened" list, under the split: it is pool-level
     // activity, not one account's, and the split owns the full height.
     h(RecentCard, { rpc: props.rpc, t }),
-    h(PreferencesCard, { rpc: props.rpc, t, onBadgePrefChange: props.onBadgePrefChange })))
+    h(PreferencesCard, {
+      rpc: props.rpc,
+      t,
+      onBadgePrefChange: props.onBadgePrefChange,
+      onDetailedPrefChange: props.onDetailedPrefChange,
+    })))
 }
 
 /**
@@ -1316,7 +1365,8 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
             h('li', null, t('thinkingEffectLowUp')),
             h('li', null, t('thinkingEffectHighDown')),
             h('li', null, t('thinkingEffectMax')),
-            h('li', null, t('thinkingEffectReset'))),
+            h('li', null, t('thinkingEffectReset')),
+            h('li', null, t('thinkingEffectProLevels'))),
           // The selector's "Default" effort carries no level id, so it is its own
           // row rather than one of the three. Empty = upstream allocates; a value
           // = Max, a bare cap with no level sent alongside it.
@@ -1901,9 +1951,15 @@ export function AgySettings(props: {
   onBadgePrefChange?: (enabled: boolean) => void
 }): ReactNode {
   const { rpc, t } = props
+  const [detailedQuotaReset, setDetailedQuotaReset] = useState(false)
   useEffect(() => {
     installAgyStyles()
-  }, [])
+    void rpc.call('ui.prefs.get', {}).then((prefs) => {
+      if (alive.current && prefs) {
+        setDetailedQuotaReset(prefs.detailedQuotaReset === true)
+      }
+    }).catch(() => {})
+  }, [rpc])
   const [tab, setTab] = useState<TabId>('accounts')
   const [accounts, setAccounts] = useState<AccountView[]>([])
   const [models, setModels] = useState<ModelView[]>([])
@@ -2323,7 +2379,20 @@ export function AgySettings(props: {
     }, label, count === undefined ? null : h('span', { className: 'agy-count' }, String(count)))
 
   const body = tab === 'accounts'
-    ? h(AccountsTab, { accounts, busy, busyNow: poolBusy, handlers, lang: props.lang, rpc, t, onBadgePrefChange: props.onBadgePrefChange })
+    ? h(AccountsTab, {
+      accounts,
+      busy,
+      busyNow: poolBusy,
+      handlers,
+      lang: props.lang,
+      rpc,
+      t,
+      detailedQuotaReset,
+      onBadgePrefChange: props.onBadgePrefChange,
+      onDetailedPrefChange: (enabled: boolean) => {
+        setDetailedQuotaReset(enabled)
+      },
+    })
     : tab === 'models'
       ? modelError === undefined
         ? h(ModelsTab, {

@@ -61,6 +61,7 @@ export interface SsePayload {
     cachedContentTokenCount?: number
   }
   error?: SseError
+  modelVersion?: string
 }
 
 /**
@@ -76,7 +77,14 @@ export function parseSseDataLine(line: string): SsePayload | null {
   const parsed = JSON.parse(data) as unknown
   const root = (parsed as { response?: unknown })?.response ?? parsed
   const payload = (Array.isArray(root) ? root[0] : root) as SsePayload | undefined
-  return payload ?? null
+  if (!payload || typeof payload !== 'object') return null
+  const modelVersion = (root as { modelVersion?: unknown })?.modelVersion
+    ?? (parsed as { modelVersion?: unknown })?.modelVersion
+    ?? payload.modelVersion
+  if (typeof modelVersion === 'string' && modelVersion.length > 0) {
+    payload.modelVersion = modelVersion
+  }
+  return payload
 }
 
 /**
@@ -246,13 +254,25 @@ export interface ParseAgySseOptions {
    * for replay on the next turn (see signature-cache.ts).
    */
   onToolSignature?(toolCallId: string, signature: string): void
+  /**
+   * Disambiguate upstream functionCall ids with a stream-scoped or session-safe salt.
+   *
+   * Upstream Antigravity endpoints return short pseudo-random tool call ids
+   * (e.g. `call_75146` or missing fallback `0`) which collide across distant turns.
+   * When PTC mode executes in DSH, duplicate tool call ids produce duplicate sub-call ids
+   * (`${callId}:ptc:${n}`), triggering SessionFormatError. Enabling disambiguation
+   * appends a safe unique salt to short/colliding ids.
+   */
+  onModelVersion?: (modelVersion: string) => void
+  disambiguateToolCallIds?: boolean
 }
 
 export async function* parseAgySse(
   body: ReadableStream<Uint8Array>,
   options: ParseAgySseOptions = {},
 ): AsyncGenerator<StreamChunk> {
-  const { signal, idleTimeoutMs = resolveStreamIdleTimeoutMs() } = options
+  const { signal, idleTimeoutMs = resolveStreamIdleTimeoutMs(), disambiguateToolCallIds = false } = options
+  const streamSalt = disambiguateToolCallIds ? Math.random().toString(36).slice(2, 8) : ''
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -341,6 +361,9 @@ export async function* parseAgySse(
     }
     const payload = parseSseDataLine(trimmed)
     if (!payload) return out
+    if (payload.modelVersion) {
+      options.onModelVersion?.(payload.modelVersion)
+    }
     if (payload.error) {
       const message = payload.error.message ?? payload.error.status ?? 'upstream error'
       throw new Error(`agy stream error (${payload.error.code ?? 'unknown'}): ${message}`)
@@ -394,7 +417,11 @@ export async function* parseAgySse(
         } else if (part.functionCall) {
           // Use the upstream functionCall id when present so the signature
           // captured on this part can be replayed for the same id next turn.
-          const upstreamId = part.functionCall.id || String(blockIndex)
+          const baseId = part.functionCall.id || String(blockIndex)
+          // Disambiguate short pseudo-random IDs (e.g. "call_75146" or numeric "0")
+          // which collide across turns and cause DSH PTC subCallId collisions.
+          const shouldSalt = disambiguateToolCallIds && /^(call_[0-9]+|[0-9]+)$/.test(baseId)
+          const upstreamId = shouldSalt ? `${baseId}_${streamSalt}` : baseId
           // Each functionCall part is an ATOMIC block: a stream can carry
           // several functionCall parts in one turn (multi-tool responses),
           // and they share kind "tool-call" — ensureBlock alone would not

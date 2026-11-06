@@ -7,7 +7,18 @@
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
-import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId, isLevelThinkingModel } from './catalog.ts'
+import {
+  AGY_PUBLIC_MODELS,
+  catalogModel,
+  formatTieredModelName,
+  isChatCallableModelId,
+  isLevelThinkingModel,
+  isUnifiedThinkingFamily,
+  levelThinkingEffortsFor,
+  registerDiscoveredTieredModels,
+  registerDiscoveredUnifiedThinkingFamily,
+} from './catalog.ts'
+export { isUnifiedThinkingFamily } from './catalog.ts'
 
 export const AGY_PROVIDER = 'agy'
 
@@ -36,6 +47,14 @@ const LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
   ] as const),
 } as const)
 
+/** Reasoning levels for the Pro family (Low and High only; no Medium tier). */
+const PRO_LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
+  efforts: Object.freeze([
+    { id: ReasoningEffortId('low'), name: 'Low' },
+    { id: ReasoningEffortId('high'), name: 'High' },
+  ] as const),
+} as const)
+
 /**
  * Input modalities per model. Image support follows the catalog's own
  * `supportsVision` metadata for known models (gpt-oss-120b-medium is text-only
@@ -57,6 +76,8 @@ export interface DiscoveredModelEntry {
   }
   displayName?: string
   modelName?: string
+  maxTokens?: number
+  maxOutputTokens?: number
 }
 
 export interface DeprecatedModelInfo {
@@ -119,6 +140,8 @@ function advertisedModelIds(dynamic: DiscoveredModels): Set<string> {
   return advertised
 }
 
+
+
 /**
  * Discovered ids that should not appear in a chat model list, according to the
  * payload's own role assignments.
@@ -166,6 +189,31 @@ function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
       hidden.add(retiredId)
     }
   }
+  const splitCounts = new Map<string, number>()
+  for (const id of Object.keys(models)) {
+    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
+    if (m && m[1]) {
+      splitCounts.set(m[1], (splitCounts.get(m[1]) ?? 0) + 1)
+    }
+  }
+  for (const [base, count] of splitCounts.entries()) {
+    if ((count >= 2 || isUnifiedThinkingFamily(base)) && !Object.hasOwn(models, `${base}-tiered`)) {
+      registerDiscoveredUnifiedThinkingFamily(base)
+    }
+  }
+  for (const id of Object.keys(models)) {
+    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
+    if (m && m[1]) {
+      const base = m[1]
+      if (
+        Object.hasOwn(models, `${base}-tiered`) ||
+        (Object.hasOwn(models, base) && isLevelThinkingModel(base)) ||
+        isUnifiedThinkingFamily(base)
+      ) {
+        hidden.add(id)
+      }
+    }
+  }
   return hidden
 }
 
@@ -211,35 +259,183 @@ export function chatCallableDiscoveredIds(dynamic: DiscoveredModels): string[] {
   return Object.keys(dynamic.models ?? {}).filter((id) => isChatCallableModelId(id) && !hidden.has(id))
 }
 
+export function extractModelVersion(id: string): number {
+  const match = /(\d+)(?:[-_.](\d+))?/.exec(id)
+  if (!match || !match[1]) return 0
+  const major = parseInt(match[1], 10)
+  const minor = match[2] ? parseInt(match[2], 10) : 0
+  return major + minor / Math.pow(10, match[2] ? match[2].length : 1)
+}
+
+/**
+ * Model family rank used by the deterministic comparator:
+ * Gemini (1) -> Claude (2) -> GPT (3) -> everything else (4).
+ */
+export function getModelFamilyRank(id: string): number {
+  const lower = id.toLowerCase()
+  if (lower.startsWith('gemini')) return 1
+  if (lower.startsWith('claude')) return 2
+  if (lower.startsWith('gpt')) return 3
+  return 4
+}
+
+function getGeminiTierWeight(id: string): number {
+  const lower = id.toLowerCase()
+  if (lower.includes('pro') || lower.includes('ultra')) return 40
+  if (lower.includes('argon')) return 30
+  if (lower.includes('flash') && !lower.includes('lite') && !lower.includes('thinking')) return 30
+  if (lower.includes('lite')) return 20
+  if (lower.includes('thinking')) return 10
+  return 25
+}
+
+function getGeminiRankScore(id: string): number {
+  const ver = extractModelVersion(id)
+  const tier = getGeminiTierWeight(id)
+  // Gemini 3.x specific hierarchy: Standard Flash (3.8, 3.0) before Flash Lite (3.5, 3.1)
+  if (ver >= 3.0 && ver < 4.0) {
+    const isStandardFlash = id.includes('flash') && !id.includes('lite')
+    if (isStandardFlash) {
+      return 350 + (ver === 3 ? 1 : ver * 10)
+    } else {
+      return 300 + ver * 10
+    }
+  }
+  return ver * 100 + tier
+}
+
+function getClaudeTierWeight(id: string): number {
+  const lower = id.toLowerCase()
+  if (lower.includes('opus')) return 30
+  if (lower.includes('sonnet')) return 20
+  if (lower.includes('haiku')) return 10
+  return 15
+}
+
+function getClaudeRankScore(id: string): number {
+  const ver = extractModelVersion(id)
+  const tier = getClaudeTierWeight(id)
+  return ver * 100 + tier
+}
+
+/**
+ * Generalized, deterministic model comparator that sorts models into user-defined families
+ * (Gemini -> Claude -> GPT -> Others), and prioritizes newer versions and higher capability tiers.
+ * Automatically accommodates newly published upstream models without manual code changes.
+ */
+export function compareModels(a: { id: string }, b: { id: string }): number {
+  const famA = getModelFamilyRank(a.id)
+  const famB = getModelFamilyRank(b.id)
+  if (famA !== famB) return famA - famB
+
+  if (famA === 1) {
+    const scoreA = getGeminiRankScore(a.id)
+    const scoreB = getGeminiRankScore(b.id)
+    if (scoreA !== scoreB) return scoreB - scoreA
+  }
+
+  if (famA === 2) {
+    const scoreA = getClaudeRankScore(a.id)
+    const scoreB = getClaudeRankScore(b.id)
+    if (scoreA !== scoreB) return scoreB - scoreA
+  }
+
+  const verA = extractModelVersion(a.id)
+  const verB = extractModelVersion(b.id)
+  if (verA !== verB) return verB - verA
+
+  return a.id.localeCompare(b.id)
+}
+
+/**
+ * Detect whether upstream displayName contradicts the model ID version or characteristics.
+ * E.g. Upstream returns "Gemini 3.5 Flash Lite" for "gemini-2.5-flash-lite", "gemini-2.5-flash",
+ * or "gemini-2.5-flash-thinking".
+ */
+export function isUpstreamDisplayNameContradictory(id: string, upstreamName: string): boolean {
+  const idVer = /(?:gemini|claude)[-_](\d+(?:\.\d+)?)/i.exec(id)?.[1]
+  const nameVer = /(?:gemini|claude)\s+(\d+(?:\.\d+)?)/i.exec(upstreamName)?.[1]
+  if (idVer && nameVer && idVer !== nameVer) {
+    return true
+  }
+  if (!/lite/i.test(id) && /lite/i.test(upstreamName)) {
+    return true
+  }
+  if (!/thinking/i.test(id) && /thinking/i.test(upstreamName)) {
+    return true
+  }
+  return false
+}
+
 /** Merge dynamic ids with catalog metadata; non-chat and superseded ids are dropped, unknown ids keep minimal info. */
 export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
+  if (dynamic.tieredModelIds) {
+    registerDiscoveredTieredModels(dynamic.tieredModelIds)
+  }
   const entries: LlmModelInfo[] = []
   const hidden = hiddenDiscoveredIds(dynamic)
   for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
     if (!isChatCallableModelId(id) || hidden.has(id)) continue
     const meta = catalogModel(id)
-    const rawDisplayName = entry.displayName && entry.displayName !== id ? entry.displayName : undefined
-    const displayName = rawDisplayName ?? meta?.name ?? entry.displayName ?? entry.modelName ?? id
+    const rawDisplayName =
+      entry.displayName && entry.displayName !== id && !isUpstreamDisplayNameContradictory(id, entry.displayName)
+        ? entry.displayName
+        : undefined
+    const displayName =
+      rawDisplayName ??
+      meta?.name ??
+      (entry.displayName && !isUpstreamDisplayNameContradictory(id, entry.displayName)
+        ? entry.displayName
+        : undefined) ??
+      entry.modelName ??
+      formatTieredModelName(id)
+    const contextWindow =
+      meta?.contextLength ??
+      (typeof entry.maxTokens === 'number' && entry.maxTokens > 0 ? entry.maxTokens : undefined)
     entries.push({
       provider: AGY_PROVIDER,
       id,
       name: displayName,
       inputModalities: inputModalitiesFor(meta),
-      ...(meta ? { context: { contextWindow: meta.contextLength } } : {}),
+      ...(contextWindow !== undefined ? { context: { contextWindow } } : {}),
     })
   }
+  // Ensure unified base models for split thinking families are present
+  for (const splitId of Object.keys(dynamic.models ?? {})) {
+    const m = /^(.*)-(?:low|medium|high|max)$/.exec(splitId)
+    if (m && m[1]) {
+      const base = m[1]
+      if (
+        isLevelThinkingModel(base) &&
+        !entries.some((e) => e.id === base) &&
+        !entries.some((e) => e.id === `${base}-tiered`)
+      ) {
+        const meta = catalogModel(base)
+        entries.push({
+          provider: AGY_PROVIDER,
+          id: base,
+          name: meta?.name ?? formatTieredModelName(base),
+          inputModalities: inputModalitiesFor(meta),
+          ...(meta?.contextLength !== undefined ? { context: { contextWindow: meta.contextLength } } : {}),
+        })
+      }
+    }
+  }
+  entries.sort(compareModels)
   return entries
 }
 
 /** Catalog-only model list used when the endpoint is unreachable. */
 export function catalogModelList(): LlmModelInfo[] {
-  return AGY_PUBLIC_MODELS.map((model) => ({
+  const list = AGY_PUBLIC_MODELS.map((model) => ({
     provider: AGY_PROVIDER,
     id: model.id,
     name: model.name,
     inputModalities: inputModalitiesFor(model),
     context: { contextWindow: model.contextLength },
   }))
+  list.sort(compareModels)
+  return list
 }
 
 /** Adapter-facing listing: dynamic first, catalog fallback. */
@@ -262,6 +458,10 @@ export async function listAgyModels(
 export function resolveAgyModel(provider: string, model: string): LlmResolvedModelInfo {
   const meta = catalogModel(model)
   if (isLevelThinkingModel(model)) {
+    const efforts = levelThinkingEffortsFor(model)
+    const reasoningInfo: LlmModelReasoningInfo = efforts.length === 2
+      ? { ...PRO_LEVEL_REASONING, efforts: [...PRO_LEVEL_REASONING.efforts] }
+      : { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] }
     return {
       provider,
       id: model,
@@ -270,7 +470,7 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
       context: { contextWindow: meta?.contextLength ?? 1048576 },
       defaultMaxTokens: meta?.maxOutputTokens ?? 65536,
       // Return a shallow copy so callers cannot mutate the frozen singleton.
-      reasoning: { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] },
+      reasoning: reasoningInfo,
     }
   }
   return {

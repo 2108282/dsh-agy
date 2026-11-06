@@ -318,14 +318,14 @@ describe('bootstrap UA version freshness', () => {
    */
   it('advertises the published version, not a per-call default', () => {
     setResolvedAgyVersion('9.9.9')
-    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/9.9.9')
+    expect(getAgyBootstrapUserAgent()).toContain('antigravity/hub/9.9.9')
     // The short form used by the version feeds agrees with the bootstrap form.
-    expect(antigravityUserAgent()).toBe('antigravity/9.9.9 darwin/arm64')
+    expect(antigravityUserAgent()).toBe('antigravity/hub/9.9.9 (aidev_client; os_type=darwin; arch=arm64; cl=1003475615)')
   })
 
   it('falls back to the pinned floor before any version is resolved', () => {
     setResolvedAgyVersion(undefined)
-    expect(getAgyBootstrapUserAgent()).toContain(`Antigravity/${AGY_VERSION_FALLBACK}`)
+    expect(getAgyBootstrapUserAgent()).toContain(`antigravity/hub/${AGY_VERSION_FALLBACK}`)
     expect(currentAgyVersion()).toBe(AGY_VERSION_FALLBACK)
   })
 
@@ -341,8 +341,8 @@ describe('bootstrap UA version freshness', () => {
 
     expect(await resolveAntigravityVersion(fetchImpl)).toBe('1.19.0')
     // Resolution must reach the bootstrap UA without any call site passing it.
-    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/1.19.0')
-    expect(antigravityUserAgent()).toBe('antigravity/1.19.0 darwin/arm64')
+    expect(getAgyBootstrapUserAgent()).toContain('antigravity/hub/1.19.0')
+    expect(antigravityUserAgent()).toBe('antigravity/hub/1.19.0 (aidev_client; os_type=darwin; arch=arm64; cl=1003475615)')
   })
 
   it('reports nothing observed when the feeds yield nothing', async () => {
@@ -486,6 +486,18 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
     const fetchImpl = (async () => new Response('no capacity', { status: 503 })) as unknown as typeof fetch
     const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
     // Intended: the caller's classifier sees the 503 and Fix A surfaces SERVER.
+    expect(response.status).toBe(503)
+  })
+
+  it('preserves daily 503 or 429 instead of letting autopush 403 overwrite it', async () => {
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) return new Response('daily overloaded', { status: 503 })
+      if (url.startsWith(AGY_ENDPOINT_PROD)) return new Response('prod overloaded', { status: 503 })
+      if (url.startsWith(AGY_ENDPOINT_DAILY_SANDBOX)) return new Response('sandbox overloaded', { status: 503 })
+      return new Response('<!DOCTYPE html><html>403 Forbidden</html>', { status: 403 })
+    }) as unknown as typeof fetch
+    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
     expect(response.status).toBe(503)
   })
 
