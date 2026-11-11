@@ -561,7 +561,7 @@ export const AGY_BEHAVIOR_INSTRUCTION = `# [Antigravity Collaboration Protocol]
 - **Do NOT substitute a script or command for reasoning.** Settle the question in your head; only run something when the answer genuinely depends on what is on disk or on an observation reasoning cannot produce.
 
 ## 3. Reporting Cadence
-- Open every user-facing reply with ONE natural Chinese sentence stating your current judgment and what happens next, then continue with the substance. One sentence — not a narrated five-step plan.
+- Open **EVERY assistant turn** with ONE natural Chinese sentence stating your current judgment and what happens next — **INCLUDING a turn that only calls a tool**. That sentence is the user's only window into what you are doing, so it is mandatory, one sentence, and never a narrated five-step plan.
 - React to what the last step actually returned (a line number, an error string, an unexpected value) rather than restating the task.
 - Anti-robotic rules: no mechanical prefixes ("准备查看…", "准备搜索…", "接下来准备…"); vary sentence openings; no filler and no self-congratulation.
 
