@@ -36,6 +36,7 @@ import {
   generateAntigravityRequestId,
 } from '../src/runtime/identity.ts'
 import { _clearVersionCacheForTest, resolveAntigravityVersion } from '../src/runtime/version.ts'
+import { AGY_VERSION_FALLBACK } from '../src/oauth/constants.ts'
 import { fetchQuotaSummary, parseQuotaSummary } from '../src/adapter/quota-summary.ts'
 import {
   FAMILY_UNKNOWN,
@@ -500,12 +501,12 @@ describe('fingerprint', () => {
     // LINUX_AMD64 | LINUX_ARM64 | WINDOWS_AMD64`, so these Go-style tokens ARE the
     // official vocabulary for the enum — while the UA's own `darwin/arm64` token is
     // a separate, still-uncaptured thing (docs/official-identity.json).
-    expect(fp.userAgent).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+ \(aidev_client; os_type=darwin; arch=arm64; cl=\d+\)$/)
+    expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ darwin\/arm64$/)
     expect(fp.clientMetadata.ideType).toBe('ANTIGRAVITY')
     // The metadata is the official `ClientMetadata` message: only fields whose
     // vocabulary is captured, so `pluginVersion`/`ideName`/... stay absent rather
     // than guessed.
-    expect(fp.clientMetadata.ideVersion).toBe(fp.userAgent.match(/antigravity\/hub\/([\d.]+)/)?.[1])
+    expect(fp.clientMetadata.ideVersion).toBe(fp.userAgent.match(/antigravity\/([\d.]+)/)?.[1])
     expect([
       'PLATFORM_UNSPECIFIED', 'DARWIN_AMD64', 'DARWIN_ARM64',
       'LINUX_AMD64', 'LINUX_ARM64', 'WINDOWS_AMD64',
@@ -530,9 +531,9 @@ describe('fingerprint', () => {
     const fp = generateFingerprint()
     const before = fp.userAgent
     expect(updateFingerprintVersion(fp, '9.9.9')).toBe(true)
-    expect(fp.userAgent).toContain('antigravity/hub/9.9.9')
+    expect(fp.userAgent).toContain('antigravity/9.9.9')
     expect(updateFingerprintVersion(fp, '9.9.9')).toBe(false)
-    expect(fp.userAgent).toBe(before.replace(/antigravity\/hub\/[\d.]+/, 'antigravity/hub/9.9.9'))
+    expect(fp.userAgent).toBe(before.replace(/antigravity\/[\d.]+/, 'antigravity/9.9.9'))
   })
 
   it('bounds the fingerprint history to the most recent entries', () => {
@@ -684,24 +685,49 @@ describe('version resolver', () => {
   // this one and the assertion below would never reach the stub.
   beforeEach(() => _clearVersionCacheForTest())
 
-  it('takes the version from the claimed product line, not the highest number', async () => {
-    // The resolver used to return the numeric max across BOTH feeds. The three
-    // Antigravity lines are separate namespaces (IDE 2.x, hub 2.15.x, CLI 1.2.x),
-    // so "max" compares unrelated numbers: the IDE feed's 1.20.1 wins here and this
-    // client would advertise a version that does not exist for the CLI it claims to
-    // be (docs/official-identity.json). Red-capable: the old logic returns 1.20.1.
+  it('prefers the hub line, which is the line the backend validates', async () => {
+    // Measured 2026-11-12: the three Antigravity lines are separate version
+    // namespaces (IDE 2.x, hub 2.x, CLI 1.x) and the backend refuses every 1.x
+    // value ("This version of Antigravity is no longer supported") while accepting
+    // 2.x — see docs/official-identity.json `version.wireVersionGate`. The hub
+    // manifest therefore wins over the higher-numbered IDE entry and over the CLI
+    // tag, which is the opposite of the old "numeric max" behaviour.
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.includes('antigravity-hub-auto-updater')) {
+        return new Response('version: 2.31.4\nfiles:\n  - url: https://example.invalid/x.zip\n', { status: 200 })
+      }
       if (url.includes('antigravity-auto-updater')) {
         return new Response(JSON.stringify([{ version: '1.15.0' }, { version: '1.20.1' }]), { status: 200 })
       }
-      // No leading `v`: that is the shape the real feed returns (`tag: "1.2.9"`),
-      // and a `v`-prefixed tag is not what this parser accepts.
+      // No leading `v`: that is the shape the real feed returns (`tag: "1.2.9"`).
       return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
     const version = await resolveAntigravityVersion(fetchImpl)
-    expect(version).toBe('1.19.0')
+    expect(version).toBe('2.31.4')
+  })
+
+  it('never advertises a retired 1.x version, whatever the feeds say', async () => {
+    // A 1.x value does not merely look stale, it stops the client working: the
+    // backend answers HTTP 200 with a plain text candidate and no finishReason, so
+    // the SSE guard reports "stream terminated prematurely". The pinned 2.x floor is
+    // a strictly better failure mode than a silent version gate, so every 1.x
+    // candidate is discarded rather than advertised.
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('antigravity-hub-auto-updater')) {
+        return new Response('nope', { status: 503 })
+      }
+      if (url.includes('antigravity-auto-updater')) {
+        return new Response(JSON.stringify([{ version: '1.20.1' }]), { status: 200 })
+      }
+      return new Response(JSON.stringify({ tag_name: '1.99.9' }), { status: 200 })
+    }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+    const version = await resolveAntigravityVersion(fetchImpl)
+    expect(version).not.toMatch(/^1\./)
+    expect(version).toBe(AGY_VERSION_FALLBACK)
   })
 
   it('falls back to the pinned version when sources fail', async () => {

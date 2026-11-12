@@ -1,5 +1,13 @@
 // Version-freshness gate: the compiled fallback must not trail the live
-// Antigravity release feed by more than one minor.
+// Antigravity release it resolves to by more than one minor.
+//
+// WHICH line is the reference was measured, not assumed (2026-11-12): the backend
+// refuses EVERY 1.x value with "This version of Antigravity is no longer
+// supported" — 1.99.9 refused, 2.0.0 accepted — so the CLI release line, which is
+// the product this client claims, cannot describe a version it may send. The hub
+// / desktop line is the one validated, and it is therefore what this gate compares
+// against. `resolveObservedAgyVersion` also rejects any 1.x candidate, so a
+// retired-line value cannot reach a User-Agent even if this gate is bypassed.
 //
 // Why this exists as a SCHEDULED check rather than a PR check: agy ships without
 // a PR here, so drift appears between releases of THIS package. A stale client
@@ -97,7 +105,7 @@ if (observed === undefined) {
   process.exit(2)
 }
 
-console.log(`live feed (cli line): ${observed}`)
+console.log(`resolved (advertisable) version: ${observed}`)
 console.log(`compiled fallback: ${declaredFallback}`)
 console.log(`versionPool: ${poolVersions.join(', ')}`)
 
@@ -153,7 +161,7 @@ if (minorDistance(newestPool, observed) < -1) {
 if (problems.length > 0) {
   console.error(`\nFAIL ${problems.join('; ')}`)
   console.error('Bump AGY_VERSION_FALLBACK (src/oauth/constants.ts) and versionPool '
-    + '(src/runtime/fingerprint-data.json) to the live release.')
+    + '(src/runtime/fingerprint-data.json) to the live release of the line the backend validates.')
   process.exit(1)
 }
 

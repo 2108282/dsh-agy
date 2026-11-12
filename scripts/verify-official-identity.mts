@@ -30,6 +30,7 @@ const record = JSON.parse(readFileSync(new URL('../docs/official-identity.json',
     claimedLine: string
     installed: { value: string }
     feed: { latest: string; url: string }
+    advertisedVersionSource?: { source: string; latest: string; url: string }
     namespacesAreDisjoint: Record<string, string>
   }
   clientMetadata: { enums: Record<string, string[]>; ours: { ideType: { value: string }; platform: { value: string } } }
@@ -56,39 +57,54 @@ function ok(message: string): void {
 
 console.log('--- compiled values vs the record ---')
 
-if (record.version.claimedLine !== 'cli') {
-  fail(`record claims "${record.version.claimedLine}", but this package's version line is the CLI's`)
+// Two DIFFERENT lines are in play, and they are not interchangeable:
+//   - the CREDENTIAL line (whose OAuth client this plugin uses) is the CLI's;
+//   - the ADVERTISED-VERSION line is the hub/desktop one, because the backend
+//     refuses every 1.x value outright (measured 2026-11-12, see
+//     `version.wireVersionGate`), so the CLI release line cannot name a version
+//     this client is allowed to send.
+// The record must declare both, rather than a single `claimedLine`.
+if (!String(record.version.claimedLine ?? '').startsWith('cli')) {
+  fail(`record claims "${record.version.claimedLine}", but this package authenticates as the CLI`)
 } else {
-  ok('claimed product line is the CLI')
+  ok('authenticates as the CLI (credential line)')
 }
+
+const advertised = record.version.advertisedVersionSource
+if (advertised === undefined || typeof advertised.latest !== 'string') {
+  fail('record has no version.advertisedVersionSource.latest; the advertised-version line must be declared')
+}
+
+/* eslint-disable @typescript-eslint/no-unnecessary-condition -- validated above */
+const referenceVersion = advertised?.latest ?? record.version.feed.latest
+/* eslint-enable @typescript-eslint/no-unnecessary-condition */
 
 const fallbackMinor = AGY_VERSION_FALLBACK.split('.').slice(0, 2).join('.')
-const cliMinor = record.version.feed.latest.split('.').slice(0, 2).join('.')
-if (fallbackMinor !== cliMinor) {
+const refMinor = referenceVersion.split('.').slice(0, 2).join('.')
+if (fallbackMinor !== refMinor) {
   fail(
-    `AGY_VERSION_FALLBACK is ${AGY_VERSION_FALLBACK} but the record's CLI feed latest is ${record.version.feed.latest}; ` +
-      'these must share a minor, because the fallback must name a version that exists for the product we claim',
+    `AGY_VERSION_FALLBACK is ${AGY_VERSION_FALLBACK} but the advertised-version line reports ${referenceVersion}; ` +
+      'these must share a minor, because the fallback must name a version the backend will accept',
   )
 } else {
-  ok(`AGY_VERSION_FALLBACK ${AGY_VERSION_FALLBACK} is on the CLI line (${cliMinor}.x)`)
+  ok(`AGY_VERSION_FALLBACK ${AGY_VERSION_FALLBACK} is on the advertised line (${refMinor}.x)`)
 }
 
-// The version pool must stay inside ONE namespace. This is the check that would
-// have caught the original defect, where the pool held IDE 2.x numbers while the
-// rest of the client was drifting toward the CLI line.
+// The version pool must stay inside ONE namespace — the ADVERTISED one. This is
+// the check that would have caught the original defect, where the pool held
+// 2.28.2 while the resolver was drifting onto the retired CLI line.
 const pool = JSON.parse(
   readFileSync(new URL('../src/runtime/fingerprint-data.json', import.meta.url), 'utf8'),
 ) as { versionPool?: string[] }
-const major = record.version.feed.latest.split('.')[0]
+const major = referenceVersion.split('.')[0]
 const offLine = (pool.versionPool ?? []).filter((v) => v.split('.')[0] !== major)
 if (offLine.length > 0) {
   fail(
-    `fingerprint-data.json versionPool mixes namespaces: ${offLine.join(', ')} are not CLI-line versions. ` +
-      `The IDE (${record.version.namespacesAreDisjoint['ide']}) and hub (${record.version.namespacesAreDisjoint['hub']}) ` +
-      'lines are different products, so a pool spanning them advertises a version that does not exist for the CLI.',
+    `fingerprint-data.json versionPool mixes namespaces: ${offLine.join(', ')} are not on the advertised ` +
+      `${major}.x line. A version outside it is refused by the backend, so the pool must stay inside one line.`,
   )
 } else {
-  ok(`versionPool is CLI-line only (${(pool.versionPool ?? []).join(', ')})`)
+  ok(`versionPool is on the advertised ${major}.x line (${(pool.versionPool ?? []).join(', ')})`)
 }
 
 for (const [field, value] of [

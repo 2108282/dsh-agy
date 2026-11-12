@@ -1633,7 +1633,7 @@ describe('fingerprint version freshness', () => {
 
       const fp = (await store.load()).accounts[0]!.fingerprint!
       expect(fp.userAgent).not.toContain('1.22.2')
-      expect(fp.userAgent).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+ \(aidev_client; os_type=darwin; arch=arm64; cl=\d+\)$/)
+      expect(fp.userAgent).toMatch(/^antigravity\/\d+\.\d+\.\d+ darwin\/arm64$/)
     } finally {
       _setFingerprintDataForTest(undefined)
       vi.unstubAllGlobals()

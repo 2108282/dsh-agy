@@ -50,7 +50,7 @@
     }
   },
   "version": {
-    "claimedLine": "cli",
+    "claimedLine": "cli (credentials only) — the version NUMBER it may advertise comes from the hub/desktop line",
     "installed": {
       "value": "1.2.5",
       "source": "cli",
@@ -68,12 +68,12 @@
       "cli": "1.x (live 1.5.6)",
       "ide": "2.x (antigravity-auto-updater-974169037036.us-central1.run.app/releases)",
       "hub": "2.15.x / 2.28.x / 2.31.x — live 2.31.2 (antigravity-hub-auto-updater-…/manifest/latest-arm64-mac.yml)",
-      "consequence": "Taking the numeric max across the IDE and CLI feeds compares unrelated numbers. The resolver must read the claimed line only (the CLI feed, because that is the product whose credentials this client holds); the hub and IDE lines are for the freshness gate's cross-check and are never advertised."
+      "consequence": "Taking the numeric max across the feeds compares unrelated numbers (still true). The resolver now reads the hub line first and rejects every 1.x candidate, because that is the only line the backend accepts; the CLI feed is a secondary source that currently yields nothing advertisable."
     },
     "unresolved": [
-      "Whether the backend model-gates on this version is UNPROVEN. It is the one cosmetic",
-      "variable with a plausible mechanism (capability gating rather than detection), which",
-      "is why it stays in the 'keep' tier while the rest of the cosmetic axis is hygiene."
+      "Whether the version gate is the ONLY capability gate is unproven; it is the one cosmetic",
+      "variable with a demonstrated, load-bearing mechanism (a hard capability gate, not detection),",
+      "so it is the one that must be kept accurate."
     ],
     "wireVersionGate": {
       "confidence": "confirmed",
@@ -114,6 +114,26 @@
         "conclusion": "The floor is the MAJOR version, not a numeric threshold: 1.99.9 is refused while 2.0.0 is accepted. The entire 1.x line — including the value the live CLI release feed publishes (1.5.6) and the value 045beta pinned (1.2.9) — is retired server-side. No 1.x User-Agent can work, whatever its shape."
       },
       "endpointNote": "The version gate answers on ALL FOUR endpoints (daily / prod / daily-sandbox refuse 1.x; autopush answers 403 for consumer accounts). Quota is NOT the constraint: retrieveUserQuotaSummary reported Gemini 5h remainingFraction 0.936 and weekly 0.300 while a probe hardcoded to the PROD endpoint returned 429 — prod answers RESOURCE_EXHAUSTED for consumer accounts, and the real request path starts at daily, where the same request streams normally."
+    },
+    "advertisedVersionSource": {
+      "source": "hub",
+      "url": "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml",
+      "shape": "version: 2.31.2 (top-level key in the YAML manifest)",
+      "latest": "2.31.2",
+      "why": "Measured 2026-11-12: the backend refuses every 1.x value ('This version of Antigravity is no longer supported'; 1.99.9 refused, 2.0.0 accepted), so the CLI release line — the product whose OAuth client this plugin uses — cannot describe a version it is allowed to send. Authentication and the advertised version therefore come from two different lines. See version.wireVersionGate."
+    },
+    "clientShapes": {
+      "generationUserAgent": "antigravity/<2.x> darwin/arm64  (short CLI shape, NO 'hub/' token, no cl= changelist)",
+      "bootstrapUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) … Antigravity/<2.x> Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36",
+      "note": "Both axes were measured independently: the UA SHAPE is invisible to the version gate (identical outcome for both shapes at each version), while the version NUMBER is decisive. The hub-shaped UA was therefore removed without any behavioural cost."
+    },
+    "retiredLines": {
+      "cli": {
+        "liveValue": "1.5.6",
+        "status": "retired server-side for this wire",
+        "usable": false,
+        "detail": "Every 1.x value is refused with the 'no longer supported' text, including the newest CLI release."
+      }
     }
   },
   "userAgent": {

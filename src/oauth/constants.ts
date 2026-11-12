@@ -153,15 +153,22 @@ export async function fetchAgyFirstOk(
  * value is a cold-start floor, not the version anything should normally send.
  * It tracks the release feed's newest entry; refresh it when the feed moves.
  *
- * NAMESPACE: this is the **Antigravity CLI** line (`google-antigravity/antigravity-cli`),
- * not the IDE or hub line, because that is the product this client claims to be
- * (`docs/official-identity.json`). The three lines are separate version
- * namespaces — IDE `2.0.0`, hub `2.15.1`, CLI `1.2.9` — so comparing them
- * numerically is meaningless and mixing them advertises a version that does not
- * exist for the product we name.
+ * NAMESPACE, measured 2026-11-12 (docs/official-identity.json,
+ * `version.wireVersionGate`): the backend refuses EVERY 1.x value with
+ * "This version of Antigravity is no longer supported" (1.2.5 / 1.2.9 / 1.5.6 /
+ * 1.18.3 / 1.19.0 / 1.99.9 all refused) and accepts 2.x (2.0.0 onward). The floor
+ * is the MAJOR version, so the CLI release line is retired server-side and none
+ * of its values can be advertised — including what the CLI feed publishes today.
+ * This value therefore tracks the **desktop/hub** line, the one the backend
+ * actually validates.
+ *
+ * The User-Agent built from it is the short CLI shape
+ * (`antigravity/<version> <platform>` — no `hub/` token, no `cl=` changelist),
+ * because the two axes measure differently: the SHAPE is invisible to the gate
+ * (both shapes were accepted at 2.x and refused at 1.x) while the VERSION is
+ * decisive. See the builders below.
  */
-export const AGY_VERSION_FALLBACK = '2.28.2'
-export const AGY_HUB_CHANGELIST = '1003475615'
+export const AGY_VERSION_FALLBACK = '2.31.2'
 
 /**
  * `ClientMetadata.platform` value: the proto enum NAME, as protobuf-JSON emits it.
@@ -191,8 +198,39 @@ export const AGY_PLATFORM_ENUM = 'DARWIN_ARM64'
  */
 let resolvedAgyVersion: string | undefined
 
+/**
+ * Lowest MAJOR version the backend still accepts.
+ *
+ * Measured 2026-11-12: `1.99.9` is refused with "This version of Antigravity is
+ * no longer supported" while `2.0.0` is accepted, so the floor is the major
+ * number, not a numeric threshold (see `docs/official-identity.json`,
+ * `version.wireVersionGate.minimumVersionFloor`). The entire 1.x line — the CLI
+ * release line — is retired server-side.
+ */
+export const AGY_MIN_SUPPORTED_MAJOR = 2
+
+/**
+ * Whether a version may be advertised at all.
+ *
+ * This is a SAFETY guard, not a preference: a 1.x value on the wire does not
+ * degrade the client, it stops it working entirely — every request comes back as
+ * HTTP 200 carrying an ordinary text candidate with no `finishReason`, which the
+ * SSE completeness guard can only report as "stream terminated prematurely".
+ * So a retired-line value is never allowed to reach a User-Agent, no matter what
+ * a feed resolves to; the pinned 2.x fallback is a far better failure mode than a
+ * silent version gate.
+ */
+export function isAdvertisableAgyVersion(version: string | undefined | null): version is string {
+  if (typeof version !== 'string') return false
+  const major = Number(version.split('.')[0])
+  return Number.isFinite(major) && major >= AGY_MIN_SUPPORTED_MAJOR
+}
+
 /** Publish a freshly resolved version for every User-Agent builder. */
 export function setResolvedAgyVersion(version: string | undefined): void {
+  // Ignore a retired-line value: keeping the previous (or the pinned) version is
+  // strictly better than advertising one the backend refuses outright.
+  if (version !== undefined && !isAdvertisableAgyVersion(version)) return
   resolvedAgyVersion = version
 }
 
@@ -201,9 +239,10 @@ export function currentAgyVersion(): string {
   return resolvedAgyVersion ?? AGY_VERSION_FALLBACK
 }
 
+
 /** Electron-style UA used for bootstrap calls (loadCodeAssist/onboardUser). */
 export function getAgyBootstrapUserAgent(version = currentAgyVersion()): string {
-  return `antigravity/hub/${version} (aidev_client; os_type=darwin; arch=arm64; cl=${AGY_HUB_CHANGELIST})`
+  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${version} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`
 }
 
 /**
@@ -214,8 +253,7 @@ export function getAgyBootstrapUserAgent(version = currentAgyVersion()): string 
  * official client ecosystem also polls).
  */
 export function antigravityUserAgent(version = currentAgyVersion(), platform = 'darwin/arm64'): string {
-  const [osType = 'darwin', arch = 'arm64'] = platform.split('/')
-  return `antigravity/hub/${version} (aidev_client; os_type=${osType}; arch=${arch}; cl=${AGY_HUB_CHANGELIST})`
+  return `antigravity/${version} ${platform}`
 }
 
 /**

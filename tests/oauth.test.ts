@@ -318,31 +318,41 @@ describe('bootstrap UA version freshness', () => {
    */
   it('advertises the published version, not a per-call default', () => {
     setResolvedAgyVersion('9.9.9')
-    expect(getAgyBootstrapUserAgent()).toContain('antigravity/hub/9.9.9')
+    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/9.9.9')
     // The short form used by the version feeds agrees with the bootstrap form.
-    expect(antigravityUserAgent()).toBe('antigravity/hub/9.9.9 (aidev_client; os_type=darwin; arch=arm64; cl=1003475615)')
+    expect(antigravityUserAgent()).toBe('antigravity/9.9.9 darwin/arm64')
   })
 
   it('falls back to the pinned floor before any version is resolved', () => {
     setResolvedAgyVersion(undefined)
-    expect(getAgyBootstrapUserAgent()).toContain(`antigravity/hub/${AGY_VERSION_FALLBACK}`)
+    expect(getAgyBootstrapUserAgent()).toContain(`Antigravity/${AGY_VERSION_FALLBACK}`)
     expect(currentAgyVersion()).toBe(AGY_VERSION_FALLBACK)
   })
 
   it('publishes the resolved version for every User-Agent builder', async () => {
     setResolvedAgyVersion(undefined)
+    _clearVersionCacheForTest()
+    // The hub line answers the version gate; the IDE and CLI feeds are present
+    // here to prove the hub value is the one that wins. The CLI feed deliberately
+    // offers a 1.x value, which is refused outright by the backend (measured — see
+    // docs/official-identity.json `version.wireVersionGate`).
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.includes('antigravity-hub-auto-updater')) {
+        return new Response('version: 2.31.4\nfiles:\n  - url: https://example.invalid/x.zip\n', { status: 200 })
+      }
       if (url.includes('antigravity-auto-updater')) {
         return new Response(JSON.stringify([{ version: '1.2.3' }, { version: '1.20.1' }]), { status: 200 })
       }
       return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
-    expect(await resolveAntigravityVersion(fetchImpl)).toBe('1.19.0')
+    expect(await resolveAntigravityVersion(fetchImpl)).toBe('2.31.4')
     // Resolution must reach the bootstrap UA without any call site passing it.
-    expect(getAgyBootstrapUserAgent()).toContain('antigravity/hub/1.19.0')
-    expect(antigravityUserAgent()).toBe('antigravity/hub/1.19.0 (aidev_client; os_type=darwin; arch=arm64; cl=1003475615)')
+    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/2.31.4')
+    // ...and the short form carries NO `hub/` token: the shape is the CLI's, the
+    // version number is the (only) advertisable one.
+    expect(antigravityUserAgent()).toBe('antigravity/2.31.4 darwin/arm64')
   })
 
   it('reports nothing observed when the feeds yield nothing', async () => {
@@ -380,13 +390,16 @@ describe('bootstrap UA version freshness', () => {
     _clearVersionCacheForTest()
     const routed = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.includes('antigravity-hub-auto-updater')) {
+        return new Response('version: 2.21.0\n', { status: 200 })
+      }
       if (url.includes('antigravity-auto-updater')) {
-        return new Response(JSON.stringify([{ version: '1.21.0' }]), { status: 200 })
+        return new Response(JSON.stringify([{ version: '2.21.0' }]), { status: 200 })
       }
       return new Response(JSON.stringify({ tag_name: '1.21.0' }), { status: 200 })
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
-    expect(await resolveAntigravityVersionBounded(1_000, routed)).toBe('1.21.0')
+    expect(await resolveAntigravityVersionBounded(1_000, routed)).toBe('2.21.0')
     // Every request went through the injected fetch, never the global one.
     expect(routed).toHaveBeenCalled()
 

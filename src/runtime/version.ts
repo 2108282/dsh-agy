@@ -5,7 +5,9 @@
  * is the most detectable fingerprint anomaly.
  */
 
-import { AGY_VERSION_FALLBACK, antigravityUserAgent, setResolvedAgyVersion } from '../oauth/constants.ts'
+import { AGY_VERSION_FALLBACK, antigravityUserAgent, setResolvedAgyVersion,
+  isAdvertisableAgyVersion,
+} from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
 
 const VERSION_CACHE_TTL_MS = 6 * 60 * 60 * 1000
@@ -159,27 +161,33 @@ export async function resolveAntigravityCliVersion(fetchImpl: FetchLike = proxie
 }
 
 /**
- * The newest version actually OBSERVED on the claimed product's feed, or
- * `undefined` when it yielded nothing.
+ * The newest version actually OBSERVED on a feed this client may advertise, or
+ * `undefined` when nothing usable was observed.
  *
- * Reads the **CLI feed only**. This used to take the numeric max across the IDE
- * and CLI feeds, which is a category error: the three Antigravity lines are
- * separate version namespaces (IDE 2.x, hub 2.15.x, CLI 1.2.x), so "newest"
- * across them compares unrelated numbers and picks whichever line happens to
- * count higher. Since this client claims to be the CLI
- * (`docs/official-identity.json`), the CLI feed is the only one that can
- * describe the version we are entitled to advertise; the IDE resolver stays
- * exported for the freshness gate's cross-check, never for the wire.
+ * Reads the **hub/desktop line first**, then the CLI feed. That order is not a
+ * preference: the backend refuses every 1.x value outright ("This version of
+ * Antigravity is no longer supported"; 1.99.9 refused, 2.0.0 accepted), so the CLI
+ * release line — the line this client technically claims — cannot describe a
+ * version it is allowed to send. See `version.wireVersionGate` in
+ * `docs/official-identity.json` for the measurement.
+ *
+ * Both candidates pass through {@link isAdvertisableAgyVersion}, so a retired-line
+ * value can never be returned from here.
  *
  * Distinct from {@link resolveAntigravityVersion}, which substitutes the pinned
  * fallback at the boundary. A caller that must tell "observed" from "assumed"
- * cannot use that one — and the freshness gate is exactly such a caller, since
- * the fallback is the value under test.
+ * cannot use that one — and the freshness gate is exactly such a caller.
  */
 export async function resolveObservedAgyVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string | undefined> {
+  // Hub line first: it is the line the backend validates (measured — the whole
+  // 1.x line is refused, see `wireVersionGate` in docs/official-identity.json).
   const hub = await resolveObservedVersion(hubState, HUB_MANIFEST_URL, parseHubManifest, fetchImpl)
-  if (hub) return hub
-  return (await resolveObservedVersion(cliState, CLI_RELEASE_URL, parseCliRelease, fetchImpl)) ?? undefined
+  if (isAdvertisableAgyVersion(hub)) return hub
+  // The CLI feed is kept as a fallback source only. Its values are currently
+  // 1.x and therefore rejected by {@link isAdvertisableAgyVersion}; if that line
+  // ever ships 2.x again this picks it up without another change here.
+  const cli = await resolveObservedVersion(cliState, CLI_RELEASE_URL, parseCliRelease, fetchImpl)
+  return isAdvertisableAgyVersion(cli) ? cli : undefined
 }
 
 /** Best available version: the claimed product line, cached 6h. */
