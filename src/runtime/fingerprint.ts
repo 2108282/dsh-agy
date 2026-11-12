@@ -172,6 +172,18 @@ export function updateFingerprintVersion(fingerprint: Fingerprint, version: stri
   return uaChanged || metaChanged
 }
 
+/**
+ * The version a stored fingerprint advertises, or `null` when its UA carries none.
+ *
+ * Handles both shapes a stored fingerprint can have: the current short form
+ * (`antigravity/<v> <platform>`) and the legacy hub form
+ * (`antigravity/hub/<v> (aidev_client; …; cl=…)`) that older revisions froze, so a
+ * migration can read the version before deciding whether it is still usable.
+ */
+export function fingerprintVersionOf(fingerprint: Fingerprint): string | null {
+  return /^antigravity\/(?:hub\/)?(\d+\.\d+\.\d+)/.exec(fingerprint.userAgent ?? '')?.[1] ?? null
+}
+
 /** Append a fingerprint to the account history (bounded), then use it as current. */
 export function recordFingerprintVersion(
   history: FingerprintVersion[] | undefined,

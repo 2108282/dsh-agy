@@ -35,6 +35,7 @@ import {
   rankPoolCandidates,
 } from './runtime/quota.ts'
 import {
+  fingerprintVersionOf,
   generateFingerprint,
   getFingerprintData,
   getStableHeaders,
@@ -44,7 +45,7 @@ import {
 import { deriveAntigravitySessionId, generateAntigravityRequestId } from './runtime/identity.ts'
 import { fingerprintMode } from './runtime/risk.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
-import { currentAgyVersion } from './oauth/constants.ts'
+import { currentAgyVersion, isAdvertisableAgyVersion } from './oauth/constants.ts'
 import { accountFetch, isProxyUnreachableError, probeFetch, proxiedFetch } from './proxy.ts'
 import { describeFetchError } from './runtime/classify.ts'
 import type { Fingerprint } from './types.ts'
@@ -1086,6 +1087,29 @@ export class AgySessionManager {
         })
         picked.account.fingerprint = fingerprint
         picked.account.fingerprintHistory = history
+      }
+
+      // Heal a fingerprint frozen onto a version the backend REFUSES. The whole
+      // 1.x line is retired server-side (docs/official-identity.json,
+      // `version.wireVersionGate`), so such an identity does not merely look
+      // stale — it fails every request with a 200 text candidate and no
+      // `finishReason`. "Frozen for the account's life" is right for a version the
+      // pool still produces; freezing an unusable one would freeze the account
+      // into a permanently broken state, so this is the one sanctioned rewrite.
+      if (picked.account.fingerprint && !isAdvertisableAgyVersion(fingerprintVersionOf(picked.account.fingerprint) ?? undefined)) {
+        const healed = picked.account.fingerprint
+        if (updateFingerprintVersion(healed, currentAgyVersion())) {
+          const history = recordFingerprintVersion(picked.account.fingerprintHistory, healed, 'regenerated')
+          await this.store.mutate((s) => {
+            const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+            if (account?.fingerprint) {
+              account.fingerprint = healed
+              account.fingerprintHistory = history
+            }
+          })
+          picked.account.fingerprint = healed
+          picked.account.fingerprintHistory = history
+        }
       }
 
       // A pinned (test) call must not touch the affinity pin: probing an account

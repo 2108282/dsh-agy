@@ -79,6 +79,50 @@ describe('AgySessionManager', () => {
     expect(session!.impersonation['X-Goog-Api-Client']).toBe('fixed-client')
   })
 
+  it('heals a fingerprint frozen onto a retired 1.x version', async () => {
+    // The whole 1.x line is refused server-side (docs/official-identity.json,
+    // `version.wireVersionGate`), so an identity frozen there fails every request
+    // — freezing it "for the account's life" would freeze the account broken.
+    stubTokenEndpoint()
+    const fp = {
+      deviceId: 'd1', sessionToken: 's1', userAgent: 'antigravity/1.5.6 darwin/arm64',
+      apiClient: 'fixed-client', clientMetadata: { ideType: 'ANTIGRAVITY', ideVersion: '1.5.6' },
+      createdAt: 0,
+    }
+    const store = new InMemoryAccountStore(storage([{ ...account(), fingerprint: fp }]))
+    const sessions = new AgySessionManager({ store })
+    const session = await sessions.getSession()
+    const healed = session!.impersonation['User-Agent']
+    expect(healed).toMatch(/^antigravity\/[2-9]\d*\.\d+\.\d+ darwin\/arm64$/)
+    expect(session!.impersonation.clientMetadata.ideVersion).toBe(healed.split('/')[1]!.split(' ')[0])
+    // Healed once, and the repair is persisted: the next session reads the fix
+    // rather than re-deriving it (a UA that changes between two requests of one
+    // account is the anomaly this lifecycle exists to avoid).
+    const persisted = (await store.load()).accounts[0]!.fingerprint!
+    expect(persisted.userAgent).toBe(healed)
+    expect((await store.load()).accounts[0]!.fingerprintHistory).toHaveLength(1)
+    expect((await store.load()).accounts[0]!.fingerprintHistory![0]!.reason).toBe('regenerated')
+    const again = await sessions.getSession()
+    expect(again!.impersonation['User-Agent']).toBe(healed)
+  })
+
+  it('heals a legacy hub-shaped fingerprint that carries a retired version', async () => {
+    stubTokenEndpoint()
+    const fp = {
+      deviceId: 'd1', sessionToken: 's1',
+      userAgent: 'antigravity/hub/1.5.6 (aidev_client; os_type=darwin; arch=arm64; cl=1003475615)',
+      apiClient: 'fixed-client', clientMetadata: { ideType: 'ANTIGRAVITY', ideVersion: '1.5.6' },
+      createdAt: 0,
+    }
+    const store = new InMemoryAccountStore(storage([{ ...account(), fingerprint: fp }]))
+    const sessions = new AgySessionManager({ store })
+    const session = await sessions.getSession()
+    const ua = session!.impersonation['User-Agent']
+    expect(ua).not.toContain('hub/')
+    expect(ua).toMatch(/^antigravity\/[2-9]\d*\.\d+\.\d+ darwin\/arm64$/)
+    expect((await store.load()).accounts[0]!.fingerprint!.userAgent).toBe(ua)
+  })
+
   it('rotates the active index on rate-limit and creates a fingerprint', async () => {
     stubTokenEndpoint()
     const a = account('a@x')
