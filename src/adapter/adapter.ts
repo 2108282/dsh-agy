@@ -503,14 +503,6 @@ export class AgyAdapter extends LlmAdapter {
             : { tieredBudgetFor: this.options.tieredBudgetFor }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
-          // ON by default again, but the protocol is now the measured rewrite
-          // (see `AGY_BEHAVIOR_INSTRUCTION`): reporting bound to the REPLY rather
-          // than to each tool call, so the narration survives without cutting
-          // thinking. While the old "talk before every tool" wording shipped,
-          // this default was flipped OFF because it cost 7,140 of 55,463+ thoughts;
-          // the wording, not the switch, was the defect. `DSH_AGY_PROMPT_INJECT=0`
-          // remains the opt-out.
-          appendBehaviorInstruction: process.env.DSH_AGY_PROMPT_INJECT !== '0',
         })
         let response: Response
         try {
