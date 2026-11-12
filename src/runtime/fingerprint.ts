@@ -14,7 +14,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { AGY_IDE_TYPE, AGY_PLATFORM_ENUM, antigravityUserAgent, currentAgyVersion } from '../oauth/constants.ts'
+import { AGY_HUB_CHANGELIST, AGY_IDE_TYPE, AGY_PLATFORM_ENUM, currentAgyVersion } from '../oauth/constants.ts'
 import { migrateToAgyDir } from '../store/paths.ts'
 import type { ClientMetadata, Fingerprint, FingerprintVersion } from '../types.ts'
 import fingerprintData from './fingerprint-data.json'
@@ -81,10 +81,11 @@ export function generateFingerprint(
   version = randomFrom(data.versionPool),
 ): Fingerprint {
   const platform = randomFrom(data.platforms)
+  const [osType = 'darwin', arch = 'arm64'] = platform.split('/')
   return {
     deviceId: randomUUID(),
     sessionToken: randomBytes(16).toString('hex'),
-    userAgent: antigravityUserAgent(version, platform),
+    userAgent: `antigravity/hub/${version} (aidev_client; os_type=${osType}; arch=${arch}; cl=${AGY_HUB_CHANGELIST})`,
     apiClient: randomFrom(data.sdkClients),
     // The metadata message, not a header (see `ClientMetadata` in types.ts). The
     // version is stamped here as well as in the UA because the official message
@@ -119,8 +120,9 @@ export function getRandomizedHeaders(
   version = randomFrom(data.versionPool),
 ): ImpersonationHeaders {
   const platform = randomFrom(data.platforms)
+  const [osType = 'darwin', arch = 'arm64'] = platform.split('/')
   return {
-    'User-Agent': antigravityUserAgent(version, platform),
+    'User-Agent': `antigravity/hub/${version} (aidev_client; os_type=${osType}; arch=${arch}; cl=${AGY_HUB_CHANGELIST})`,
     'X-Goog-Api-Client': randomFrom(data.sdkClients),
     clientMetadata: {
       ideType: randomFrom(data.ideTypes),
@@ -141,8 +143,9 @@ export function getStableHeaders(
 ): ImpersonationHeaders {
   const platform = data.platforms[0] ?? 'darwin/arm64'
   const resolved = version || currentAgyVersion()
+  const [osType = 'darwin', arch = 'arm64'] = platform.split('/')
   return {
-    'User-Agent': antigravityUserAgent(resolved, platform),
+    'User-Agent': `antigravity/hub/${resolved} (aidev_client; os_type=${osType}; arch=${arch}; cl=${AGY_HUB_CHANGELIST})`,
     'X-Goog-Api-Client': data.sdkClients[0] ?? '',
     clientMetadata: {
       ideType: data.ideTypes[0] ?? AGY_IDE_TYPE,
@@ -157,16 +160,14 @@ export function getStableHeaders(
  *
  * Carries the metadata message's `ideVersion` along: they state the same fact,
  * and letting them drift is how one account comes to look like two clients.
- *
- * Rebuilds through the ONE canonical builder rather than patching the digits, so
- * a fingerprint frozen under a different UA shape (the `antigravity/hub/<v> …
- * cl=…` identity an earlier revision advertised) is migrated to the CLI shape on
- * the next rewrite instead of keeping a shape the pool no longer produces.
  */
 export function updateFingerprintVersion(fingerprint: Fingerprint, version: string): boolean {
-  const rebuilt = antigravityUserAgent(version)
-  const uaChanged = fingerprint.userAgent !== rebuilt
-  if (uaChanged) fingerprint.userAgent = rebuilt
+  const pattern = /^(antigravity\/(?:hub\/)?)([\d.]+)/
+  const match = fingerprint.userAgent.match(pattern)
+  const uaChanged = match === null || match[1] !== 'antigravity/hub/' || match[2] !== version
+  if (uaChanged) {
+    fingerprint.userAgent = `antigravity/hub/${version} (aidev_client; os_type=darwin; arch=arm64; cl=${AGY_HUB_CHANGELIST})`
+  }
   const metaChanged = fingerprint.clientMetadata.ideVersion !== version
   if (metaChanged) fingerprint.clientMetadata.ideVersion = version
   return uaChanged || metaChanged

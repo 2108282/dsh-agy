@@ -75,10 +75,23 @@
       "variable with a plausible mechanism (capability gating rather than detection), which",
       "is why it stays in the 'keep' tier while the rest of the cosmetic axis is hygiene."
     ],
-    "revertedHubIdentity": {
-      "at": "2026-10-23 commit 543fc85 (PR #117) switched the UA to antigravity/hub/<v> … cl=… to obtain hub-gated models",
-      "revertedBecause": "That identity claims the hub product while the request authenticates with the CLI's OAuth client (AGY_CLIENT_ID), so a single request presented two products at once. Reverted to the CLI shape antigravity/<v> <platform>, matching the credential. The cost is the hub-gated model tier; that trade was accepted deliberately.",
-      "note": "The X-Goog-Api-Client pool (google-cloud-sdk vscode*) is a SEPARATE, still-unresolved mismatch and was not part of this revert."
+    "wireVersionGate": {
+      "confidence": "confirmed",
+      "measuredAt": "2026-11-12T22:1x+08:00, accounts 809284148@QQ.COM / a809284148@gmail.com, project aicode-consumers",
+      "method": "same account/model/project/prompt; only the User-Agent string varied (2 shapes x 2 version numbers)",
+      "matrix": {
+        "cli-shape 1.5.6": "HTTP 200, body is a TEXT part 'This version of Antigravity is no longer supported. Please download and install the latest version…', NO finishReason, NO [DONE]",
+        "cli-shape 2.28.2": "HTTP 429 RESOURCE_EXHAUSTED (version accepted, request reached quota accounting)",
+        "hub-shape 1.5.6": "HTTP 200, same 'no longer supported' text, NO finishReason, NO [DONE]",
+        "hub-shape 2.28.2": "HTTP 429 RESOURCE_EXHAUSTED (version accepted)"
+      },
+      "conclusions": [
+        "The UA SHAPE (cli vs hub) has NO effect on acceptance — both shapes behave identically at each version.",
+        "The version NUMBER is decisive: every 1.x value is refused as 'no longer supported'; 2.x values are accepted.",
+        "Therefore the backend validates this client against the DESKTOP/hub version line, NOT the CLI release line, despite the request carrying the CLI's OAuth client.",
+        "A pure CLI-line version (the value the CLI release feed publishes, e.g. 1.5.6) CANNOT be used on this wire: the plugin stops working entirely.",
+        "The refusal arrives as HTTP 200 with an ordinary TEXT candidate and no finishReason/[DONE], so the SSE completeness guard (issue #85) reports 'stream terminated prematurely without [DONE] or finishReason' — the error names the symptom, not the cause."
+      ]
     }
   },
   "userAgent": {

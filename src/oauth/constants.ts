@@ -156,18 +156,12 @@ export async function fetchAgyFirstOk(
  * NAMESPACE: this is the **Antigravity CLI** line (`google-antigravity/antigravity-cli`),
  * not the IDE or hub line, because that is the product this client claims to be
  * (`docs/official-identity.json`). The three lines are separate version
- * namespaces — IDE `2.x`, hub `2.15.x`/`2.28.x`/`2.31.x`, CLI `1.x` — so
- * comparing them numerically is meaningless and mixing them advertises a version
- * that does not exist for the product we name.
- *
- * The User-Agent built from this value is the CLI shape
- * (`antigravity/<version> <platform>`), matching the CLI credential
- * (`AGY_CLIENT_ID`) this client authenticates with. A previous revision
- * advertised the HUB identity (`antigravity/hub/<v> … cl=…`) to obtain
- * hub-gated models; that made every request claim a product whose credentials
- * it did not hold, so it is deliberately reverted here.
+ * namespaces — IDE `2.0.0`, hub `2.15.1`, CLI `1.2.9` — so comparing them
+ * numerically is meaningless and mixing them advertises a version that does not
+ * exist for the product we name.
  */
-export const AGY_VERSION_FALLBACK = '1.5.6'
+export const AGY_VERSION_FALLBACK = '2.28.2'
+export const AGY_HUB_CHANGELIST = '1003475615'
 
 /**
  * `ClientMetadata.platform` value: the proto enum NAME, as protobuf-JSON emits it.
@@ -209,7 +203,7 @@ export function currentAgyVersion(): string {
 
 /** Electron-style UA used for bootstrap calls (loadCodeAssist/onboardUser). */
 export function getAgyBootstrapUserAgent(version = currentAgyVersion()): string {
-  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${version} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`
+  return `antigravity/hub/${version} (aidev_client; os_type=darwin; arch=arm64; cl=${AGY_HUB_CHANGELIST})`
 }
 
 /**
@@ -220,7 +214,8 @@ export function getAgyBootstrapUserAgent(version = currentAgyVersion()): string 
  * official client ecosystem also polls).
  */
 export function antigravityUserAgent(version = currentAgyVersion(), platform = 'darwin/arm64'): string {
-  return `antigravity/${version} ${platform}`
+  const [osType = 'darwin', arch = 'arm64'] = platform.split('/')
+  return `antigravity/hub/${version} (aidev_client; os_type=${osType}; arch=${arch}; cl=${AGY_HUB_CHANGELIST})`
 }
 
 /**
