@@ -177,8 +177,6 @@ export async function resolveAntigravityCliVersion(fetchImpl: FetchLike = proxie
  * the fallback is the value under test.
  */
 export async function resolveObservedAgyVersion(fetchImpl: FetchLike = proxiedFetch): Promise<string | undefined> {
-  const hub = await resolveObservedVersion(hubState, HUB_MANIFEST_URL, parseHubManifest, fetchImpl)
-  if (hub) return hub
   return (await resolveObservedVersion(cliState, CLI_RELEASE_URL, parseCliRelease, fetchImpl)) ?? undefined
 }
 

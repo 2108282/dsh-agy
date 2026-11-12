@@ -57,24 +57,29 @@
       "detectedVia": "`agy --version`"
     },
     "feed": {
-      "latest": "1.2.10",
+      "latest": "1.5.6",
       "url": "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest",
-      "shape": "{ tag_name: \"1.2.10\" } — no leading `v`",
+      "shape": "{ tag_name: \"1.5.6\" } — no leading `v`",
       "source": "feed",
       "note": "The binary also embeds this repository path (raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md) for its `changelog` subcommand."
     },
     "namespacesAreDisjoint": {
       "confidence": "confirmed",
-      "cli": "1.2.x",
+      "cli": "1.x (live 1.5.6)",
       "ide": "2.x (antigravity-auto-updater-974169037036.us-central1.run.app/releases)",
-      "hub": "2.15.1 (antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml)",
-      "consequence": "Taking the numeric max across the IDE and CLI feeds compares unrelated numbers. The resolver must read the claimed line only; the other lines are for the freshness gate's cross-check."
+      "hub": "2.15.x / 2.28.x / 2.31.x — live 2.31.2 (antigravity-hub-auto-updater-…/manifest/latest-arm64-mac.yml)",
+      "consequence": "Taking the numeric max across the IDE and CLI feeds compares unrelated numbers. The resolver must read the claimed line only (the CLI feed, because that is the product whose credentials this client holds); the hub and IDE lines are for the freshness gate's cross-check and are never advertised."
     },
     "unresolved": [
       "Whether the backend model-gates on this version is UNPROVEN. It is the one cosmetic",
       "variable with a plausible mechanism (capability gating rather than detection), which",
       "is why it stays in the 'keep' tier while the rest of the cosmetic axis is hygiene."
-    ]
+    ],
+    "revertedHubIdentity": {
+      "at": "2026-10-23 commit 543fc85 (PR #117) switched the UA to antigravity/hub/<v> … cl=… to obtain hub-gated models",
+      "revertedBecause": "That identity claims the hub product while the request authenticates with the CLI's OAuth client (AGY_CLIENT_ID), so a single request presented two products at once. Reverted to the CLI shape antigravity/<v> <platform>, matching the credential. The cost is the hub-gated model tier; that trade was accepted deliberately.",
+      "note": "The X-Goog-Api-Client pool (google-cloud-sdk vscode*) is a SEPARATE, still-unresolved mismatch and was not part of this revert."
+    }
   },
   "userAgent": {
     "confidence": "unresolved",
