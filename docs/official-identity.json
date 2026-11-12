@@ -80,18 +80,40 @@
       "measuredAt": "2026-11-12T22:1x+08:00, accounts 809284148@QQ.COM / a809284148@gmail.com, project aicode-consumers",
       "method": "same account/model/project/prompt; only the User-Agent string varied (2 shapes x 2 version numbers)",
       "matrix": {
-        "cli-shape 1.5.6": "HTTP 200, body is a TEXT part 'This version of Antigravity is no longer supported. Please download and install the latest version…', NO finishReason, NO [DONE]",
-        "cli-shape 2.28.2": "HTTP 429 RESOURCE_EXHAUSTED (version accepted, request reached quota accounting)",
-        "hub-shape 1.5.6": "HTTP 200, same 'no longer supported' text, NO finishReason, NO [DONE]",
-        "hub-shape 2.28.2": "HTTP 429 RESOURCE_EXHAUSTED (version accepted)"
+        "cli-shape 1.5.6": "HTTP 200 on EVERY endpoint, body is a TEXT part 'This version of Antigravity is no longer supported…', NO finishReason, NO [DONE]",
+        "hub-shape 1.5.6": "HTTP 200, identical refusal",
+        "cli-shape 2.28.2": "accepted",
+        "hub-shape 2.28.2": "accepted"
       },
       "conclusions": [
         "The UA SHAPE (cli vs hub) has NO effect on acceptance — both shapes behave identically at each version.",
-        "The version NUMBER is decisive: every 1.x value is refused as 'no longer supported'; 2.x values are accepted.",
+        "The version MAJOR is decisive and must be >= 2; the whole 1.x line is refused as 'no longer supported'.",
         "Therefore the backend validates this client against the DESKTOP/hub version line, NOT the CLI release line, despite the request carrying the CLI's OAuth client.",
-        "A pure CLI-line version (the value the CLI release feed publishes, e.g. 1.5.6) CANNOT be used on this wire: the plugin stops working entirely.",
+        "A pure CLI-line version (what the CLI release feed publishes today, 1.5.6) CANNOT be used on this wire: the plugin stops working entirely.",
+        "045beta's pinned 1.2.9 is equally refused TODAY; that branch worked in October, before the 1.x line was retired. Its code is unchanged — the server moved.",
         "The refusal arrives as HTTP 200 with an ordinary TEXT candidate and no finishReason/[DONE], so the SSE completeness guard (issue #85) reports 'stream terminated prematurely without [DONE] or finishReason' — the error names the symptom, not the cause."
-      ]
+      ],
+      "minimumVersionFloor": {
+        "confidence": "confirmed",
+        "measured": "2026-11-12T22:1x+08:00, model gemini-2.5-flash and gemini-3.8-flash-tiered",
+        "refused": [
+          "1.2.5",
+          "1.2.9",
+          "1.5.6",
+          "1.18.3",
+          "1.19.0",
+          "1.99.9"
+        ],
+        "accepted": [
+          "2.0.0",
+          "2.9.0",
+          "2.15.1",
+          "2.25.0",
+          "2.28.2"
+        ],
+        "conclusion": "The floor is the MAJOR version, not a numeric threshold: 1.99.9 is refused while 2.0.0 is accepted. The entire 1.x line — including the value the live CLI release feed publishes (1.5.6) and the value 045beta pinned (1.2.9) — is retired server-side. No 1.x User-Agent can work, whatever its shape."
+      },
+      "endpointNote": "The version gate answers on ALL FOUR endpoints (daily / prod / daily-sandbox refuse 1.x; autopush answers 403 for consumer accounts). Quota is NOT the constraint: retrieveUserQuotaSummary reported Gemini 5h remainingFraction 0.936 and weekly 0.300 while a probe hardcoded to the PROD endpoint returned 429 — prod answers RESOURCE_EXHAUSTED for consumer accounts, and the real request path starts at daily, where the same request streams normally."
     }
   },
   "userAgent": {
