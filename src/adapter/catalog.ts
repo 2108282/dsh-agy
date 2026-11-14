@@ -8,6 +8,11 @@
  * tool-calling). Tab-completion models are intentionally excluded.
  */
 
+export type ThinkingLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+/** Stable ordering for both discovered reasoning choices and default selection. */
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ['low', 'medium', 'high', 'xhigh', 'max']
+
 export interface CatalogModel {
   id: string
   name: string
@@ -19,7 +24,7 @@ export interface CatalogModel {
   /** Level-thinking: 'level' means single id + selectable low/medium/high via thinkingLevel. Omit = level bound to id. */
   thinking?: 'level'
   /** The reasoning levels this model exposes when thinking is 'level' (default: low/medium/high). */
-  thinkingLevels?: readonly ('low' | 'medium' | 'high')[]
+  thinkingLevels?: readonly ThinkingLevel[]
 }
 
 export const AGY_PUBLIC_MODELS: readonly CatalogModel[] = [
@@ -144,11 +149,12 @@ export function registerDiscoveredTieredModels(tiered?: Record<string, string[]>
   }
 }
 
-const DISCOVERED_UNIFIED_THINKING_FAMILIES = new Set<string>()
+const DISCOVERED_UNIFIED_THINKING_FAMILIES = new Map<string, readonly ThinkingLevel[]>()
 
-/** Register dynamically discovered unified thinking families (e.g. models with discrete -low/-medium/-high variants). */
-export function registerDiscoveredUnifiedThinkingFamily(baseId: string): void {
-  DISCOVERED_UNIFIED_THINKING_FAMILIES.add(baseId)
+/** Register the discrete variants actually published for a unified family. */
+export function registerDiscoveredUnifiedThinkingFamily(baseId: string, levels: readonly ThinkingLevel[]): void {
+  const published = THINKING_LEVELS.filter((level) => levels.includes(level))
+  if (published.length > 0) DISCOVERED_UNIFIED_THINKING_FAMILIES.set(baseId, published)
 }
 
 /** Check whether a model ID is a unified thinking family (known static or dynamically discovered). */
@@ -189,7 +195,9 @@ export function isLevelThinkingModel(modelId: string): boolean {
  * Flash family exposes low/medium/high; Pro family exposes low/high only
  * (measured: Pro models reject medium thinking levels).
  */
-export function levelThinkingEffortsFor(modelId: string): readonly ('low' | 'medium' | 'high')[] {
+export function levelThinkingEffortsFor(modelId: string): readonly ThinkingLevel[] {
+  const published = DISCOVERED_UNIFIED_THINKING_FAMILIES.get(modelId)
+  if (published) return published
   const cat = catalogModel(modelId)
   if (cat?.thinkingLevels) return cat.thinkingLevels
   const family = DISCOVERED_TIERED_FAMILIES.get(modelId)

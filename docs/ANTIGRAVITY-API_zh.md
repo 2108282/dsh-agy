@@ -30,9 +30,17 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 
 ## 3. 认证与头
 
+**2026-11-14 完整会话回归：** 模型选择器将离散档位合并成统一 ID，但账号调度只识别缓存中的具体 ID，导致 `getSession(gemini-4-argon)` 返回空、请求未到上游。路由现已识别具有至少两个已发现离散档位的统一 ID；通过 `AgyAdapter.stream` 完整链路验证 Argon 返回 `OK`。PC IDE 对照确认它的内嵌扩展通过 `agy --hub` 启动后端，模型菜单读取 `getUserStatus` 的模型配置；当前插件仍是 CLI REST 通道，不声称复刻 IDE/Hub。
+
+**同账号同 token 实测：** 旧 Electron UA 返回 23 个模型且无 Argon；只换成已捕获 CLI UA 后返回 33 个模型并包含 Argon 三档。该 token 仍无 `aicode`。同身份额度查询返回独立 Argon 周额度，`gemini-4-argon-medium` 生成 HTTP 200、完整回答 `OK`。这是当前账号的实测，不构成账号限制原因或未来可用性的保证。
+
+**2026-11-14 官方 CLI 1.5.8 对照：** 隔离目录中的官方登录网址与本插件使用相同 OAuth client，但多申请 `https://www.googleapis.com/auth/aicode` 和 `openid`；本机两个现有插件账号的 tokeninfo 都显示已获 `openid`、未获 `aicode`。插件现已补充 `aicode` 登录权限；已有 refresh token 无法通过刷新自动补权，需重新授权。官方显式 `openid` 使用 HTTPS 回调，其与本插件 loopback 回调的兼容性未测，因此本次不添加该项。完整脱敏记录见 [official-cli-1.5.8.json](official-cli-1.5.8.json)。缺少权限是已确认的差异，但随后同 token 对照表明它不是此次 Argon 访问的必要条件。
+
+同次假 token + 本地 mock 捕获的官方模型发现 UA 为 `antigravity/cli/1.5.8 (aidev_client; os_type=linux; arch=arm64; cl=1020628950; auth_method=consumer)`，未观察到 `X-Goog-Api-Client`；项目/模型发现仍走 JSON REST，`loadCodeAssist` metadata 仅含 `ideType: ANTIGRAVITY`，模型发现 body 为 `{project}`。这不是 Google 线上接受性测试，也没有捕获生成路径。旧版短 UA/SDK 池不代表官方 CLI；旧的「整个 CLI 1.x 被退役」记录未测试这个官方形状，不能用于该结论。当前实现改为所有 Cloud Code 调用共用该已捕获 CLI 身份（版本与构建号成对固定），移除随机 SDK 池头；发送前校验拒绝重复 UA 和非契约身份头。生成路径使用该身份是实现选择，未宣称已捕获官方生成请求。没有恢复 Hub 头。
+
 - `Authorization: Bearer {access_token}`；`Content-Type: application/json`；流式加 `Accept: text/event-stream`。
-- `User-Agent: antigravity/{version} {platform}`——**没有** `/{arch}` 段。`{platform}` 来自 UA 令牌池（外置 JSON，尚未从官方二进制捕获）；它与下方 `ClientMetadata.Platform` 的 Go 风格枚举是**两套不同的词汇**。版本号需保持新鲜——外置并动态解析。
-- `X-Goog-Api-Client`：池 `google-cloud-sdk vscode_cloudshelleditor/0.1`、`vscode/1.86.0`、`vscode/1.87.0`、`vscode/1.96.0`。
+- `User-Agent`：固定为上面捕获的 CLI 1.5.8 / cl=1020628950 / linux arm64 / consumer 组合；额度、模型发现、生成共用 `oauth/client.ts`，Hub 更新源不能改动该版本。升级该组合必须重新核对官方产物。
+- `X-Goog-Api-Client`：Cloud Code 请求不再发送旧随机池值，本次官方控制面捕获未出现该头。
 - **不存在 `Client-Metadata` 请求头**——它已被移除，两个官方二进制中都没有该名称。客户端身份走请求 **BODY** 的 `metadata`（`ClientMetadata`），携带 `ideType`、`ideVersion`、`platform`，每者都有已捕获的词汇表。旧的「只允许发 `ideType`」说法**作废**：实测拒绝发生在**值** `"MACOS"` 上，而它不是 `Platform` 枚举成员（`platform` 接受枚举**名**，如 `DARWIN_ARM64`，而不是 UA 令牌 `darwin/arm64`）。`pnpm run verify:metadata-acceptance` 会以旧 body 作对照重新测量接受度。
 - 双风格（antigravity vs gemini-cli）**不做**。
 - **请求 envelope（OmniRoute 活跃格式）**：顶层 `{project, requestId, model, userAgent:"antigravity", requestType:"agent", request:{contents, tools?, toolConfig:{functionCallingConfig:{mode:"VALIDATED"}}, generationConfig?, sessionId}}`。Claude 模型剥离尾部 model 轮；工具 schema 被裁剪到上游 allowlist 并归一化关键字值（后端拒绝任何未知关键字**以及**任何不符合 protobuf 形状的值；见 §3.1）。

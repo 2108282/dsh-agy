@@ -25,8 +25,9 @@
  * (that pair is what answers 200 here), so nothing new is impersonated.
  */
 
-import { AGY_QUOTA_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
+import { AGY_QUOTA_ENDPOINT_FALLBACKS } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
+import { buildCloudCodeHeaders } from '../oauth/client.ts'
 import { QUOTA_WINDOWS } from '../types.ts'
 import type { QuotaGroup, QuotaWindow } from '../types.ts'
 
@@ -140,11 +141,7 @@ export async function fetchQuotaSummary(
     try {
       const response = await fetchImpl(`${baseEndpoint}${QUOTA_SUMMARY_PATH}`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'User-Agent': getAgyBootstrapUserAgent(),
-        },
+        headers: buildCloudCodeHeaders(accessToken),
         body,
       })
       if (!response.ok) continue

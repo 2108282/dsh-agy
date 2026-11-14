@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
-import { catalogModel, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
+import { isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor, type ThinkingLevel } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 import {
   conversationMessages,
@@ -550,9 +550,6 @@ export const AGY_BEHAVIOR_INSTRUCTION = '# [Antigravity Collaboration & Executio
 '## 5. Output Language\n' +
 '- **ALL user-facing chat messages MUST be in natural, idiomatic Simplified Chinese.**'
 
-/** Level-thinking: single id + selectable low/medium/high via thinkingLevel (catalog thinking:'level'). */
-const LEVEL_THINKING_LEVELS = new Set(['low', 'medium', 'high'])
-
 /**
  * Claude-family output ceiling on the Antigravity channel (live-measured).
  *
@@ -618,8 +615,14 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
  */
 export function resolveWireModel(model: string, effort?: string): string {
   if (isUnifiedThinkingFamily(model)) {
-    const target = effort === 'low' ? 'low' : effort === 'high' ? 'high' : 'medium'
-    return `${model}-${target}`
+    const levels = levelThinkingEffortsFor(model)
+    const requested = effort?.toLowerCase() as ThinkingLevel | undefined
+    // Prefer medium for the provider-default choice; otherwise use the lowest
+    // published level, without synthesizing a variant the account never listed.
+    const target = requested !== undefined && levels.includes(requested)
+      ? requested
+      : levels.includes('medium') ? 'medium' : levels[0]
+    return target ? `${model}-${target}` : model
   }
   return model
 }
@@ -731,11 +734,11 @@ export function toAgyRequestBody(
       if (tiered !== undefined) {
         generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
       }
-    } else if (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any)) {
+    } else if (levelThinkingEffortsFor(options.model).includes(effort as ThinkingLevel)) {
       // A configured number for this level takes the place of the level token:
       // both together would let the level win (see `thinkingBudgetFor`).
       const configured = context.thinkingBudgetFor?.(effort)
-      if (options.model === 'gemini-4-argon' || options.model === 'claude-opus-5-5' || options.model === 'claude-sonnet-5-5') {
+      if (isUnifiedThinkingFamily(options.model)) {
         if (configured !== undefined) {
           generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
         }

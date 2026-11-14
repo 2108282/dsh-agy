@@ -8,11 +8,9 @@ import { randomUUID } from 'node:crypto'
 import {
   AGY_ENDPOINT_FALLBACKS,
   AGY_IDE_TYPE,
-  AGY_PLATFORM_ENUM,
-  currentAgyVersion,
-  getAgyBootstrapUserAgent,
 } from '../oauth/constants.ts'
 import { decodeCredentialBlob } from '../oauth/blob.ts'
+import { buildCloudCodeHeaders } from '../oauth/client.ts'
 import { normalizeProxyUrl, proxiedFetch } from '../proxy.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { ManagedAccount } from '../types.ts'
@@ -114,19 +112,13 @@ export async function enrichWithAntigravityBackend(
   const loadController = new AbortController()
   const loadTimer = setTimeout(() => loadController.abort(), 8000)
   try {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${parsed.accessToken}`,
-      'Content-Type': 'application/json',
-      'User-Agent': getAgyBootstrapUserAgent(),
-    }
+    const headers = buildCloudCodeHeaders(parsed.accessToken)
     // The identity rides in the BODY `metadata` message, matching
     // `LoadCodeAssistRequest.metadata` in the official descriptor; there is no
     // `Client-Metadata` header (neither official binary contains that name).
     const loadBody = JSON.stringify({
       metadata: {
         ideType: AGY_IDE_TYPE,
-        ideVersion: currentAgyVersion(),
-        platform: AGY_PLATFORM_ENUM,
       },
     })
     for (const endpoint of AGY_ENDPOINT_FALLBACKS) {

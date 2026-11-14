@@ -14,6 +14,7 @@ import {
   setResolvedAgyVersion,
 } from '../src/oauth/constants.ts'
 import { resolveAntigravityVersion, resolveAntigravityVersionBounded, resolveObservedAgyVersion, _clearVersionCacheForTest } from '../src/runtime/version.ts'
+import { officialCliUserAgent } from '../src/oauth/client.ts'
 import { authorizeAntigravity } from '../src/oauth/authorize.ts'
 import { bootstrapAccount, exchangeAntigravity, extractOnboardTierId } from '../src/oauth/exchange.ts'
 import {
@@ -89,8 +90,18 @@ describe('authorizeAntigravity', () => {
     expect(parsed.searchParams.get('client_id')).toBe('1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com')
     expect(parsed.searchParams.get('response_type')).toBe('code')
     expect(parsed.searchParams.get('redirect_uri')).toBe('http://localhost:51121/oauth-callback')
-    expect(parsed.searchParams.get('scope')).toContain('cloud-platform')
-    expect(parsed.searchParams.get('scope')).not.toContain('openid')
+    const scopes = parsed.searchParams.get('scope')!.split(' ')
+    expect(scopes).toEqual([
+      'https://www.googleapis.com/auth/cloud-platform',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/cclog',
+      'https://www.googleapis.com/auth/experimentsandconfigs',
+      'https://www.googleapis.com/auth/aicode',
+    ])
+    // The official CLI's explicit openid uses its HTTPS callback. Preserve this
+    // plugin's loopback flow while fixing the independently missing API scope.
+    expect(scopes).not.toContain('openid')
     expect(parsed.searchParams.get('code_challenge_method')).toBe('S256')
     expect(parsed.searchParams.get('access_type')).toBe('offline')
     expect(parsed.searchParams.get('prompt')).toBe('consent')
@@ -316,20 +327,20 @@ describe('bootstrap UA version freshness', () => {
    * process presenting two different clients. The default now reads a published
    * shared value, which makes that drift unrepresentable.
    */
-  it('advertises the published version, not a per-call default', () => {
+  it('keeps captured CLI identity independent of the legacy version feed', () => {
     setResolvedAgyVersion('9.9.9')
-    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/9.9.9')
-    // The short form used by the version feeds agrees with the bootstrap form.
+    expect(getAgyBootstrapUserAgent()).toBe(officialCliUserAgent())
+    // Legacy version-feed helpers remain separate from Cloud Code identity.
     expect(antigravityUserAgent()).toBe('antigravity/9.9.9 darwin/arm64')
   })
 
-  it('falls back to the pinned floor before any version is resolved', () => {
+  it('uses the captured CLI build before any legacy version is resolved', () => {
     setResolvedAgyVersion(undefined)
-    expect(getAgyBootstrapUserAgent()).toContain(`Antigravity/${AGY_VERSION_FALLBACK}`)
+    expect(getAgyBootstrapUserAgent()).toBe(officialCliUserAgent())
     expect(currentAgyVersion()).toBe(AGY_VERSION_FALLBACK)
   })
 
-  it('publishes the resolved version for every User-Agent builder', async () => {
+  it('does not mix a Hub feed version into the captured CLI build', async () => {
     setResolvedAgyVersion(undefined)
     _clearVersionCacheForTest()
     // The hub line answers the version gate; the IDE and CLI feeds are present
@@ -348,8 +359,8 @@ describe('bootstrap UA version freshness', () => {
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
     expect(await resolveAntigravityVersion(fetchImpl)).toBe('2.31.4')
-    // Resolution must reach the bootstrap UA without any call site passing it.
-    expect(getAgyBootstrapUserAgent()).toContain('Antigravity/2.31.4')
+    // Feed observations cannot change the captured CLI version/changelist pair.
+    expect(getAgyBootstrapUserAgent()).toBe(officialCliUserAgent())
     // ...and the short form carries NO `hub/` token: the shape is the CLI's, the
     // version number is the (only) advertisable one.
     expect(antigravityUserAgent()).toBe('antigravity/2.31.4 darwin/arm64')

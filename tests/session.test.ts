@@ -1720,6 +1720,22 @@ describe('fingerprint version freshness', () => {
   }, 5_000)
 
   describe('account model capability routing', () => {
+    it('routes unified picker ids when discovery caches their concrete variants', async () => {
+      stubTokenEndpoint()
+      const { isModelSupportedByAccount } = await import('../src/session.ts')
+      const cached = ['gemini-4-argon-low', 'gemini-4-argon-medium', 'gemini-4-argon-high',
+        'gemini-4-hydrogen-low', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-high', 'gemini-4-hydrogen-xhigh']
+      const store = new InMemoryAccountStore(storage([{ ...account('a@x'), cachedModels: cached,
+        cachedQuotaUpdatedAt: Date.now() }]))
+      const sessions = new AgySessionManager({ store })
+      for (const model of ['gemini-4-argon', 'gemini-4-hydrogen']) {
+        expect(isModelSupportedByAccount({ ...account('a@x'), cachedModels: cached }, model)).toBe(true)
+        expect((await sessions.getSession(model))?.index).toBe(0)
+      }
+      expect(isModelSupportedByAccount({ ...account('a@x'), cachedModels: ['unrelated-low', 'unrelated-high'] }, 'unrelated')).toBe(true)
+      expect(isModelSupportedByAccount({ ...account('a@x'), cachedModels: ['gemini-4-argon-disabled', 'gemini-4-argon-other'] }, 'gemini-4-argon')).toBe(false)
+    })
+
     it('isModelSupportedByAccount filters models correctly based on cachedModels', async () => {
       const { isModelSupportedByAccount } = await import('../src/session.ts')
       const accWithModels: ManagedAccount = {

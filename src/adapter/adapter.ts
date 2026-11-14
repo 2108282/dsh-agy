@@ -24,6 +24,7 @@ import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
+import { buildCloudCodeHeaders } from '../oauth/client.ts'
 import {
   classifyFetchError,
   classifyHttpError,
@@ -220,20 +221,9 @@ function ledgerAccountKey(session: AgyAccountSession): string | undefined {
  * `stream()`); nothing downstream re-adds the header.
  */
 export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
-  return {
-    authorization: `Bearer ${session.auth.access}`,
-    'content-type': 'application/json',
-    accept: 'text/event-stream',
-    // Exactly the two impersonation HEADERS, named individually rather than
-    // spread. `session.impersonation.clientMetadata` is a body message and must
-    // not become a header — and it is deliberately not added to this envelope
-    // either: the only `metadata` field the official descriptor evidences is on
-    // the control-plane calls (`LoadCodeAssistRequest`/`OnboardUserRequest`), so
-    // on this generate request the identity carrier is the body's existing
-    // `userAgent`/`requestType` pair.
-    'User-Agent': session.impersonation['User-Agent'],
-    'X-Goog-Api-Client': session.impersonation['X-Goog-Api-Client'],
-  }
+  // Account credentials vary; the captured CLI build identity does not. Stored
+  // fingerprints and harness attribution cannot add a second client identity.
+  return buildCloudCodeHeaders(session.auth.access, true)
 }
 
 /** How long discovered models stay cached before re-probing upstream (10 minutes). */

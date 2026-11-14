@@ -46,6 +46,7 @@ import { deriveAntigravitySessionId, generateAntigravityRequestId } from './runt
 import { fingerprintMode } from './runtime/risk.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
 import { currentAgyVersion, isAdvertisableAgyVersion } from './oauth/constants.ts'
+import { buildCloudCodeHeaders } from './oauth/client.ts'
 import { accountFetch, isProxyUnreachableError, probeFetch, proxiedFetch } from './proxy.ts'
 import { describeFetchError } from './runtime/classify.ts'
 import type { Fingerprint } from './types.ts'
@@ -197,6 +198,11 @@ interface QuotaRefreshResult {
 export function isModelSupportedByAccount(account: ManagedAccount, model?: string): boolean {
   if (!model || !account.cachedModels || account.cachedModels.length === 0) return true
   if (account.cachedModels.includes(model)) return true
+  // The picker unifies discrete ids into a base id; the wire translator selects
+  // one of its published levels. Account discovery caches the concrete ids.
+  const variants = account.cachedModels.filter((id) =>
+    ['low', 'medium', 'high', 'xhigh', 'max'].some((level) => id === `${model}-${level}`))
+  if (variants.length >= 2) return true
   const tieredMatch = /^(.*)-tiered$/.exec(model)
   if (tieredMatch) {
     const base = tieredMatch[1]
@@ -1352,13 +1358,7 @@ export class AgySessionManager {
           requestId,
         },
       )
-      const headers = {
-        authorization: `Bearer ${session.auth.access}`,
-        'content-type': 'application/json',
-        accept: 'text/event-stream',
-        'User-Agent': session.impersonation['User-Agent'],
-        'X-Goog-Api-Client': session.impersonation['X-Goog-Api-Client'],
-      }
+      const headers = buildCloudCodeHeaders(session.auth.access, true)
       const routing = { proxyUrl: session.account.proxy, streaming: true }
       const response = await fetchAgyFirstOk(
         '/v1internal:streamGenerateContent?alt=sse',

@@ -1,0 +1,190 @@
+{
+  "capturedAt": "2026-11-14",
+  "artifact": {
+    "product": "Antigravity CLI",
+    "version": "1.5.8",
+    "sha256": "d724309f1438896e6db4dfd7243bc0361624d4cdcd7913c2e47e25be214d3b7b"
+  },
+  "method": {
+    "authorization": "Start the official CLI in an isolated HOME with SSH_CONNECTION set; select Google OAuth; read the printed authorization URL without completing sign-in. PKCE, state and other transient login values are omitted.",
+    "modelDiscovery": "Use a synthetic consumer token in an isolated HOME, override CLOUD_CODE_URL to a local HTTP mock, and run the official models subcommand. No real Google credential is supplied. The mock's Argon entry is a fixture, not evidence of live model access.",
+    "accountScopes": "Refresh the two existing plugin accounts through their configured routing; query Google's tokeninfo endpoint; retain only scope names and the boolean OAuth-client match. No account/token material is included."
+  },
+  "authorization": {
+    "endpoint": "https://accounts.google.com/o/oauth2/auth",
+    "sameClientIdAsPlugin": true,
+    "redirectUri": "https://antigravity.google/oauth-callback",
+    "responseType": "code",
+    "accessType": "offline",
+    "prompt": "consent",
+    "scopes": [
+      "https://www.googleapis.com/auth/cloud-platform",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
+      "https://www.googleapis.com/auth/cclog",
+      "https://www.googleapis.com/auth/experimentsandconfigs",
+      "https://www.googleapis.com/auth/aicode",
+      "openid"
+    ]
+  },
+  "localRequests": {
+    "userAgent": "antigravity/cli/1.5.8 (aidev_client; os_type=linux; arch=arm64; cl=1020628950; auth_method=consumer)",
+    "contentType": "application/json",
+    "acceptEncoding": "gzip",
+    "xGoogApiClientObserved": false,
+    "paths": {
+      "/v1internal:loadCodeAssist": [
+        {
+          "metadata": {
+            "ideType": "ANTIGRAVITY"
+          }
+        },
+        {
+          "cloudaicompanionProject": "local-project",
+          "metadata": {
+            "ideType": "ANTIGRAVITY"
+          }
+        }
+      ],
+      "/v1internal:fetchAvailableModels": {
+        "project": "local-project"
+      },
+      "/v1internal:fetchAdminControls": {
+        "project": "local-project"
+      },
+      "/v1internal:retrieveUserQuotaSummary": {
+        "project": "local-project"
+      },
+      "/v1internal:fetchUserInfo": {
+        "project": "local-project"
+      },
+      "/v1internal:listExperiments": {
+        "project": "local-project"
+      }
+    }
+  },
+  "existingPluginTokens": {
+    "accountsChecked": 2,
+    "sameOAuthClient": true,
+    "aicodeGranted": false,
+    "openidGranted": true
+  },
+  "conclusions": [
+    "The plugin's OAuth scope list is missing aicode compared with the observed official CLI login.",
+    "Refreshing an existing token does not add an OAuth grant omitted from the authorization request. Reauthorization is required to request aicode.",
+    "The official CLI request User-Agent differs from both the plugin's short User-Agent and its Electron bootstrap User-Agent.",
+    "The historical claim that every CLI 1.x identity is retired is not established: previous short/hub-shaped request tests did not test this observed official CLI identity.",
+    "The model discovery path and project body match the plugin. The observation does not establish the official client's production endpoint selection.",
+    "The controlled live discovery test identifies User-Agent as a model-discovery gate for this account: captured CLI returns Argon while legacy Electron does not. Aicode was absent in both, so it is not required for this observed access."
+  ],
+  "limitations": [
+    "Missing aicode is a confirmed authorization drift but did not prevent the observed Argon discovery, quota or generation. It must not be described as the demonstrated root cause.",
+    "Explicit openid was observed with the official HTTPS callback. Its compatibility with the plugin's loopback callback has not been measured, so this change does not add it.",
+    "The generation request was not captured: the isolated fake-token run stopped at external userinfo TLS validation.",
+    "No Hub/IDE identity or credential migration is implemented. The canonical CLI headers override legacy fingerprint values at every Cloud Code call.",
+    "No causal claim about account restrictions follows from these observations."
+  ],
+  "implementation": {
+    "identity": "src/oauth/client.ts",
+    "headers": "All Cloud Code model, quota, bootstrap and generation calls use the captured CLI version/changelist together. No random SDK client header. The proxy transport rejects duplicate/noncanonical User-Agent and uncontracted identifying headers.",
+    "generationEvidence": "The official generation path has not been captured. Reusing the captured control-plane CLI identity is an explicit implementation choice; it has now been accepted by live Argon generation.",
+    "versionPolicy": "Pinned observed CLI build; a feed alone cannot change the version independently of changelist. Stored legacy fingerprints cannot affect Cloud Code headers."
+  },
+  "liveVerification": {
+    "capturedAt": "2026-11-14",
+    "method": "Same active account, same refreshed token, same daily endpoint and project; only User-Agent changed. No aicode permission on this token.",
+    "legacyBootstrap": {
+      "modelCount": 23,
+      "argonIds": [],
+      "defaultAgentModelId": "gemini-3.8-flash-high"
+    },
+    "capturedCli": {
+      "modelCount": 33,
+      "argonIds": [
+        "gemini-4-argon-low",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-high"
+      ],
+      "defaultAgentModelId": "gemini-4-argon-medium"
+    },
+    "productionCapturedCli": {
+      "modelCount": 26,
+      "argonPresent": true
+    },
+    "quota": {
+      "groups": [
+        "Gemini Models",
+        "Claude and GPT models",
+        "Gemini 4 Argon"
+      ],
+      "argonWeeklyPresent": true
+    },
+    "generation": {
+      "wireModel": "gemini-4-argon-medium",
+      "httpStatus": 200,
+      "text": "OK",
+      "complete": true,
+      "inputTokens": 36,
+      "outputTokens": 5
+    }
+  },
+  "pcIdeComparison": {
+    "capturedAt": "2026-11-14",
+    "readOnly": true,
+    "ide": {
+      "ideVersion": "2.7.0",
+      "shellVersion": "1.107.0",
+      "languageServerCL": "1018779249",
+      "embeddedExtensionVersion": "1.11.0"
+    },
+    "backendLaunch": [
+      "--hub",
+      "--hub-port=<local-port>",
+      "--app_data_dir=antigravity",
+      "--csrf_token=<redacted>"
+    ],
+    "binaryVersion": "1.5.8",
+    "previousBackendLogVersion": "2.31.2",
+    "limitations": [
+      "The current backend log was locked/empty; the 2.31.2 log belongs to an earlier launch, not a proved version of the current PID.",
+      "No PC credential was exported and no official IDE generation request headers were captured."
+    ],
+    "modelMenuSource": "getUserStatus -> userStatus.cascadeModelConfigData.clientModelConfigs/clientModelSorts",
+    "reasoningLevelsInUi": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "pluginRoute": "CLI-authenticated Cloud Code JSON REST with captured CLI identity; not the IDE Hub backend"
+  },
+  "pickerRoutingRegression": {
+    "symptom": "After discovery, cachedModels contains concrete -low/-medium/-high ids while the picker exposes their unified base id; getSession(base) returned undefined before dispatch.",
+    "reproduced": [
+      "gemini-4-argon",
+      "gemini-4-hydrogen"
+    ],
+    "fix": "Recognize unified base ids backed by at least two exact discovered variants; choose only published wire levels.",
+    "liveFullAdapterVerification": {
+      "model": "gemini-4-argon",
+      "text": "OK",
+      "complete": true,
+      "inputTokens": 646,
+      "outputTokens": 5
+    },
+    "hydrogenVerification": {
+      "model": "gemini-4-hydrogen",
+      "effort": "high",
+      "text": "OK",
+      "complete": true,
+      "publishedEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "orchestratorDiscoveredId": "gemini-pro-orchestrator-g1-pro"
+    }
+  }
+}

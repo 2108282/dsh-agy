@@ -5,8 +5,9 @@
  */
 
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
-import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
+import { AGY_ENDPOINT_FALLBACKS } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
+import { buildCloudCodeHeaders } from '../oauth/client.ts'
 import {
   AGY_PUBLIC_MODELS,
   catalogModel,
@@ -17,6 +18,7 @@ import {
   levelThinkingEffortsFor,
   registerDiscoveredTieredModels,
   registerDiscoveredUnifiedThinkingFamily,
+  type ThinkingLevel,
 } from './catalog.ts'
 export { isUnifiedThinkingFamily } from './catalog.ts'
 
@@ -39,21 +41,22 @@ export const AGY_PROVIDER = 'agy'
  * `thinkingBudget: -1` + `minThinkingBudget: 32` for every `*-tiered` model.
  * The three explicit levels remain selectable alongside it.
  */
-const LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
-  efforts: Object.freeze([
-    { id: ReasoningEffortId('low'), name: 'Low' },
-    { id: ReasoningEffortId('medium'), name: 'Medium' },
-    { id: ReasoningEffortId('high'), name: 'High' },
-  ] as const),
-} as const)
+const REASONING_LEVEL_NAMES: Record<ThinkingLevel, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max',
+}
 
-/** Reasoning levels for the Pro family (Low and High only; no Medium tier). */
-const PRO_LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
-  efforts: Object.freeze([
-    { id: ReasoningEffortId('low'), name: 'Low' },
-    { id: ReasoningEffortId('high'), name: 'High' },
-  ] as const),
-} as const)
+function levelReasoningFor(model: string): LlmModelReasoningInfo {
+  return {
+    efforts: levelThinkingEffortsFor(model).map((level) => ({
+      id: ReasoningEffortId(level),
+      name: REASONING_LEVEL_NAMES[level],
+    })),
+  }
+}
 
 /**
  * Input modalities per model. Image support follows the catalog's own
@@ -189,20 +192,22 @@ function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
       hidden.add(retiredId)
     }
   }
-  const splitCounts = new Map<string, number>()
+  const splitLevels = new Map<string, ThinkingLevel[]>()
   for (const id of Object.keys(models)) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
-    if (m && m[1]) {
-      splitCounts.set(m[1], (splitCounts.get(m[1]) ?? 0) + 1)
+    const m = /^(.*)-(low|medium|high|xhigh|max)$/.exec(id)
+    if (m?.[1] && m[2] && isChatCallableModelId(id) && !hidden.has(id)) {
+      const levels = splitLevels.get(m[1]) ?? []
+      levels.push(m[2] as ThinkingLevel)
+      splitLevels.set(m[1], levels)
     }
   }
-  for (const [base, count] of splitCounts.entries()) {
-    if ((count >= 2 || isUnifiedThinkingFamily(base)) && !Object.hasOwn(models, `${base}-tiered`)) {
-      registerDiscoveredUnifiedThinkingFamily(base)
+  for (const [base, levels] of splitLevels) {
+    if ((levels.length >= 2 || isUnifiedThinkingFamily(base)) && !Object.hasOwn(models, `${base}-tiered`)) {
+      registerDiscoveredUnifiedThinkingFamily(base, levels)
     }
   }
   for (const id of Object.keys(models)) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
+    const m = /^(.*)-(?:low|medium|high|xhigh|max)$/.exec(id)
     if (m && m[1]) {
       const base = m[1]
       if (
@@ -229,11 +234,7 @@ export async function fetchAvailableModels(
     try {
       const response = await fetchImpl(`${baseEndpoint}/v1internal:fetchAvailableModels`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'User-Agent': getAgyBootstrapUserAgent(),
-        },
+        headers: buildCloudCodeHeaders(accessToken),
         body: JSON.stringify(body),
       })
       if (response.ok) {
@@ -402,7 +403,7 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   }
   // Ensure unified base models for split thinking families are present
   for (const splitId of Object.keys(dynamic.models ?? {})) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(splitId)
+    const m = /^(.*)-(?:low|medium|high|xhigh|max)$/.exec(splitId)
     if (m && m[1]) {
       const base = m[1]
       if (
@@ -458,19 +459,17 @@ export async function listAgyModels(
 export function resolveAgyModel(provider: string, model: string): LlmResolvedModelInfo {
   const meta = catalogModel(model)
   if (isLevelThinkingModel(model)) {
-    const efforts = levelThinkingEffortsFor(model)
-    const reasoningInfo: LlmModelReasoningInfo = efforts.length === 2
-      ? { ...PRO_LEVEL_REASONING, efforts: [...PRO_LEVEL_REASONING.efforts] }
-      : { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] }
     return {
       provider,
       id: model,
       name: meta?.name ?? model,
       inputModalities: inputModalitiesFor(meta),
-      context: { contextWindow: meta?.contextLength ?? 1048576 },
-      defaultMaxTokens: meta?.maxOutputTokens ?? 65536,
-      // Return a shallow copy so callers cannot mutate the frozen singleton.
-      reasoning: reasoningInfo,
+      ...(meta
+        ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: meta.maxOutputTokens }
+        : !isUnifiedThinkingFamily(model)
+          ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 }
+          : {}),
+      reasoning: levelReasoningFor(model),
     }
   }
   return {

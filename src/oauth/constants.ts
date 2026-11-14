@@ -8,6 +8,7 @@
  */
 
 import { proxiedFetch } from '../proxy.ts'
+import { officialCliUserAgent } from './client.ts'
 import { isProxyRouted } from '../types.ts'
 import type { AccountRouting } from '../types.ts'
 
@@ -37,14 +38,20 @@ export function resolveAgyClientCredentials(overrideClientId?: string): { client
   }
 }
 
-/** Required scopes. `openid` must NOT be added: it routes Google into the hanging
- * `firstparty/nativeapp` consent for this client (verified by OmniRoute). */
+/**
+ * Consumer OAuth scopes. The official CLI 1.5.8 authorization URL includes
+ * `aicode`; leaving it out means signing in again cannot grant that permission.
+ * Keep this plugin's loopback flow without explicit `openid`: the official CLI
+ * also requests it, but uses a different HTTPS callback, so that flow is not
+ * interchangeable with ours. See docs/official-cli-1.5.8.json for the capture.
+ */
 export const AGY_SCOPES: readonly string[] = [
   'https://www.googleapis.com/auth/cloud-platform',
   'https://www.googleapis.com/auth/userinfo.email',
   'https://www.googleapis.com/auth/userinfo.profile',
   'https://www.googleapis.com/auth/cclog',
   'https://www.googleapis.com/auth/experimentsandconfigs',
+  'https://www.googleapis.com/auth/aicode',
 ]
 
 export const OAUTH_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -240,9 +247,9 @@ export function currentAgyVersion(): string {
 }
 
 
-/** Electron-style UA used for bootstrap calls (loadCodeAssist/onboardUser). */
-export function getAgyBootstrapUserAgent(version = currentAgyVersion()): string {
-  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${version} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`
+/** Cloud Code identity is pinned to a captured CLI build, not a Hub feed value. */
+export function getAgyBootstrapUserAgent(_version = currentAgyVersion()): string {
+  return officialCliUserAgent()
 }
 
 /**

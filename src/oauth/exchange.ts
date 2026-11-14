@@ -9,14 +9,13 @@ import { calculateTokenExpiry } from './auth.ts'
 import {
   AGY_ENDPOINT_FALLBACKS,
   AGY_IDE_TYPE,
-  AGY_PLATFORM_ENUM,
   OAUTH_TOKEN_URL,
   OAUTH_USERINFO_URL,
-  currentAgyVersion,
   getAgyBootstrapUserAgent,
   resolveAgyClientCredentials,
 } from './constants.ts'
 import { decodeState } from './pkce.ts'
+import { buildCloudCodeHeaders } from './client.ts'
 import { proxiedFetch } from '../proxy.ts'
 
 const FETCH_TIMEOUT_MS = 10_000
@@ -69,17 +68,13 @@ interface LoadCodeAssistData {
  * `google.internal.cloud.code.v1internal.ClientMetadata` in the official
  * descriptor.
  *
- * The old "send `ideType` only" rule was a misreading of a real measurement: the
- * live `INVALID_ARGUMENT` was on the VALUE `"MACOS"`, which is not in the
- * `Platform` enum (`DARWIN_AMD64 | DARWIN_ARM64 | LINUX_AMD64 | LINUX_ARM64 |
- * WINDOWS_AMD64`). A bad enum value is not a forbidden field. `AGY_PLATFORM_ENUM`
- * carries a valid one.
+ * The official CLI 1.5.8 local capture sends only ideType on this path.
+ * Other fields were historically accepted, but acceptance alone does not make
+ * them part of the captured client contract.
  */
 export function bootstrapMetadata(): Record<string, string> {
   return {
     ideType: AGY_IDE_TYPE,
-    ideVersion: currentAgyVersion(),
-    platform: AGY_PLATFORM_ENUM,
   }
 }
 
@@ -132,11 +127,7 @@ export async function loadCodeAssist(
   options: AgyBootstrapOptions = {},
 ): Promise<{ projectId: string; tierId: string }> {
   const errors: string[] = []
-  const loadHeaders: Record<string, string> = {
-    Authorization: `Bearer ${accessToken}`,
-    'Content-Type': 'application/json',
-    'User-Agent': getAgyBootstrapUserAgent(),
-  }
+  const loadHeaders = buildCloudCodeHeaders(accessToken)
 
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
     try {
@@ -184,11 +175,7 @@ export async function onboardAndDiscoverProject(
   // #9939 ban-safety hardening capped 10x5s to 3x3-7s).
   const maxAttempts = options.maxAttempts ?? 3
   const retryDelayMs = options.retryDelayMs ?? 3000 + Math.floor(Math.random() * 4000)
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${accessToken}`,
-    'Content-Type': 'application/json',
-    'User-Agent': getAgyBootstrapUserAgent(),
-  }
+  const headers = buildCloudCodeHeaders(accessToken)
   const metadata = bootstrapMetadata()
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {

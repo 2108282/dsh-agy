@@ -10,6 +10,7 @@ import { createConnection } from 'node:net'
 import { isProxyRouted } from './types.ts'
 import type { AccountRouting } from './types.ts'
 import { redactCredentials } from './redact.ts'
+import { assertCloudCodeIdentity, isCloudCodeRequest } from './oauth/client.ts'
 
 const envAgent = new EnvHttpProxyAgent()
 
@@ -362,6 +363,10 @@ export const proxiedFetch = async (
   init?: Parameters<typeof fetch>[1] & { proxyUrl?: string },
   opts?: ProxiedFetchOptions,
 ): Promise<Response> => {
+  const targetUrl = getTargetUrlString(input)
+  if (isCloudCodeRequest(targetUrl)) {
+    assertCloudCodeIdentity(init?.headers ?? (typeof input === 'object' && 'headers' in input ? input.headers : undefined))
+  }
   const proxyUrl = (opts as any)?.proxyUrl ?? (init as any)?.proxyUrl
   const streaming = opts?.streaming === true
   // Normalize init without proxyUrl leakage

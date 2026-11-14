@@ -1,3 +1,4 @@
+import { officialCliUserAgent } from '../src/oauth/client.ts'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -2248,13 +2249,13 @@ describe('buildRequestHeaders', () => {
       clientMetadata: { ideType: 'ANTIGRAVITY' },
     })))
 
-    expect(headers.get('user-agent')).toBe('antigravity/2.0.0 darwin/arm64')
+    expect(headers.get('user-agent')).toBe(officialCliUserAgent())
     expect(headers.get('user-agent')).not.toContain('deepseek-harness')
     // A comma-joined pair is the specific shape the old spread produced.
     expect(headers.get('user-agent')).not.toContain(',')
   })
 
-  it('carries the two impersonation headers and nothing invented', () => {
+  it('uses the captured CLI identity without the legacy SDK pool', () => {
     const headers = buildRequestHeaders(session({
       'User-Agent': 'antigravity/2.0.0 darwin/arm64',
       'X-Goog-Api-Client': 'google-cloud-sdk vscode/1.96.0',
@@ -2262,12 +2263,12 @@ describe('buildRequestHeaders', () => {
     }))
 
     expect(headers.authorization).toBe('Bearer at')
-    expect(headers['X-Goog-Api-Client']).toBe('google-cloud-sdk vscode/1.96.0')
+    expect(headers).not.toHaveProperty('X-Goog-Api-Client')
     // Neither of these is an official shape: `Client-Metadata` and
     // `x-goog-request-id` are both absent from BOTH official binaries, and the
     // request id the backend correlates on is the body's `requestId` field.
     expect(Object.keys(headers).sort()).toEqual(
-      ['User-Agent', 'X-Goog-Api-Client', 'accept', 'authorization', 'content-type'],
+      ['User-Agent', 'accept', 'authorization', 'content-type'],
     )
     // The metadata message is not a header and must not be spread as one.
     expect(headers).not.toHaveProperty('clientMetadata')
@@ -3049,7 +3050,7 @@ describe('AgyAdapter', () => {
     for await (const _ of adapter.stream(generateOptions())) void _
 
     expect(seen).toHaveLength(1)
-    expect(seen[0]).toBe(session().impersonation['User-Agent'])
+    expect(seen[0]).toBe(officialCliUserAgent())
     expect(seen[0]).not.toContain('deepseek-harness')
     // The comma-joined pair is the exact shape the old spread produced.
     expect(seen[0]).not.toContain(',')

@@ -45,6 +45,8 @@ redirects a browser to it with a GET.
 
 ## Non-negotiable Invariants (Violations are Regressions; all have test/code anchors)
 
+**2026-11-14 superseding identity contract:** `src/oauth/client.ts` is the Cloud Code wire authority, captured from official CLI 1.5.8; quota/discovery/bootstrap/generation share its pinned version+changelist and no random SDK header, and the proxy validates it before dispatch. `docs/official-cli-1.5.8.json` supersedes historical CLI-1.x/Hub-version/UA claims below; legacy fingerprint and version-feed helpers are not wire authorities. The same-token live comparison restored Argon with the CLI UA while the legacy Electron UA hid it; `aicode` was absent in both.
+
 - **Security (Loopback Trust Model)**:
   - The OAuth callback route has no authentication of its own and answers loopback peers only (`isLoopbackPeer`, `web/plugin.ts` gate); management endpoints ride `/api/*` behind the host's browser-trust fence and BrowserAuth.
   - The web entry builds the full runtime (`createAgyRuntime`) on ANY bind — master key, one-shot migration, ledger and recent ring, version warm-up included — because the management RPC needs it, and that is intended: the bind address was never the defence (see the rule above), so a LAN-bound profile creates the same local state a loopback one does and exposes nothing the fence does not already guard.
